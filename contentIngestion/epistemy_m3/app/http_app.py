@@ -1,0 +1,3066 @@
+"""FastAPI HTTP surface: health, presign, register, read tools, search, graph, questions, delivery, evaluation, dashboard.
+
+TODO(prod): Extract route handlers into domain service classes to improve testability and reduce file size.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional
+
+import jwt
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
+
+from epistemy_m3.config import load_settings
+from epistemy_m3.constants import (
+    MAX_CHUNKS_FOR_GRAPH, MAX_CHUNKS_FOR_GENERATION,
+    MAX_QUESTION_COUNT, MAX_ANSWER_LENGTH, LLM_MAX_TOKENS_GENERATION,
+    LLM_MAX_TOKENS_EVALUATION, DEFAULT_ORG_NAME,
+    EDS_ALPHA, EDS_BETA, EDS_GAMMA,
+)
+from epistemy_m3.models import Role, IngestRequest
+from epistemy_m3.api.service import AuthorizationError
+from epistemy_m3.tools.materials_tools import MaterialsTools
+from epistemy_m3.tools.search_tools import SearchTools
+from epistemy_m3.search.corpus_search import CorpusSearcher
+from epistemy_m3.bedrock_helper import call_bedrock
+from epistemy_m3.app import factory, routes as R
+from epistemy_m3.db.postgres import PostgresRepository
+
+logger = logging.getLogger(__name__)
+
+# ── Authentication ────────────────────────────────────────────────────────────
+
+# Signing key. Falls back to a dev constant so local runs work, but a deployed
+# environment must set EPISTEMY_JWT_SECRET or every token is forgeable by anyone
+# who has read this file.
+_JWT_SECRET = os.environ.get("EPISTEMY_JWT_SECRET", "epistemy-dev-secret-2024")
+_JWT_ALGORITHM = "HS256"
+_JWT_EXPIRY_HOURS = 24
+
+# Reachable without a token: login itself, health, static assets, and the SPA.
+# EventSource cannot set headers, so the SSE stream is exempt here and carries
+# its own session-ownership check inside the handler.
+_PUBLIC_PATH_PREFIXES = (
+    "/api/auth/login", "/health", "/config", "/app", "/static",
+    "/docs", "/openapi.json", "/redoc", "/favicon",
+)
+
+# Hardcoded user list (no database signup needed for MVP)
+_USERS: dict = {
+    "prof1@univ.edu": {"password": "epistemy123", "role": "professor", "name": "Professor One"},
+    "prof2@univ.edu": {"password": "epistemy123", "role": "professor", "name": "Professor Two"},
+}
+# Add students
+for _i in range(1, 21):
+    _USERS[f"student{_i}@univ.edu"] = {"password": "student123", "role": "student", "name": f"Student {_i}"}
+
+
+class _LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+def _create_token(email: str, role: str) -> str:
+    """Mint a signed token carrying the caller's identity, role, and tenant."""
+    payload = {
+        "user_id": email,
+        "role": role,
+        # Tenant name, not the UUID: handlers resolve it the same way headers did,
+        # so the org lookup path is unchanged and only its input becomes trusted.
+        "org_name": DEFAULT_ORG_NAME,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=_JWT_EXPIRY_HOURS),
+    }
+    return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+
+def _decode_token(authorization: str | None) -> dict | None:
+    """Return verified claims, or None when the header is absent or malformed.
+
+    Never raises: the middleware decides what a missing/bad token means per route,
+    so a bad token and no token are handled in one place rather than here.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    try:
+        return jwt.decode(authorization[7:], _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+    except jwt.InvalidTokenError:  # covers expired, wrong signature, malformed
+        return None
+
+
+def _prior_coverage(repo, session_id: str, question_index: int) -> tuple:
+    """Nodes and edge indices already demonstrated on this question's earlier sub-turns."""
+    nodes, edges = set(), set()
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                """SELECT e.eds_components FROM evaluation e
+                   JOIN session_turn st ON st.turn_id = e.turn_id
+                   WHERE st.session_id = %s::uuid AND st.turn_index = %s
+                   ORDER BY st.sub_turn_index""",
+                (session_id, question_index),
+            )
+            for (comp,) in cur.fetchall():
+                if not comp:
+                    continue
+                nodes.update(comp.get("nodes_detected") or [])
+                edges.update(comp.get("edges_demonstrated") or [])
+    except Exception:
+        repo.conn.rollback()  # missing column on an un-migrated DB; treat as no coverage
+    return nodes, edges
+
+
+def _probe_target(expected_path: dict, seen_nodes: set, seen_edges: set) -> str:
+    """Name the next uncovered concept or causal link, as a directive for the prompt.
+
+    Without this the model picks a follow-up freely and tends to re-probe ground the
+    student already covered, so three turns can circle one idea while other parts of
+    the expected path are never examined. Edges are preferred over bare nodes because
+    articulating a mechanism is what the EDS edge weight (0.6) actually rewards.
+    """
+    seen_lower = {n.lower() for n in seen_nodes}
+
+    for i, edge in enumerate(expected_path.get("edges") or []):
+        if i in seen_edges:
+            continue
+        src, dst = edge.get("src", ""), edge.get("dst", "")
+        if not src or not dst:
+            continue
+        # Prefer a link whose endpoints the student has already shown: they have the
+        # pieces, so the gap is the mechanism between them — the productive next step.
+        if src.lower() in seen_lower or dst.lower() in seen_lower:
+            return (f"Probe the causal link from \"{src}\" to \"{dst}\". The student has "
+                    f"not yet explained the mechanism connecting them. Ask about that "
+                    f"mechanism specifically — do not reveal it.")
+
+    for node in expected_path.get("nodes") or []:
+        label = node.get("label", "")
+        if label and label.lower() not in seen_lower:
+            return (f"Probe the concept \"{label}\", which the student has not yet "
+                    f"demonstrated. Ask a question that requires explaining what it "
+                    f"means and why it matters here.")
+
+    for i, edge in enumerate(expected_path.get("edges") or []):
+        if i not in seen_edges and edge.get("src") and edge.get("dst"):
+            return (f"Probe the causal link from \"{edge['src']}\" to \"{edge['dst']}\", "
+                    f"which the student has not yet articulated.")
+
+    extensions = expected_path.get("extensions") or []
+    if extensions and extensions[0].get("label"):
+        return (f"The student has covered the expected path. Probe the extension "
+                f"\"{extensions[0]['label']}\" to test whether they can go further.")
+    return ""
+
+
+def _generate_expected_path(settings, question_text: str, concept_labels: list) -> dict:
+    """Generate expected reasoning path for a question (used for backfill/lazy generation)."""
+    import json as _json
+    system_prompt = (
+        "You are building the expected reasoning path for an oral exam question. "
+        "Given the question and related concepts, produce the causal chain "
+        "a strong student should demonstrate to receive full marks.\n\n"
+        "Return ONLY valid JSON, no prose:\n"
+        '{"nodes": [{"label": "...", "definition": "1-sentence def"}], '
+        '"edges": [{"src": "concept_A", "dst": "concept_B", "link_type": "CAUSES|ENABLES|PREVENTS|INCREASES|DECREASES", "explanation": "the mechanism"}], '
+        '"extensions": [{"label": "...", "connection": "how this goes beyond the base path"}]}'
+    )
+    user_msg = (
+        f"Question: {question_text}\n"
+        f"Related concepts: {', '.join(concept_labels)}\n\n"
+        "Produce the expected reasoning path."
+    )
+    try:
+        return call_bedrock(settings, system_prompt, user_msg, max_tokens=2000, temperature=0.1)
+    except Exception:
+        return {"nodes": [], "edges": [], "extensions": []}
+
+
+def _rebuild_graph_async(settings, org_id: str, course_id: str) -> None:
+    """Rebuild a course's concept graph in a background thread.
+
+    Called after a material is deleted: its concepts would otherwise linger in the
+    active graph forever, since builds are additive and only run on upload. Uses a
+    dedicated connection because the request's pooled one is released before this runs.
+    """
+    import json as _json, threading, uuid as _uuid
+
+    def _work() -> None:
+        conn = None
+        try:
+            conn = factory.db_connection(settings)
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
+                conn.commit()
+                cur.execute(
+                    "SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
+                    (course_id,),
+                )
+                chunks = [r[0] for r in cur.fetchall()]
+
+            if not chunks:
+                # Last material gone: retire the graph. Clear is_stale too — an empty
+                # course has nothing to be out of date with.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE graph_version SET is_active = false, is_stale = false "
+                        "WHERE org_id = %s AND course_id = %s",
+                        (org_id, course_id),
+                    )
+                conn.commit()
+                logger.info("Graph retired for course %s (no chunks remain)", course_id[:8])
+                return
+
+            data = call_bedrock(
+                settings,
+                "You are an expert knowledge graph builder for educational content. "
+                "Given course material, extract key concepts and their relationships. "
+                "Return ONLY valid JSON: "
+                '{"concepts": [{"label": "...", "definition": "...", "abstraction_level": 0.5}], '
+                '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
+                "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
+                "Extract 10-30 concepts. Only return JSON.",
+                f"Domain: general\n\n" + "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH]),
+                max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.1,
+            )
+            concepts = data.get("concepts", [])
+            relations = data.get("relations", [])
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE graph_version SET is_active = false "
+                    "WHERE org_id = %s AND course_id = %s",
+                    (org_id, course_id),
+                )
+                cur.execute(
+                    """INSERT INTO graph_version
+                       (version_id, org_id, course_id, graph_version, node_count,
+                        edge_count, validation_score, is_active, s3_key)
+                       VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
+                    (str(_uuid.uuid4()), org_id, course_id, len(concepts),
+                     len(relations), 0.8,
+                     _json.dumps({"concepts": concepts, "relations": relations})),
+                )
+            conn.commit()
+            logger.info("Graph rebuilt after delete for course %s: %d concepts",
+                        course_id[:8], len(concepts))
+        except Exception as exc:
+            logger.warning("Post-delete graph rebuild failed for course %s: %s",
+                           course_id[:8], exc, exc_info=True)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _is_public(path: str) -> bool:
+    """True when a route may be reached without a verified token."""
+    return path == "/" or path.startswith(_PUBLIC_PATH_PREFIXES)
+
+
+def _install_auth_middleware(app: FastAPI) -> None:
+    """Require a verified token on every non-public route.
+
+    Handlers read identity from x-user-id / x-role / x-org-name. Rather than change
+    31 signatures, this overwrites those headers with the token's claims, so a
+    client-supplied role can no longer reach a handler. Requests are rejected here
+    if the token is missing or invalid, which is what makes the overwrite safe.
+    """
+
+    @app.middleware("http")
+    async def enforce_auth(request, call_next):
+        if request.method == "OPTIONS" or _is_public(request.url.path):
+            return await call_next(request)
+
+        claims = _decode_token(request.headers.get("authorization"))
+        if not claims:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Authentication required. Sign in again."},
+            )
+
+        # Starlette exposes raw headers as a list of lowercase byte pairs; replacing
+        # them here means downstream Header(...) params see only verified values.
+        spoofable = {b"x-user-id", b"x-role", b"x-org-name"}
+        headers = [(k, v) for k, v in request.scope["headers"] if k not in spoofable]
+        headers += [
+            (b"x-user-id", str(claims.get("user_id", "")).encode()),
+            (b"x-role", str(claims.get("role", "student")).encode()),
+            (b"x-org-name", str(claims.get("org_name", DEFAULT_ORG_NAME)).encode()),
+        ]
+        request.scope["headers"] = headers
+        return await call_next(request)
+
+
+def create_app() -> FastAPI:
+    """Build the FastAPI app with all module routes wired to real components."""
+    app = FastAPI(title="Epistemy — Content Ingestion & Assessment Platform")
+
+    # TODO(prod): Restrict allow_origins to the actual school domain(s) and remove
+    # allow_credentials with wildcard origin (browsers block this combination anyway).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    _install_auth_middleware(app)
+
+    settings = load_settings()
+    deps = _lazy_deps(settings)
+    _register_routes(app, deps)
+    _mount_demo(app)
+    return app
+
+
+def _mount_demo(app: FastAPI) -> None:
+    """Serve both the old demo UI and the React frontend."""
+    import pathlib
+    from fastapi.responses import FileResponse
+    static = pathlib.Path(__file__).resolve().parent / "static"
+    frontend = static / "frontend"
+    app.mount("/static", StaticFiles(directory=str(static)), name="static")
+
+    # Serve React frontend at /app and handle SPA routing
+    if frontend.exists():
+        app.mount("/app/assets", StaticFiles(directory=str(frontend / "assets")), name="frontend-assets")
+
+        @app.get("/app/{path:path}")
+        def serve_frontend(path: str = ""):
+            return FileResponse(str(frontend / "index.html"))
+
+        @app.get("/")
+        def root():
+            return RedirectResponse(url="/app/")
+    else:
+        @app.get("/")
+        def root():
+            return RedirectResponse(url="/static/demo.html")
+
+
+def _lazy_deps(settings):
+    """Defer heavy AWS client creation so /health responds even without credentials.
+
+    Uses a ThreadedConnectionPool. Each request acquires its own connection
+    via `_request_repo()` to guarantee tenant isolation (RLS session vars
+    never leak between concurrent requests).
+    """
+    cache: dict = {}
+
+    def deps():
+        if "pool" not in cache:
+            pool = factory.build_pool(settings)
+            storage = factory.build_storage(settings)
+            queue = factory.build_queue(settings)
+            embedder = factory.build_embedder(settings)
+            cache.update(pool=pool, storage=storage, queue=queue,
+                         embedder=embedder, settings=settings)
+        return cache
+    return deps
+
+
+def _request_repo(deps_cache: dict) -> PostgresRepository:
+    """Acquire a connection from the pool and return a fresh repo for this request.
+
+    Caller MUST return the connection via _release_repo() in a finally block.
+    """
+    pool = deps_cache["pool"]
+    conn = factory.get_connection_from_pool(pool)
+    return PostgresRepository(conn)
+
+
+def _release_repo(deps_cache: dict, repo: PostgresRepository) -> None:
+    """Return the repo's connection back to the pool."""
+    pool = deps_cache["pool"]
+    try:
+        factory.return_connection_to_pool(pool, repo.conn)
+    except Exception:
+        pass
+
+
+def _register_routes(app: FastAPI, deps) -> None:
+    """Attach all module endpoints."""
+    _register_auth(app)
+    _register_health(app, deps)
+    _register_materials(app, deps)
+    _register_reads(app, deps)
+    _register_search(app, deps)
+    _register_dashboard(app, deps)
+    _register_student_dashboard(app, deps)
+    _register_graph(app, deps)
+    _register_questions(app, deps)
+    _register_delivery(app, deps)
+    _register_evaluation(app, deps)
+    _register_delete_endpoints(app, deps)
+
+
+def _register_auth(app: FastAPI) -> None:
+    """POST /api/auth/login -- validates credentials, returns JWT."""
+
+    @app.post("/api/auth/login")
+    def login(req: _LoginRequest):
+        user = _USERS.get(req.email)
+        if not user or user["password"] != req.password:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        token = _create_token(req.email, user["role"])
+        return {
+            "token": token,
+            "user": {
+                "id": req.email,
+                "email": req.email,
+                "role": user["role"],
+                "name": user["name"],
+            },
+        }
+
+
+def _register_health(app: FastAPI, deps) -> None:
+    @app.get(R.HEALTH)
+    def health():
+        """Deep health check: verifies DB connectivity. Returns 503 if DB is down."""
+        try:
+            d = deps()
+            pool = d["pool"]
+            conn = factory.get_connection_from_pool(pool)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                return {"status": "ok"}
+            finally:
+                factory.return_connection_to_pool(pool, conn)
+        except Exception as exc:
+            logger.warning("Health check failed: %s", exc)
+            raise HTTPException(status_code=503, detail="database unavailable")
+
+    @app.get("/config")
+    def config():
+        return R.frontend_config()
+
+
+def _register_materials(app: FastAPI, deps) -> None:
+    """Name-based presign and register: the UI sends org_name/course_name."""
+
+    # TODO(prod): Replace header-based auth with JWT validation (Cognito ID token)
+    # before production deployment.
+
+    @app.post(R.PRESIGN)
+    def presign(req: IngestRequest, x_user_id: str = Header("operator"),
+                x_role: str = Header("professor")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                return api.presign_by_name(x_user_id, x_role, req)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.REGISTER)
+    def register(version_id: str, x_org_name: str = Header(...),
+                 x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                return api.register_by_name(x_user_id, x_role, x_org_name, version_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+def _register_reads(app: FastAPI, deps) -> None:
+    """Name-based read routes so a tester can observe status by names."""
+    _register_list_materials(app, deps)
+    _register_list_versions(app, deps)
+
+
+def _register_list_materials(app: FastAPI, deps) -> None:
+    @app.get(R.LIST_MATERIALS)
+    def list_materials(org_name: str, course_name: str,
+                       x_user_id: str = Header("operator"),
+                       x_role: str = Header("professor")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, org_name)
+                course_id = api.resolve_course_id(org_name, course_name)
+                tools = MaterialsTools(repo, api, lambda c, cid: True)
+                return tools.list_materials(caller, course_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+def _register_list_versions(app: FastAPI, deps) -> None:
+    @app.get(R.LIST_VERSIONS)
+    def list_versions(material_id: str, x_org_name: str = Header(...),
+                      x_user_id: str = Header("operator"),
+                      x_role: str = Header("professor")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                tools = MaterialsTools(repo, api, lambda c, cid: True)
+                return tools.list_material_versions(caller, material_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+class SearchRequest(BaseModel):
+    """POST body for /courses/{course_id}/search."""
+
+    query: str = Field(..., min_length=1, max_length=500)
+    k: int = Field(default=10, ge=1, le=50)
+    material_version_ids: Optional[List[str]] = None
+
+
+def _register_search(app: FastAPI, deps) -> None:
+    """POST /courses/{course_id}/search -- vector retrieval over chunks."""
+
+    @app.post(R.SEARCH_CORPUS)
+    def search_corpus(course_id: str, req: SearchRequest,
+                      x_org_name: str = Header(...),
+                      x_user_id: str = Header("operator"),
+                      x_role: str = Header("student")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                searcher = CorpusSearcher(repo.conn, d["embedder"])
+                search_tools = SearchTools(searcher, lambda c, cid: True)
+                return search_tools.search_corpus(
+                    caller=caller,
+                    course_id=course_id,
+                    query=req.query,
+                    k=req.k,
+                    material_version_ids=req.material_version_ids,
+                )
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+# ── Dashboard (Professor) ────────────────────────────────────────────────────
+
+def _register_dashboard(app: FastAPI, deps) -> None:
+    """Dashboard endpoints using existing M3 tables (material, material_version)."""
+
+    @app.get(R.PROFESSOR_DASHBOARD)
+    def professor_dashboard(
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                courses = _query_courses(repo, caller.org_id)
+                recent_uploads = _query_recent_uploads(repo, caller.org_id)
+                active_assignments = _query_active_assignments(repo, caller.org_id)
+
+                return {
+                    "courses": courses,
+                    "recent_uploads": recent_uploads,
+                    "active_assignments": active_assignments,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.PROFESSOR_COURSES)
+    def professor_courses(
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                return _query_courses(repo, caller.org_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+def _query_courses(repo, org_id: str) -> list:
+    """Get distinct courses from the course table for this org."""
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            "SELECT course_id, course_name FROM course WHERE org_id = %s ORDER BY course_name",
+            (org_id,),
+        )
+        rows = cur.fetchall()
+    return [{"course_id": str(r[0]), "course_name": r[1]} for r in rows]
+
+
+def _query_recent_uploads(repo, org_id: str) -> list:
+    """Get last 10 material_versions for this org."""
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """SELECT mv.material_version_id, mv.file_name, mv.status,
+                      mv.created_at, m.display_name, c.course_name
+               FROM material_version mv
+               JOIN material m ON m.material_id = mv.material_id
+               JOIN course c ON c.course_id = mv.course_id
+               WHERE mv.org_id = %s
+               ORDER BY mv.created_at DESC
+               LIMIT 10""",
+            (org_id,),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "material_version_id": str(r[0]),
+            "file_name": r[1],
+            "status": r[2],
+            "created_at": r[3].isoformat() if r[3] else None,
+            "display_name": r[4],
+            "course_name": r[5],
+        }
+        for r in rows
+    ]
+
+
+def _query_active_assignments(repo, org_id: str) -> list:
+    """Get active assignments for this org."""
+    import psycopg2
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                """SELECT a.assignment_id, a.title, a.status, a.created_at, c.course_name
+                   FROM assignment a
+                   JOIN course c ON c.course_id = a.course_id
+                   WHERE a.org_id = %s AND a.status = 'active'
+                   ORDER BY a.created_at DESC""",
+                (org_id,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "assignment_id": str(r[0]),
+                "title": r[1],
+                "status": r[2],
+                "created_at": r[3].isoformat() if r[3] else None,
+                "course_name": r[4],
+            }
+            for r in rows
+        ]
+    except psycopg2.ProgrammingError:
+        # Table may not exist yet in early migrations; degrade gracefully
+        logger.warning("assignment table not found for org %s — migration pending", org_id)
+        repo.conn.rollback()
+        return []
+
+
+# ── Student Dashboard ──────────────────────────────────────────────────────
+
+
+def _register_student_dashboard(app: FastAPI, deps) -> None:
+    """Student dashboard: all courses + active assignments in the org."""
+
+    @app.get(R.STUDENT_DASHBOARD)
+    def student_dashboard(
+        x_org_name: str = Header(DEFAULT_ORG_NAME),
+        x_user_id: str = Header("student"),
+        x_role: str = Header("student"),
+    ):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                courses = _query_courses(repo, caller.org_id)
+                assignments = _query_student_assignments(repo, caller.org_id)
+
+                return {
+                    "courses": courses,
+                    "assignments": assignments,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+def _query_student_assignments(repo, org_id: str) -> list:
+    """Get all active assignments for the org with course names."""
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """SELECT a.assignment_id, a.title, a.status, a.config,
+                      a.created_at, c.course_name
+               FROM assignment a
+               JOIN course c ON c.course_id = a.course_id
+               WHERE a.org_id = %s AND a.status = 'active'
+               ORDER BY a.created_at DESC""",
+            (org_id,),
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "id": str(r[0]),
+            "title": r[1],
+            "status": r[2],
+            "config": r[3] if isinstance(r[3], dict) else {},
+            "created_at": r[4].isoformat() if r[4] else None,
+            "course_name": r[5],
+            "questions_count": (r[3] or {}).get("max_questions") if isinstance(r[3], dict) else None,
+        }
+        for r in rows
+    ]
+
+
+# ── M4 Graph ─────────────────────────────────────────────────────────────────
+
+class GraphRebuildRequest(BaseModel):
+    """POST body for graph rebuild."""
+    domain: str = Field(..., min_length=1, max_length=200)
+    rebuild: bool = False
+
+
+def _register_graph(app: FastAPI, deps) -> None:
+    """Graph endpoints — lightweight queries against graph_version + chunks."""
+
+    @app.get(R.GRAPH_GET)
+    def get_graph(
+        course_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                graph_info = _query_graph_version(repo, caller.org_id, course_id)
+                return graph_info
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.GRAPH_REBUILD)
+    def rebuild_graph(
+        course_id: str,
+        req: GraphRebuildRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Synchronous graph build — calls Bedrock and stores result directly."""
+        import json as _json, uuid as _uuid
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+
+                repo.set_tenant(caller.org_id)
+                settings = d["settings"]
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
+                        (course_id,),
+                    )
+                    chunks = [row[0] for row in cur.fetchall()]
+
+                if not chunks:
+                    return {"status": "error", "message": "No chunks found for course. Upload material first."}
+
+                combined = "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH])
+                system_prompt = (
+                    "You are an expert knowledge graph builder for educational content. "
+                    "Given course material, extract key concepts and their relationships. "
+                    "Return ONLY valid JSON: "
+                    '{"concepts": [{"label": "...", "definition": "...", "abstraction_level": 0.5}], '
+                    '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
+                    "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
+                    "Extract 10-30 concepts. Only return JSON."
+                )
+                data = call_bedrock(
+                    settings, system_prompt,
+                    f"Domain: {req.domain}\n\n{combined}",
+                    max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.1,
+                )
+                concepts = data.get("concepts", [])
+                relations = data.get("relations", [])
+
+                version_id = str(_uuid.uuid4())
+                # s3_key column repurposed to store graph JSON inline (no S3 for MVP)
+                graph_json = _json.dumps({"concepts": concepts, "relations": relations})
+                with repo.conn.cursor() as cur:
+                    # Deactivate old versions so only one graph is active per course
+                    cur.execute(
+                        "UPDATE graph_version SET is_active = false WHERE org_id = %s AND course_id = %s",
+                        (caller.org_id, course_id),
+                    )
+                    cur.execute(
+                        """INSERT INTO graph_version
+                           (version_id, org_id, course_id, graph_version, node_count, edge_count,
+                            validation_score, is_active, s3_key)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
+                        (version_id, caller.org_id, course_id, len(concepts), len(relations),
+                         0.8, graph_json),
+                    )
+                repo.conn.commit()
+
+                return {
+                    "status": "completed",
+                    "node_count": len(concepts),
+                    "edge_count": len(relations),
+                    "concepts": concepts,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.GRAPH_NEIGHBORS)
+    def get_neighbors(
+        concept_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        return {"concept_id": concept_id, "neighbors": []}
+
+
+def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
+    """Query graph_version table for the active graph; fallback if table doesn't exist."""
+    import json as _json
+    import psycopg2
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                """SELECT version_id, graph_version, node_count, edge_count,
+                          validation_score, s3_key, created_at,
+                          COALESCE(is_stale, false)
+                   FROM graph_version
+                   WHERE org_id = %s AND course_id = %s AND is_active = true
+                   LIMIT 1""",
+                (org_id, course_id),
+            )
+            row = cur.fetchone()
+        if row:
+            # s3_key column holds inline JSON (not a real S3 path) for MVP
+            graph_data = {}
+            try:
+                graph_data = _json.loads(row[5]) if row[5] and row[5].startswith("{") else {}
+            except (ValueError, TypeError):
+                pass
+            return {
+                "status": "ready",
+                "version_id": str(row[0]),
+                "graph_version": row[1],
+                "node_count": row[2] or 0,
+                "edge_count": row[3] or 0,
+                "validation_score": float(row[4]) if row[4] else 0.0,
+                "created_at": row[6].isoformat() if row[6] else None,
+                "is_stale": bool(row[7]),
+                "concepts": graph_data.get("concepts", []),
+                "edges": graph_data.get("relations", []),
+            }
+    except psycopg2.ProgrammingError:
+        # Table may not exist yet in early migrations
+        logger.warning("graph_version table not found — migration pending")
+        repo.conn.rollback()
+
+    # No graph built yet — return empty state
+    return {
+        "status": "empty",
+        "node_count": 0,
+        "edge_count": 0,
+        "concepts": [],
+        "edges": [],
+    }
+
+
+# ── M5 Questions ─────────────────────────────────────────────────────────────
+
+class UpdateQuestionRequest(BaseModel):
+    """PUT body for updating a question's text and/or points."""
+    text: Optional[str] = Field(default=None, min_length=1, max_length=5000)
+    points: Optional[int] = Field(default=None, ge=1, le=10)
+
+
+class GenerateQuestionsRequest(BaseModel):
+    """POST body for question generation."""
+    concept_ids: Optional[List[str]] = None
+    material_version_ids: Optional[List[str]] = None
+    count: int = Field(default=5, ge=1, le=MAX_QUESTION_COUNT)
+    difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
+    domain: str = Field(default="general", min_length=1, max_length=200)
+
+
+def _register_questions(app: FastAPI, deps) -> None:
+    """Question generation (direct Bedrock Converse) and review endpoints."""
+
+    @app.post(R.QUESTIONS_GENERATE)
+    def generate_questions(
+        course_id: str,
+        req: GenerateQuestionsRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Synchronous question generation via Qwen3 32B on Bedrock Converse."""
+        import json as _json, uuid as _uuid
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+
+                repo.set_tenant(caller.org_id)
+                settings = d["settings"]
+
+                graph_data = _query_graph_version(repo, caller.org_id, course_id)
+                concepts = graph_data.get("concepts", [])
+
+                if req.concept_ids and concepts:
+                    concept_set = set(req.concept_ids)
+                    concepts = [c for c in concepts if c.get("label") in concept_set
+                                or c.get("node_id") in concept_set]
+
+                with repo.conn.cursor() as cur:
+                    if req.material_version_ids:
+                        # Cast the array: the ids arrive as strings and the column is uuid.
+                        cur.execute(
+                            "SELECT text FROM chunk WHERE course_id = %s "
+                            "AND material_version_id = ANY(%s::uuid[]) ORDER BY chunk_index",
+                            (course_id, [str(v) for v in req.material_version_ids]),
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
+                            (course_id,),
+                        )
+                    chunks = [row[0] for row in cur.fetchall()]
+
+                if not chunks and not concepts:
+                    return {"status": "error",
+                            "message": "No course material or concepts found. Upload material and build the graph first."}
+
+                concept_descriptions = ""
+                if concepts:
+                    concept_descriptions = "\n".join(
+                        f"- {c.get('label', 'unknown')}"
+                        + (f" ({c.get('definition', '')})" if c.get('definition') else "")
+                        for c in concepts
+                    )
+
+                combined_chunks = "\n\n---\n\n".join(chunks[:MAX_CHUNKS_FOR_GENERATION])
+
+                difficulty_guidance = {
+                    "recall": (
+                        "Generate questions focused on definitional accuracy and formula recall. "
+                        "Questions should verify the student can correctly state key definitions, "
+                        "identify components, and reproduce fundamental relationships."
+                    ),
+                    "balanced": (
+                        "Generate questions that mix recall with causal reasoning. "
+                        "Some questions should verify definitions, while others should require "
+                        "the student to explain WHY something works, trace mechanisms, or "
+                        "connect prerequisite concepts to their consequences."
+                    ),
+                    "deep": (
+                        "Generate questions that probe deep causal understanding and high-hop "
+                        "prerequisite chains. Questions should require the student to trace "
+                        "multi-step causal mechanisms, synthesize across concepts, explain "
+                        "trade-offs, and articulate why specific assumptions break down. "
+                        "Never ask for simple definitions."
+                    ),
+                }.get(req.difficulty, "Generate questions that mix recall with causal reasoning.")
+
+                system_prompt = (
+                    "You are an expert Socratic oral examiner designing assessment questions "
+                    "for university-level courses. Your questions must probe EPISTEMIC DEPTH — "
+                    "they test whether a student truly understands causal mechanisms, not just "
+                    "whether they can parrot definitions.\n\n"
+                    "Design principles:\n"
+                    "- Prefer 'explain why' and 'trace how' over 'define' or 'list'\n"
+                    "- Questions should require articulating causal chains and mechanisms\n"
+                    "- Each question should be standalone and clearly worded\n"
+                    "- Questions should be answerable from the provided source material\n"
+                    "- Frame questions as an oral examiner would ask them — direct, probing, "
+                    "concise (1-2 sentences)\n"
+                    "- Never ask trivial yes/no questions\n"
+                    "- Target specific concept clusters from the knowledge graph\n\n"
+                    f"Difficulty focus: {difficulty_guidance}\n\n"
+                    "Return ONLY valid JSON. No markdown fences, no prose outside the JSON."
+                )
+
+                user_prompt = (
+                    f"Domain: {req.domain}\n"
+                    f"Difficulty: {req.difficulty}\n"
+                    f"Number of questions to generate: {req.count}\n\n"
+                )
+
+                if concept_descriptions:
+                    user_prompt += f"Concept graph (topics to examine):\n{concept_descriptions}\n\n"
+
+                if combined_chunks:
+                    user_prompt += f"Source material:\n{combined_chunks}\n\n"
+
+                user_prompt += (
+                    f"Generate exactly {req.count} oral exam questions. "
+                    "For each question, return a JSON object with:\n"
+                    '- "topic": the concept/topic this question targets (short label, 2-5 words)\n'
+                    '- "question": the actual question text (1-2 sentences, Socratic style)\n'
+                    '- "difficulty": one of "recall", "balanced", or "deep"\n'
+                    '- "concept_ids": list of concept labels this question covers\n'
+                    '- "expected_path": the expected reasoning path a strong student should demonstrate:\n'
+                    '  {"nodes": [{"label": "concept name", "definition": "1-sentence definition"}] '
+                    "-- the key concepts that must be DEMONSTRATED with understanding (not just named),\n"
+                    '  "edges": [{"src": "concept_A", "dst": "concept_B", '
+                    '"link_type": "CAUSES|ENABLES|PREVENTS|INCREASES|DECREASES", '
+                    '"explanation": "1 sentence explaining the causal mechanism"}] '
+                    "-- the causal links between concepts that must be ARTICULATED,\n"
+                    '  "extensions": [{"label": "concept", "connection": "how this extends beyond the base expected path"}] '
+                    "-- 1-3 bonus concepts for students who go deeper}\n\n"
+                    'Return format: {"questions": [...]}'
+                )
+
+                data = call_bedrock(
+                    settings, system_prompt, user_prompt,
+                    max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.3,
+                )
+                questions_raw = data.get("questions", data if isinstance(data, list) else [])
+
+                # Batch insert: collect all valid questions, then insert in one executemany call
+                stored_questions = []
+                insert_params = []
+                for q in questions_raw:
+                    if not isinstance(q, dict) or not q.get("question"):
+                        continue
+                    question_id = str(_uuid.uuid4())
+                    topic = q.get("topic", "general")
+                    text = q["question"]
+                    diff = q.get("difficulty", req.difficulty)
+                    concept_ids = q.get("concept_ids", [topic])
+                    expected_path = q.get("expected_path", {})
+
+                    difficulty_json = _json.dumps({
+                        "level": diff,
+                        "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(diff, 0.55),
+                    })
+
+                    insert_params.append((
+                        question_id, course_id, caller.org_id,
+                        _json.dumps(concept_ids), text,
+                        "oral", difficulty_json, caller.user_id,
+                        _json.dumps(expected_path),
+                    ))
+
+                    stored_questions.append({
+                        "question_id": question_id,
+                        "topic": topic,
+                        "question": text,
+                        "difficulty": diff,
+                        "concept_ids": concept_ids,
+                        "expected_path": expected_path,
+                        "status": "draft",
+                    })
+
+                if insert_params:
+                    with repo.conn.cursor() as cur:
+                        # Try inserting with expected_path column first
+                        try:
+                            cur.executemany(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks,
+                                    expected_path)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           %s, %s::jsonb, 'draft', %s, '[]'::jsonb,
+                                           %s::jsonb)""",
+                                insert_params,
+                            )
+                        except Exception:
+                            # Column may not exist yet — fall back to INSERT without expected_path
+                            repo.conn.rollback()
+                            fallback_params = [p[:-1] for p in insert_params]
+                            with repo.conn.cursor() as cur2:
+                                cur2.executemany(
+                                    """INSERT INTO question
+                                       (question_id, course_id, org_id, concept_ids, text,
+                                        question_type, difficulty, status, created_by, source_chunks)
+                                       VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                               %s, %s::jsonb, 'draft', %s, '[]'::jsonb)""",
+                                    fallback_params,
+                                )
+
+                repo.conn.commit()
+
+                return {
+                    "status": "completed",
+                    "generated_count": len(stored_questions),
+                    "questions": stored_questions,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.QUESTIONS_LIST)
+    def list_questions(
+        course_id: str,
+        status: Optional[str] = None,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """List all questions for a course, optionally filtered by status."""
+        import json as _json
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+
+                repo.set_tenant(caller.org_id)
+
+                # Check if points column exists
+                has_points = False
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT 1 FROM information_schema.columns
+                           WHERE table_name = 'question' AND column_name = 'points'"""
+                    )
+                    has_points = cur.fetchone() is not None
+
+                points_col = ", points" if has_points else ""
+                sql = f"""SELECT question_id, course_id, concept_ids, text,
+                                question_type, difficulty, status, created_by, created_at{points_col}
+                         FROM question
+                         WHERE course_id = %s"""
+                params = [course_id]
+
+                if status:
+                    sql += " AND status = %s"
+                    params.append(status)
+
+                sql += " ORDER BY created_at DESC"
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    rows = cur.fetchall()
+
+                questions = []
+                for r in rows:
+                    diff_data = r[5] if isinstance(r[5], dict) else _json.loads(r[5]) if r[5] else {}
+                    q_data = {
+                        "question_id": str(r[0]),
+                        "course_id": str(r[1]),
+                        "concept_ids": r[2] if isinstance(r[2], list) else _json.loads(r[2]) if r[2] else [],
+                        "text": r[3],
+                        "question_type": r[4],
+                        "difficulty": diff_data.get("level", "balanced"),
+                        "status": r[6],
+                        "created_by": r[7],
+                        "created_at": r[8].isoformat() if r[8] else None,
+                        "points": r[9] if has_points and len(r) > 9 else 1,
+                    }
+                    questions.append(q_data)
+
+                return {"questions": questions, "total": len(questions)}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.QUESTION_GET)
+    def get_question(
+        question_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Retrieve a single question by ID."""
+        import json as _json
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT question_id, course_id, concept_ids, text,
+                                  question_type, difficulty, status, created_by, created_at
+                           FROM question WHERE question_id = %s""",
+                        (question_id,),
+                    )
+                    row = cur.fetchone()
+
+                if not row:
+                    raise AuthorizationError("question not found")
+
+                diff_data = row[5] if isinstance(row[5], dict) else _json.loads(row[5]) if row[5] else {}
+                return {
+                    "question_id": str(row[0]),
+                    "course_id": str(row[1]),
+                    "concept_ids": row[2] if isinstance(row[2], list) else _json.loads(row[2]) if row[2] else [],
+                    "text": row[3],
+                    "question_type": row[4],
+                    "difficulty": diff_data.get("level", "balanced"),
+                    "status": row[6],
+                    "created_by": row[7],
+                    "created_at": row[8].isoformat() if row[8] else None,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.put(R.QUESTION_UPDATE)
+    def update_question(
+        question_id: str,
+        req: UpdateQuestionRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Update question text and/or points. Professor only. Only draft/approved questions."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM question WHERE question_id = %s",
+                        (question_id,),
+                    )
+                    row = cur.fetchone()
+
+                if not row:
+                    raise AuthorizationError("question not found")
+                if row[0] == "rejected":
+                    raise AuthorizationError("cannot edit a rejected question")
+
+                # Ensure points column exists (safe to run multiple times)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """DO $$ BEGIN
+                            ALTER TABLE question ADD COLUMN points INTEGER DEFAULT 1;
+                        EXCEPTION WHEN duplicate_column THEN NULL;
+                        END $$;"""
+                    )
+
+                # Build dynamic UPDATE
+                updates = []
+                params = []
+                if req.text is not None:
+                    updates.append("text = %s")
+                    params.append(req.text)
+                if req.points is not None:
+                    updates.append("points = %s")
+                    params.append(req.points)
+
+                if not updates:
+                    return {"question_id": question_id, "status": "no_changes"}
+
+                updates.append("updated_at = NOW()")
+                params.append(question_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE question SET {', '.join(updates)} WHERE question_id = %s",
+                        params,
+                    )
+                repo.conn.commit()
+
+                return {"question_id": question_id, "status": "updated",
+                        "text": req.text, "points": req.points}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.QUESTION_APPROVE)
+    def approve_question(
+        question_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Approve a draft question for use in assignments. Professor only."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM question WHERE question_id = %s",
+                        (question_id,),
+                    )
+                    row = cur.fetchone()
+
+                if not row:
+                    raise AuthorizationError("question not found")
+                if row[0] != "draft":
+                    raise AuthorizationError(f"cannot approve question in status '{row[0]}'")
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE question SET status = 'approved', updated_at = NOW() WHERE question_id = %s",
+                        (question_id,),
+                    )
+                repo.conn.commit()
+
+                return {"question_id": question_id, "status": "approved"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.QUESTION_REJECT)
+    def reject_question(
+        question_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Reject a draft question. Professor only."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT status FROM question WHERE question_id = %s",
+                        (question_id,),
+                    )
+                    row = cur.fetchone()
+
+                if not row:
+                    raise AuthorizationError("question not found")
+                if row[0] != "draft":
+                    raise AuthorizationError(f"cannot reject question in status '{row[0]}'")
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE question SET status = 'rejected', updated_at = NOW() WHERE question_id = %s",
+                        (question_id,),
+                    )
+                repo.conn.commit()
+
+                return {"question_id": question_id, "status": "rejected"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+# ── M6 Delivery ──────────────────────────────────────────────────────────────
+
+class CreateAssignmentRequest(BaseModel):
+    """POST body for creating an assignment."""
+    title: str = Field(..., min_length=1, max_length=500)
+    question_ids: List[str] = Field(..., min_length=1, max_length=200)
+    config: Optional[dict] = None
+
+
+class SubmitAnswerRequest(BaseModel):
+    """POST body for submitting an answer."""
+    question_index: int = Field(..., ge=0)
+    answer_text: str = Field(..., min_length=1, max_length=MAX_ANSWER_LENGTH)
+
+
+def _register_delivery(app: FastAPI, deps) -> None:
+    """Assignment creation, exam start, answer submission, and session status.
+
+    All endpoints implement real DB operations and Bedrock-based Socratic
+    evaluation (no stubs).
+    """
+    import json as _json, uuid as _uuid
+    from datetime import datetime, timezone
+
+    # ── POST /api/courses/{course_id}/assignments ─────────────────────────
+    @app.post(R.ASSIGNMENTS_LIST)
+    def create_assignment(
+        course_id: str,
+        req: CreateAssignmentRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Create an assignment with an inline list of question_ids."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                question_ids = req.question_ids
+                if not question_ids:
+                    raise AuthorizationError("question_ids must not be empty")
+
+                with repo.conn.cursor() as cur:
+                    placeholders = ",".join(["%s"] * len(question_ids))
+                    cur.execute(
+                        f"SELECT question_id, text, concept_ids FROM question "
+                        f"WHERE question_id::text IN ({placeholders}) AND course_id = %s::uuid",
+                        (*question_ids, course_id),
+                    )
+                    found = cur.fetchall()
+
+                if len(found) != len(question_ids):
+                    found_ids = {str(r[0]) for r in found}
+                    missing = [qid for qid in question_ids if qid not in found_ids]
+                    raise AuthorizationError(
+                        f"questions not found in this course: {missing[:5]}"
+                    )
+
+                qs_id = str(_uuid.uuid4())
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO question_set (question_set_id, course_id, org_id, title, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s)""",
+                        (qs_id, course_id, caller.org_id, req.title, caller.user_id),
+                    )
+                    for idx, qid in enumerate(question_ids):
+                        cur.execute(
+                            """INSERT INTO question_set_membership
+                               (question_set_id, question_id, org_id, position)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s)""",
+                            (qs_id, qid, caller.org_id, idx),
+                        )
+
+                config_raw = req.config or {}
+                db_config = {
+                    "adaptive": config_raw.get("adaptive", True),
+                    "max_questions": len(question_ids),
+                    "time_limit_minutes": config_raw.get("duration_minutes"),
+                    "difficulty": config_raw.get("difficulty", "balanced"),
+                    "shuffle_questions": config_raw.get("shuffle_questions", False),
+                }
+
+                assignment_id = str(_uuid.uuid4())
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO assignment
+                           (assignment_id, course_id, org_id, title, question_set_id, config,
+                            status, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s::uuid, %s::jsonb,
+                                   'active', %s)
+                           RETURNING assignment_id, created_at""",
+                        (assignment_id, course_id, caller.org_id, req.title,
+                         qs_id, _json.dumps(db_config), caller.user_id),
+                    )
+                    row = cur.fetchone()
+                repo.conn.commit()
+
+                return {
+                    "assignment_id": str(row[0]),
+                    "course_id": course_id,
+                    "title": req.title,
+                    "question_set_id": qs_id,
+                    "question_ids": question_ids,
+                    "config": db_config,
+                    "status": "active",
+                    "created_by": caller.user_id,
+                    "created_at": row[1].isoformat() if row[1] else None,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/courses/{course_id}/assignments ──────────────────────────
+    @app.get(R.ASSIGNMENTS_LIST)
+    def list_assignments(
+        course_id: str,
+        status: Optional[str] = None,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                query = """SELECT assignment_id, title, question_set_id, config,
+                                  status, created_by, created_at
+                           FROM assignment
+                           WHERE course_id = %s::uuid AND org_id = %s::uuid"""
+                params: list = [course_id, caller.org_id]
+                if status:
+                    query += " AND status = %s"
+                    params.append(status)
+                query += " ORDER BY created_at DESC"
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(query, params)
+                    rows = cur.fetchall()
+
+                return [
+                    {
+                        "assignment_id": str(r[0]),
+                        "course_id": course_id,
+                        "title": r[1],
+                        "question_set_id": str(r[2]),
+                        "config": r[3],
+                        "status": r[4],
+                        "created_by": r[5],
+                        "created_at": r[6].isoformat() if r[6] else None,
+                    }
+                    for r in rows
+                ]
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/assignments/{assignment_id} ──────────────────────────────
+    @app.get(R.ASSIGNMENT_GET)
+    def get_assignment(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT assignment_id, course_id, title, question_set_id,
+                                  config, status, created_by, created_at
+                           FROM assignment WHERE assignment_id = %s::uuid""",
+                        (assignment_id,),
+                    )
+                    row = cur.fetchone()
+
+                if not row:
+                    raise AuthorizationError("assignment not found")
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT question_id FROM question_set_membership
+                           WHERE question_set_id = %s::uuid ORDER BY position""",
+                        (str(row[3]),),
+                    )
+                    qids = [str(r[0]) for r in cur.fetchall()]
+
+                return {
+                    "assignment_id": str(row[0]),
+                    "course_id": str(row[1]),
+                    "title": row[2],
+                    "question_set_id": str(row[3]),
+                    "question_ids": qids,
+                    "config": row[4],
+                    "status": row[5],
+                    "created_by": row[6],
+                    "created_at": row[7].isoformat() if row[7] else None,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/assignments/{assignment_id}/sessions ──────────────────────
+    @app.get(R.ASSIGNMENT_SESSIONS)
+    def list_assignment_sessions(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """List all exam sessions for an assignment (professor only)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT assignment_id FROM assignment
+                           WHERE assignment_id = %s::uuid AND org_id = %s::uuid""",
+                        (assignment_id, caller.org_id),
+                    )
+                    if not cur.fetchone():
+                        raise AuthorizationError("assignment not found")
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT es.session_id, es.student_id, es.status,
+                                  es.current_turn_index, es.completed_at,
+                                  g.final_score
+                           FROM exam_session es
+                           LEFT JOIN grade g ON g.session_id = es.session_id
+                           WHERE es.assignment_id = %s::uuid
+                           ORDER BY es.started_at DESC""",
+                        (assignment_id,),
+                    )
+                    rows = cur.fetchall()
+
+                sessions = []
+                for r in rows:
+                    overall_eds = round(float(r[5]) * 100, 1) if r[5] is not None else None
+                    sessions.append({
+                        "session_id": str(r[0]),
+                        "student_id": r[1],
+                        "student_email": r[1],
+                        "status": r[2],
+                        "current_turn_index": r[3],
+                        "overall_eds": overall_eds,
+                        "completed_at": r[4].isoformat() if r[4] else None,
+                    })
+
+                return sessions
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/assignments/{assignment_id}/close ────────────────────────
+    @app.post(R.ASSIGNMENT_CLOSE)
+    def close_assignment(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Professor closes an assignment — no new sessions can be started."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE assignment SET status = 'closed' WHERE assignment_id = %s::uuid AND org_id = %s::uuid RETURNING assignment_id",
+                        (assignment_id, caller.org_id),
+                    )
+                    row = cur.fetchone()
+                repo.conn.commit()
+
+                if not row:
+                    raise AuthorizationError("assignment not found")
+                return {"assignment_id": str(row[0]), "status": "closed"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/assignments/{assignment_id}/start ───────────────────────
+    @app.post(R.ASSIGNMENT_START)
+    def start_exam(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Start an exam session: creates session row, returns questions.
+
+        Uses INSERT ... ON CONFLICT DO NOTHING to prevent duplicate active
+        sessions from concurrent requests (race condition fix).
+        """
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT assignment_id, course_id, question_set_id, config, status
+                           FROM assignment WHERE assignment_id = %s::uuid""",
+                        (assignment_id,),
+                    )
+                    arow = cur.fetchone()
+
+                if not arow:
+                    raise AuthorizationError("assignment not found")
+                if arow[4] != "active":
+                    raise AuthorizationError(f"assignment is not active (status: {arow[4]})")
+
+                course_id = str(arow[1])
+                question_set_id = str(arow[2])
+
+                # Atomic upsert: INSERT with ON CONFLICT prevents duplicate active
+                # sessions even under concurrent requests from the same student.
+                session_id = str(_uuid.uuid4())
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO exam_session
+                           (session_id, assignment_id, student_id, org_id, course_id,
+                            status, current_turn_index, questions_delivered, concepts_covered)
+                           VALUES (%s::uuid, %s::uuid, %s, %s::uuid, %s::uuid,
+                                   'active', 0, '[]'::jsonb, '[]'::jsonb)
+                           ON CONFLICT (assignment_id, student_id)
+                              WHERE status = 'active'
+                           DO NOTHING
+                           RETURNING session_id""",
+                        (session_id, assignment_id, caller.user_id,
+                         caller.org_id, course_id),
+                    )
+                    inserted = cur.fetchone()
+
+                if inserted:
+                    session_id = str(inserted[0])
+                    repo.conn.commit()
+                else:
+                    # Session already exists — retrieve it
+                    repo.conn.rollback()
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND student_id = %s
+                                     AND status = 'active'""",
+                            (assignment_id, caller.user_id),
+                        )
+                        existing = cur.fetchone()
+                    if existing:
+                        session_id = str(existing[0])
+                    # else: the conflict guard matched but session was completed
+                    # between our insert and select — use the new session_id (edge case)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT q.question_id, q.text, q.concept_ids, qsm.position
+                           FROM question_set_membership qsm
+                           JOIN question q ON q.question_id = qsm.question_id
+                           WHERE qsm.question_set_id = %s::uuid
+                           ORDER BY qsm.position""",
+                        (question_set_id,),
+                    )
+                    qrows = cur.fetchall()
+
+                questions = []
+                for qr in qrows:
+                    concept_ids = qr[2] if isinstance(qr[2], list) else []
+                    topic = concept_ids[0] if concept_ids else "general"
+                    questions.append({
+                        "question_id": str(qr[0]),
+                        "topic": topic,
+                        "text": qr[1],
+                        "index": qr[3],
+                    })
+
+                return {
+                    "session_id": session_id,
+                    "questions": questions,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/sessions/{session_id}/answer ────────────────────────────
+    @app.post(R.SESSION_ANSWER)
+    def submit_answer(
+        session_id: str,
+        req: SubmitAnswerRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Submit an answer: record in session_turn, evaluate via Bedrock Qwen3."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                settings = d["settings"]
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT session_id, assignment_id, student_id, course_id,
+                                  status, current_turn_index, org_id
+                           FROM exam_session WHERE session_id = %s::uuid""",
+                        (session_id,),
+                    )
+                    srow = cur.fetchone()
+
+                if not srow:
+                    raise AuthorizationError("session not found")
+                if srow[4] != "active":
+                    raise AuthorizationError("session is not active")
+                if srow[2] != caller.user_id:
+                    raise AuthorizationError("not your session")
+
+                assignment_id = str(srow[1])
+                course_id = str(srow[3])
+                org_id = str(srow[6])
+                question_index = req.question_index
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT a.question_set_id FROM assignment a
+                           WHERE a.assignment_id = %s::uuid""",
+                        (assignment_id,),
+                    )
+                    qs_row = cur.fetchone()
+                if not qs_row:
+                    raise AuthorizationError("assignment not found")
+                question_set_id = str(qs_row[0])
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT q.question_id, q.text, q.concept_ids
+                           FROM question_set_membership qsm
+                           JOIN question q ON q.question_id = qsm.question_id
+                           WHERE qsm.question_set_id = %s::uuid AND qsm.position = %s""",
+                        (question_set_id, question_index),
+                    )
+                    qrow = cur.fetchone()
+
+                if not qrow:
+                    raise AuthorizationError(
+                        f"no question at index {question_index} in this assignment"
+                    )
+
+                question_id = str(qrow[0])
+                question_text = qrow[1]
+                concept_ids_for_question = qrow[2] if isinstance(qrow[2], list) else []
+
+                # ── Fetch expected_path for EDS scoring ──────────────────
+                expected_path = {}
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT expected_path FROM question WHERE question_id = %s::uuid",
+                        (question_id,),
+                    )
+                    ep_row = cur.fetchone()
+                    if ep_row and ep_row[0]:
+                        expected_path = ep_row[0] if isinstance(ep_row[0], dict) else _json.loads(ep_row[0])
+
+                # Questions generated before expected_path existed have none; build it
+                # once on first use and commit, or every turn pays for a Bedrock call.
+                if not expected_path.get("nodes"):
+                    try:
+                        expected_path = _generate_expected_path(
+                            settings, question_text, concept_ids_for_question
+                        )
+                        if expected_path.get("nodes"):
+                            with repo.conn.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE question SET expected_path = %s::jsonb WHERE question_id = %s::uuid",
+                                    (_json.dumps(expected_path), question_id),
+                                )
+                            repo.conn.commit()
+                            logger.info("Generated expected_path for question %s: %d nodes, %d edges",
+                                        question_id[:8], len(expected_path.get("nodes", [])),
+                                        len(expected_path.get("edges", [])))
+                        else:
+                            logger.warning("expected_path generation returned no nodes for question %s "
+                                           "— EDS will score 0", question_id[:8])
+                    except Exception as exc:
+                        logger.warning("expected_path generation failed for question %s: %s",
+                                       question_id[:8], exc)
+                        expected_path = {}
+
+                # ── Multi-turn: insert new sub-turn row ──────────────────
+                turn_id = str(_uuid.uuid4())
+                now = datetime.now(timezone.utc)
+
+                # Count existing sub-turns for this question
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT COUNT(*) FROM session_turn
+                           WHERE session_id = %s::uuid AND turn_index = %s""",
+                        (session_id, question_index),
+                    )
+                    sub_turn_count = cur.fetchone()[0]
+
+                with repo.conn.cursor() as cur:
+                    # Each sub-turn is its own row (unique on session+turn+sub_turn),
+                    # so a retried submit updates that sub-turn rather than the question.
+                    cur.execute(
+                        """INSERT INTO session_turn
+                           (turn_id, session_id, org_id, turn_index, sub_turn_index,
+                            question_id, student_answer, answered_at)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid, %s, %s)
+                           ON CONFLICT (session_id, turn_index, sub_turn_index)
+                           DO UPDATE SET student_answer = EXCLUDED.student_answer,
+                                         answered_at = EXCLUDED.answered_at
+                           RETURNING turn_id""",
+                        (turn_id, session_id, org_id, question_index, sub_turn_count,
+                         question_id, req.answer_text, now),
+                    )
+                    actual_turn_id = str(cur.fetchone()[0])
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE exam_session
+                           SET current_turn_index = GREATEST(current_turn_index, %s + 1)
+                           WHERE session_id = %s::uuid""",
+                        (question_index, session_id),
+                    )
+                repo.conn.commit()
+
+                # ── Gather prior answers for context ─────────────────────
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT student_answer FROM session_turn
+                           WHERE session_id = %s::uuid AND question_id = %s::uuid
+                                 AND turn_id != %s::uuid
+                           ORDER BY answered_at""",
+                        (session_id, question_id, actual_turn_id),
+                    )
+                    prior_answers = [r[0] for r in cur.fetchall() if r[0]]
+
+                # ── Decide evaluation strategy based on expected_path ────
+                use_eds_formula = bool(expected_path.get("nodes"))
+
+                # Steer this turn's probe at whatever the student has not yet covered,
+                # traversing the question's own sub-graph instead of letting the model
+                # re-probe ground already demonstrated.
+                probe_directive = ""
+
+                if use_eds_formula:
+                    seen_n, seen_e = _prior_coverage(repo, session_id, question_index)
+                    target = _probe_target(expected_path, seen_n, seen_e)
+                    if target:
+                        probe_directive = f"\nPROBE TARGET (choose your probe to address this):\n{target}\n"
+
+                    # ── Combined Socratic + EDS evaluation prompt ─────────
+                    system_prompt = (
+                        "You are an Epistemy Socratic oral examiner performing two tasks:\n\n"
+                        "TASK 1: SOCRATIC EVALUATION\n"
+                        f"The exam question is: \"{question_text}\"\n"
+                        "Evaluate the student's answer. When adequate=false, provide a scaffolding probe.\n\n"
+                        "TASK 2: EDS COMPONENT EXTRACTION\n"
+                        "Given the expected reasoning path below, identify which concepts and causal links "
+                        "the student DEMONSTRATED WITH UNDERSTANDING (not just named).\n\n"
+                        f"EXPECTED PATH:\n{_json.dumps(expected_path)}\n\n"
+                        "SCORING RULES:\n"
+                        "- A node is 'demonstrated' only if the student shows understanding of WHAT it means\n"
+                        "- An edge is 'demonstrated' only if the student articulates the CAUSAL MECHANISM between src and dst\n"
+                        "- recitation_score: 0.0=fully authentic reasoning, 1.0=pure keyword recitation without understanding\n"
+                        "- novel_extensions: valid concepts/links beyond the expected path\n\n"
+                        "CRITICAL: adequate=true ONLY if student shows clear mechanistic/causal reasoning.\n"
+                        "ALWAYS provide a probe sub-question (even if adequate, probe a deeper related concept).\n"
+                        + probe_directive + "\n"
+                        "Respond ONLY with minified JSON, no prose, no code fences:\n"
+                        '{"clarify": false, "answered": true, "adequate": false, '
+                        '"feedback": "one sentence", "probe": "follow-up question", '
+                        '"eds": {"nodes_demonstrated": ["list of node labels demonstrated"], '
+                        '"edges_demonstrated": [0, 1], '
+                        '"recitation_score": 0.3, '
+                        '"novel_extensions": ["any valid concepts beyond expected path"]}}'
+                    )
+                else:
+                    # ── Legacy Socratic-only prompt (no expected_path) ────
+                    system_prompt = (
+                        "You are an Epistemy Socratic oral examiner. "
+                        f"The current exam question is: \"{question_text}\". "
+                        "You scaffold: when an answer is incomplete, you do NOT give the answer away. "
+                        "Instead you ask ONE smaller guiding sub-question about an intermediate concept "
+                        "or a single causal link, so the student can build toward the answer themselves. "
+                        "First, detect whether the student is NOT answering but instead asking you to "
+                        "rephrase, reword, repeat, restate, or clarify the question. If so, set clarify=true. "
+                        "Otherwise, decide whether the student genuinely attempted to answer THIS question "
+                        "with relevant content. "
+                        "Treat 'I don't know', 'not sure', 'no idea', blank replies, gibberish, off-topic "
+                        "answers, refusals, or asking to skip as NOT answered. "
+                        "Assess whether the answer demonstrates causal understanding (not just recall). "
+                        "'adequate' may be true ONLY if 'answered' is true AND the student demonstrates "
+                        "clear mechanistic/causal reasoning with specific details — not just a surface-level or partial answer. "
+                        "DEFAULT to adequate=false unless the answer is genuinely thorough. "
+                        "When adequate=false, you MUST provide a probe sub-question. "
+                        "Respond ONLY with minified JSON, no prose and no code fences: "
+                        '{"clarify": bool, "answered": bool, "adequate": bool, '
+                        '"feedback": "one sentence on what was strong or thin", '
+                        '"probe": "ALWAYS provide ONE short follow-up sub-question — if adequate, probe a related deeper concept; if not adequate, scaffold toward the answer"}'
+                    )
+
+                ctx = f"Exam question: {question_text}\n\n"
+                if prior_answers:
+                    ctx += "Prior exchanges on this question:\n"
+                    for pa in prior_answers:
+                        ctx += f"Student: {pa}\n"
+                    ctx += "\n"
+                ctx += f"Student's latest answer: {req.answer_text}"
+
+                answered = False
+                adequate = False
+                feedback = ""
+                probe = ""
+                eds_delta = 0
+                parsed = {}
+
+                try:
+                    parsed = call_bedrock(
+                        settings, system_prompt, ctx,
+                        max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1,
+                    )
+                    answered = bool(parsed.get("answered", False))
+                    adequate = bool(parsed.get("adequate", False))
+                    feedback = (parsed.get("feedback") or "").strip()
+                    probe = (parsed.get("probe") or "").strip()
+                except Exception as eval_err:
+                    logger.warning("Bedrock Socratic eval failed: %s", eval_err)
+                    answered, adequate, feedback, probe = _heuristic_eval(
+                        req.answer_text
+                    )
+
+                # ── Compute EDS score ────────────────────────────────────
+                if not use_eds_formula:
+                    # Legacy fallback: fixed 0/4/10 scoring
+                    if not answered:
+                        eds_delta = 0
+                    elif adequate:
+                        eds_delta = 10
+                    else:
+                        eds_delta = 4
+
+                    eval_id = str(_uuid.uuid4())
+                    eval_data = {
+                        "answered": answered,
+                        "adequate": adequate,
+                        "feedback": feedback,
+                        "probe": probe,
+                        "eds_delta": eds_delta,
+                    }
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO evaluation
+                               (evaluation_id, turn_id, org_id, course_id, student_id,
+                                question_id, eds_score, eds_bucket, raw_llm_output)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s::uuid, %s,
+                                       %s::uuid, %s, %s, %s::jsonb)
+                               ON CONFLICT (turn_id) DO UPDATE
+                               SET eds_score = EXCLUDED.eds_score,
+                                   eds_bucket = EXCLUDED.eds_bucket,
+                                   raw_llm_output = EXCLUDED.raw_llm_output""",
+                            (eval_id, actual_turn_id, org_id, course_id, caller.user_id,
+                             question_id,
+                             eds_delta / 10.0,
+                             "high" if adequate else ("medium" if answered else "low"),
+                             _json.dumps(eval_data)),
+                        )
+                    repo.conn.commit()
+
+                    return {
+                        "answered": answered,
+                        "adequate": adequate,
+                        "feedback": feedback,
+                        "probe": probe,
+                        "eds_delta": eds_delta,
+                    }
+
+                # ── EDS Formula Path ─────────────────────────────────────
+                eds_raw = parsed.get("eds", {})
+                expected_nodes = expected_path.get("nodes", [])
+                expected_edges = expected_path.get("edges", [])
+                expected_extensions = expected_path.get("extensions", [])
+
+                nodes_demonstrated = eds_raw.get("nodes_demonstrated", [])
+                edges_demonstrated_indices = eds_raw.get("edges_demonstrated", [])
+                recitation_score = float(eds_raw.get("recitation_score", 0.5))
+                novel_extensions = eds_raw.get("novel_extensions", [])
+
+                # Compute per-turn scores
+                R = 1.0 - recitation_score
+                node_score = len(nodes_demonstrated) / max(len(expected_nodes), 1)
+                edge_score = len(edges_demonstrated_indices) / max(len(expected_edges), 1)
+                max_ext = max(len(expected_extensions), 3)
+                gen_score_norm = min(1.0, len(novel_extensions) / max_ext)
+
+                # ── Accumulate across sub-turns for this question ─────────
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT e.eds_components FROM evaluation e
+                           JOIN session_turn st ON st.turn_id = e.turn_id
+                           WHERE st.session_id = %s::uuid AND st.turn_index = %s
+                             AND e.turn_id != %s::uuid
+                           ORDER BY st.answered_at""",
+                        (session_id, question_index, actual_turn_id),
+                    )
+                    prior_components = [r[0] for r in cur.fetchall() if r[0]]
+
+                # Union across all sub-turns
+                all_nodes = set()
+                all_edge_indices = set()
+                all_extensions = set()
+                min_recitation = recitation_score
+
+                for pc in prior_components:
+                    if isinstance(pc, str):
+                        pc = _json.loads(pc)
+                    all_nodes.update(pc.get("nodes_detected", []))
+                    all_edge_indices.update(pc.get("edges_demonstrated", []))
+                    all_extensions.update(pc.get("novel_extensions", []))
+                    min_recitation = min(min_recitation, pc.get("raw_probe_score", 1.0))
+
+                # Add current turn
+                all_nodes.update(nodes_demonstrated)
+                all_edge_indices.update(edges_demonstrated_indices)
+                all_extensions.update(novel_extensions)
+                min_recitation = min(min_recitation, recitation_score)
+
+                # Aggregated scores
+                agg_R = 1.0 - min_recitation
+                agg_node_score = len(all_nodes) / max(len(expected_nodes), 1)
+                agg_edge_score = len(all_edge_indices) / max(len(expected_edges), 1)
+                agg_gen = min(1.0, len(all_extensions) / max(len(expected_extensions), 3))
+                agg_coverage = (agg_node_score + agg_edge_score) / 2.0
+
+                # Apply the EDS formula
+                eds_question = (
+                    agg_R * (EDS_ALPHA * agg_node_score + EDS_BETA * agg_edge_score)
+                    + EDS_GAMMA * (1.0 - agg_R * agg_coverage) * agg_gen
+                )
+                eds_question = round(min(1.0, max(0.0, eds_question)), 4)
+
+                # ── Store EDS components in evaluation ────────────────────
+                eds_components_data = {
+                    "node_score": node_score,
+                    "edge_score": edge_score,
+                    "r_gate": R,
+                    "gen_score_norm": gen_score_norm,
+                    "nodes_detected": list(nodes_demonstrated) if isinstance(nodes_demonstrated, set) else nodes_demonstrated,
+                    "edges_demonstrated": list(edges_demonstrated_indices) if isinstance(edges_demonstrated_indices, set) else edges_demonstrated_indices,
+                    "novel_extensions": list(novel_extensions) if isinstance(novel_extensions, set) else novel_extensions,
+                    "raw_probe_score": recitation_score,
+                }
+
+                eval_id = str(_uuid.uuid4())
+                eval_data = {
+                    "answered": answered,
+                    "adequate": adequate,
+                    "feedback": feedback,
+                    "probe": probe,
+                    "eds_delta": int(eds_question * 10),
+                    "eds_question": eds_question,
+                }
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO evaluation
+                           (evaluation_id, turn_id, org_id, course_id, student_id,
+                            question_id, eds_score, eds_bucket, raw_llm_output, eds_components)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s::uuid, %s,
+                                   %s::uuid, %s, %s, %s::jsonb, %s::jsonb)
+                           ON CONFLICT (turn_id) DO UPDATE
+                           SET eds_score = EXCLUDED.eds_score,
+                               eds_bucket = EXCLUDED.eds_bucket,
+                               raw_llm_output = EXCLUDED.raw_llm_output,
+                               eds_components = EXCLUDED.eds_components""",
+                        (eval_id, actual_turn_id, org_id, course_id, caller.user_id,
+                         question_id,
+                         eds_question,
+                         "high" if eds_question >= 0.7 else ("medium" if eds_question >= 0.3 else "low"),
+                         _json.dumps(eval_data),
+                         _json.dumps(eds_components_data)),
+                    )
+
+                # ── Upsert question_eds_aggregate ────────────────────────
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO question_eds_aggregate
+                               (session_id, question_id, org_id, node_score, edge_score,
+                                r_gate, gen_score_norm, coverage, final_eds, turn_details)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                               ON CONFLICT (session_id, question_id) DO UPDATE SET
+                                   node_score = EXCLUDED.node_score,
+                                   edge_score = EXCLUDED.edge_score,
+                                   r_gate = EXCLUDED.r_gate,
+                                   gen_score_norm = EXCLUDED.gen_score_norm,
+                                   coverage = EXCLUDED.coverage,
+                                   final_eds = EXCLUDED.final_eds,
+                                   turn_details = EXCLUDED.turn_details,
+                                   computed_at = NOW()""",
+                            (session_id, question_id, caller.org_id,
+                             agg_node_score, agg_edge_score, agg_R, agg_gen,
+                             agg_coverage, eds_question,
+                             _json.dumps(eds_components_data)),
+                        )
+                except Exception as agg_err:
+                    # Table may not exist yet; log and continue
+                    logger.warning("question_eds_aggregate upsert failed: %s", agg_err)
+                    repo.conn.rollback()
+
+                repo.conn.commit()
+
+                return {
+                    "answered": answered,
+                    "adequate": adequate,
+                    "feedback": feedback,
+                    "probe": probe,
+                    "eds_delta": int(eds_question * 10),
+                    "eds_question": eds_question,
+                    "eds_components": {
+                        "node_score": agg_node_score,
+                        "edge_score": agg_edge_score,
+                        "r_gate": agg_R,
+                        "gen_score": agg_gen,
+                    },
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/sessions/{session_id}/status ─────────────────────────────
+    @app.get(R.SESSION_STATUS)
+    def session_status(
+        session_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Return full session state with per-turn scores."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT session_id, assignment_id, student_id, course_id,
+                                  status, current_turn_index
+                           FROM exam_session WHERE session_id = %s::uuid""",
+                        (session_id,),
+                    )
+                    srow = cur.fetchone()
+
+                if not srow:
+                    raise AuthorizationError("session not found")
+                if caller.role != Role.PROFESSOR and srow[2] != caller.user_id:
+                    raise AuthorizationError("access denied")
+
+                assignment_id = str(srow[1])
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT config FROM assignment
+                           WHERE assignment_id = %s::uuid""",
+                        (assignment_id,),
+                    )
+                    arow = cur.fetchone()
+                total_questions = 0
+                if arow and arow[0]:
+                    cfg = arow[0] if isinstance(arow[0], dict) else _json.loads(arow[0])
+                    total_questions = cfg.get("max_questions", 0)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT st.turn_index, st.student_answer IS NOT NULL as answered,
+                                  COALESCE(e.eds_score, 0) as score
+                           FROM session_turn st
+                           LEFT JOIN evaluation e ON e.turn_id = st.turn_id
+                           WHERE st.session_id = %s::uuid
+                           ORDER BY st.turn_index""",
+                        (session_id,),
+                    )
+                    turn_rows = cur.fetchall()
+
+                turns = [
+                    {"index": tr[0], "answered": bool(tr[1]), "score": float(tr[2])}
+                    for tr in turn_rows
+                ]
+
+                # Normalize EDS to a 0-100 scale for the client
+                raw_sum = sum(t["score"] for t in turns)
+                if total_questions > 0:
+                    eds_score = min(100, round(raw_sum / total_questions * 100))
+                else:
+                    eds_score = 0
+
+                return {
+                    "session_id": session_id,
+                    "status": srow[4],
+                    "current_turn": int(srow[5]),
+                    "total_questions": total_questions,
+                    "eds_score": eds_score,
+                    "turns": turns,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/sessions/{session_id}/complete ────────────────────────────
+    @app.post(R.SESSION_COMPLETE)
+    def complete_session(
+        session_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Mark an exam session as completed (student submits)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE exam_session
+                           SET status = 'completed', completed_at = NOW()
+                           WHERE session_id = %s::uuid
+                             AND student_id = %s
+                             AND status = 'active'
+                           RETURNING session_id""",
+                        (session_id, caller.user_id),
+                    )
+                    row = cur.fetchone()
+                repo.conn.commit()
+
+                if not row:
+                    raise AuthorizationError("session not found or already completed")
+                return {"session_id": session_id, "status": "completed"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/sessions/{session_id}/stream (SSE) ───────────────────────
+    # TODO(prod): SSE token passed in URL query param — needs ticket-based auth design
+    @app.get(R.SESSION_STREAM)
+    def session_stream(
+        session_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """SSE streaming endpoint for real-time exam delivery."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT student_id FROM exam_session
+                           WHERE session_id = %s::uuid""",
+                        (session_id,),
+                    )
+                    srow = cur.fetchone()
+
+                if not srow:
+                    raise AuthorizationError("session not found")
+                if caller.role != Role.PROFESSOR and srow[0] != caller.user_id:
+                    raise AuthorizationError("access denied")
+
+                from epistemy_m3.delivery.sse import SessionEventStream
+                stream = SessionEventStream(None, session_id)
+                return StreamingResponse(
+                    stream.generate(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+# ── M7 Evaluation ────────────────────────────────────────────────────────────
+
+class GradeOverrideRequest(BaseModel):
+    """POST body for overriding a grade."""
+    new_score: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+def _register_evaluation(app: FastAPI, deps) -> None:
+    """Evaluation and grading endpoints with real DB and Bedrock implementations."""
+    import json as _json, uuid as _uuid
+    from datetime import datetime, timezone
+
+    # ── GET /api/evaluations/{turn_id} ────────────────────────────────────
+    @app.get(R.EVALUATION_GET)
+    def get_evaluation(
+        turn_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Retrieve the evaluation for a specific turn."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT evaluation_id, turn_id, eds_score, eds_bucket,
+                                  raw_llm_output, evaluated_at, student_id,
+                                  question_id, course_id
+                           FROM evaluation WHERE turn_id = %s::uuid""",
+                        (turn_id,),
+                    )
+                    row = cur.fetchone()
+
+                if not row:
+                    raise AuthorizationError("evaluation not found for this turn")
+
+                raw = row[4] if isinstance(row[4], dict) else (_json.loads(row[4]) if row[4] else {})
+                return {
+                    "evaluation_id": str(row[0]),
+                    "turn_id": str(row[1]),
+                    "eds_score": float(row[2]),
+                    "eds_bucket": row[3],
+                    "answered": raw.get("answered", True),
+                    "adequate": raw.get("adequate", False),
+                    "feedback": raw.get("feedback", ""),
+                    "probe": raw.get("probe", ""),
+                    "eds_delta": raw.get("eds_delta", 0),
+                    "evaluated_at": row[5].isoformat() if row[5] else None,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/grades/{session_id} ──────────────────────────────────────
+    @app.get(R.GRADES_SESSION)
+    def get_session_grades(
+        session_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Get all evaluations for a session as a grade summary."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT session_id, student_id, assignment_id, course_id, status
+                           FROM exam_session WHERE session_id = %s::uuid""",
+                        (session_id,),
+                    )
+                    srow = cur.fetchone()
+
+                if not srow:
+                    raise AuthorizationError("session not found")
+                if caller.role != Role.PROFESSOR and srow[1] != caller.user_id:
+                    raise AuthorizationError("access denied")
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT grade_id, final_score, component_scores, status,
+                                  released_at
+                           FROM grade WHERE session_id = %s::uuid""",
+                        (session_id,),
+                    )
+                    grade_row = cur.fetchone()
+
+                if grade_row:
+                    if grade_row[3] != "released" and caller.role != Role.PROFESSOR:
+                        raise AuthorizationError("grades not yet released")
+                    return {
+                        "grade_id": str(grade_row[0]),
+                        "session_id": session_id,
+                        "final_score": float(grade_row[1]),
+                        "component_scores": grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}"),
+                        "status": grade_row[3],
+                        "released_at": grade_row[4].isoformat() if grade_row[4] else None,
+                    }
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT e.evaluation_id, e.turn_id, e.eds_score, e.eds_bucket,
+                                  e.raw_llm_output, st.turn_index
+                           FROM evaluation e
+                           JOIN session_turn st ON st.turn_id = e.turn_id
+                           WHERE st.session_id = %s::uuid
+                           ORDER BY st.turn_index""",
+                        (session_id,),
+                    )
+                    eval_rows = cur.fetchall()
+
+                evaluations = []
+                total_eds = 0.0
+                for er in eval_rows:
+                    raw = er[4] if isinstance(er[4], dict) else (_json.loads(er[4]) if er[4] else {})
+                    total_eds += float(er[2])
+                    evaluations.append({
+                        "turn_index": er[5],
+                        "eds_score": float(er[2]),
+                        "eds_bucket": er[3],
+                        "answered": raw.get("answered", True),
+                        "adequate": raw.get("adequate", False),
+                        "eds_delta": raw.get("eds_delta", 0),
+                    })
+
+                return {
+                    "session_id": session_id,
+                    "status": "pending",
+                    "total_eds": round(total_eds, 2),
+                    "turns_evaluated": len(evaluations),
+                    "evaluations": evaluations,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/assignments/{assignment_id}/grades/release ──────────────
+    @app.post(R.GRADES_RELEASE)
+    def release_grades(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Release grades for all completed sessions in an assignment."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT assignment_id, course_id, config
+                           FROM assignment WHERE assignment_id = %s::uuid""",
+                        (assignment_id,),
+                    )
+                    arow = cur.fetchone()
+
+                if not arow:
+                    raise AuthorizationError("assignment not found")
+
+                course_id = str(arow[1])
+                config = arow[2] if isinstance(arow[2], dict) else _json.loads(arow[2] or "{}")
+                max_questions = config.get("max_questions", 10)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT session_id, student_id
+                           FROM exam_session
+                           WHERE assignment_id = %s::uuid AND status = 'completed'""",
+                        (assignment_id,),
+                    )
+                    sessions = cur.fetchall()
+
+                now = datetime.now(timezone.utc)
+                released = []
+
+                for sess_row in sessions:
+                    sid = str(sess_row[0])
+                    student_id = sess_row[1]
+
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT grade_id, status FROM grade WHERE session_id = %s::uuid",
+                            (sid,),
+                        )
+                        existing_grade = cur.fetchone()
+
+                    if existing_grade and existing_grade[1] == "released":
+                        released.append({"session_id": sid, "student_id": student_id,
+                                         "grade_id": str(existing_grade[0]),
+                                         "status": "already_released"})
+                        continue
+
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT COALESCE(SUM(e.eds_score), 0), COUNT(e.evaluation_id)
+                               FROM evaluation e
+                               JOIN session_turn st ON st.turn_id = e.turn_id
+                               WHERE st.session_id = %s::uuid""",
+                            (sid,),
+                        )
+                        score_row = cur.fetchone()
+
+                    total_eds = float(score_row[0]) if score_row else 0.0
+                    turns_evaluated = int(score_row[1]) if score_row else 0
+
+                    final_score = round(
+                        min(1.0, total_eds / max(max_questions, 1)), 4
+                    )
+
+                    component_scores = {
+                        "total_eds": round(total_eds, 4),
+                        "turns_evaluated": turns_evaluated,
+                        "max_questions": max_questions,
+                    }
+
+                    if existing_grade:
+                        with repo.conn.cursor() as cur:
+                            cur.execute(
+                                """UPDATE grade SET final_score = %s,
+                                       component_scores = %s::jsonb,
+                                       status = 'released', released_at = %s, updated_at = %s
+                                   WHERE grade_id = %s::uuid""",
+                                (final_score, _json.dumps(component_scores),
+                                 now, now, str(existing_grade[0])),
+                            )
+                        grade_id = str(existing_grade[0])
+                    else:
+                        grade_id = str(_uuid.uuid4())
+                        with repo.conn.cursor() as cur:
+                            cur.execute(
+                                """INSERT INTO grade
+                                   (grade_id, session_id, student_id, assignment_id,
+                                    org_id, course_id, final_score, component_scores,
+                                    status, released_at)
+                                   VALUES (%s::uuid, %s::uuid, %s, %s::uuid,
+                                           %s::uuid, %s::uuid, %s, %s::jsonb,
+                                           'released', %s)""",
+                                (grade_id, sid, student_id, assignment_id,
+                                 caller.org_id, course_id, final_score,
+                                 _json.dumps(component_scores), now),
+                            )
+
+                    released.append({
+                        "session_id": sid,
+                        "student_id": student_id,
+                        "grade_id": grade_id,
+                        "final_score": final_score,
+                        "status": "released",
+                    })
+
+                repo.conn.commit()
+
+                return {
+                    "assignment_id": assignment_id,
+                    "grades_released": len(released),
+                    "grades": released,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/grades/{grade_id}/override ──────────────────────────────
+    @app.post(R.GRADE_OVERRIDE)
+    def override_grade(
+        grade_id: str,
+        req: GradeOverrideRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Override a grade with a professor's manual score."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT grade_id, final_score, status
+                           FROM grade WHERE grade_id = %s::uuid""",
+                        (grade_id,),
+                    )
+                    row = cur.fetchone()
+
+                if not row:
+                    raise AuthorizationError("grade not found")
+
+                now = datetime.now(timezone.utc)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE grade
+                           SET final_score = %s, override_by = %s,
+                               override_reason = %s, updated_at = %s
+                           WHERE grade_id = %s::uuid""",
+                        (req.new_score, caller.user_id, req.reason, now, grade_id),
+                    )
+                repo.conn.commit()
+
+                return {
+                    "grade_id": grade_id,
+                    "new_score": req.new_score,
+                    "override_by": caller.user_id,
+                    "override_reason": req.reason,
+                    "updated_at": now.isoformat(),
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+# ── Delete endpoints ──────────────────────────────────────────────────────────
+
+def _register_delete_endpoints(app: FastAPI, deps) -> None:
+    """DELETE endpoints for materials and assignments (professor only)."""
+
+    @app.get(R.COURSE_GET)
+    def get_course(
+        course_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Course detail with a live student count from distinct exam sessions."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT course_id, course_name, title, created_at
+                           FROM course
+                           WHERE course_id = %s::uuid AND org_id = %s::uuid""",
+                        (course_id, caller.org_id),
+                    )
+                    row = cur.fetchone()
+                if not row:
+                    raise AuthorizationError("course not found")
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT COUNT(DISTINCT student_id) FROM exam_session
+                           WHERE course_id = %s::uuid""",
+                        (course_id,),
+                    )
+                    student_count = cur.fetchone()[0]
+
+                # code/description/join_code have no columns yet; course_name doubles
+                # as the code so the UI header renders without inventing data.
+                return {
+                    "id": str(row[0]),
+                    "course_id": str(row[0]),
+                    "name": row[1],
+                    "course_name": row[1],
+                    "code": row[1],
+                    "description": row[2] or "",
+                    "student_count": student_count,
+                    "join_code": "",
+                    "created_at": row[3].isoformat() if row[3] else None,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.delete(R.MATERIAL_DELETE)
+    def delete_material(
+        material_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Delete a material and all related data (chunks, versions)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                # The professor dashboard surfaces uploads by material_version_id, so
+                # accept either identifier and resolve to the owning material.
+                # Bind to a new name: assigning material_id here would make the
+                # handler parameter local to this closure and unreadable above.
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT material_id, course_id FROM material
+                           WHERE material_id = %s::uuid AND org_id = %s::uuid
+                           UNION
+                           SELECT material_id, course_id FROM material_version
+                           WHERE material_version_id = %s::uuid AND org_id = %s::uuid
+                           LIMIT 1""",
+                        (material_id, caller.org_id, material_id, caller.org_id),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        raise AuthorizationError("material not found")
+                    target_id = str(row[0])
+                    course_id = str(row[1])
+
+                # Delete in order: chunks -> material_versions -> material
+                with repo.conn.cursor() as cur:
+                    # Delete chunks associated with this material's versions
+                    cur.execute(
+                        """DELETE FROM chunk
+                           WHERE material_version_id IN (
+                               SELECT material_version_id FROM material_version
+                               WHERE material_id = %s::uuid
+                           )""",
+                        (target_id,),
+                    )
+                    # Delete material versions
+                    cur.execute(
+                        "DELETE FROM material_version WHERE material_id = %s::uuid",
+                        (target_id,),
+                    )
+                    # Delete the material itself
+                    cur.execute(
+                        "DELETE FROM material WHERE material_id = %s::uuid",
+                        (target_id,),
+                    )
+                    # Flag before the rebuild so a failed/killed thread leaves the
+                    # graph visibly stale rather than silently wrong.
+                    cur.execute(
+                        "UPDATE graph_version SET is_stale = true "
+                        "WHERE org_id = %s AND course_id = %s AND is_active = true",
+                        (caller.org_id, course_id),
+                    )
+                repo.conn.commit()
+
+                # Concepts from this material would otherwise persist in the active
+                # graph; rebuild off-request so delete stays fast.
+                _rebuild_graph_async(d["settings"], caller.org_id, course_id)
+
+                return {"deleted": True, "material_id": target_id,
+                        "graph_rebuild": "started"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.delete(R.ASSIGNMENT_DELETE)
+    def delete_assignment(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Delete an assignment and all related data (sessions, turns, evaluations, grades)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                # Verify assignment exists and belongs to this org
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT assignment_id, question_set_id FROM assignment WHERE assignment_id = %s::uuid AND org_id = %s::uuid",
+                        (assignment_id, caller.org_id),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        raise AuthorizationError("assignment not found")
+                    question_set_id = str(row[1])
+
+                with repo.conn.cursor() as cur:
+                    # Delete evaluations for turns in sessions of this assignment
+                    cur.execute(
+                        """DELETE FROM evaluation
+                           WHERE turn_id IN (
+                               SELECT turn_id FROM session_turn
+                               WHERE session_id IN (
+                                   SELECT session_id FROM exam_session
+                                   WHERE assignment_id = %s::uuid
+                               )
+                           )""",
+                        (assignment_id,),
+                    )
+                    # Delete question_eds_aggregate rows for sessions of this assignment
+                    try:
+                        cur.execute(
+                            """DELETE FROM question_eds_aggregate
+                               WHERE session_id IN (
+                                   SELECT session_id FROM exam_session
+                                   WHERE assignment_id = %s::uuid
+                               )""",
+                            (assignment_id,),
+                        )
+                    except Exception:
+                        repo.conn.rollback()
+                        # Table may not exist; continue
+
+                with repo.conn.cursor() as cur:
+                    # Delete grades for this assignment
+                    cur.execute(
+                        "DELETE FROM grade WHERE assignment_id = %s::uuid",
+                        (assignment_id,),
+                    )
+                    # Delete session turns
+                    cur.execute(
+                        """DELETE FROM session_turn
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid
+                           )""",
+                        (assignment_id,),
+                    )
+                    # Delete exam sessions
+                    cur.execute(
+                        "DELETE FROM exam_session WHERE assignment_id = %s::uuid",
+                        (assignment_id,),
+                    )
+                    # Delete question_set_membership
+                    cur.execute(
+                        "DELETE FROM question_set_membership WHERE question_set_id = %s::uuid",
+                        (question_set_id,),
+                    )
+                    # Assignment must go before its question_set: assignment.question_set_id
+                    # is a FK, so removing the set first violates the constraint.
+                    cur.execute(
+                        "DELETE FROM assignment WHERE assignment_id = %s::uuid",
+                        (assignment_id,),
+                    )
+                    # Only drop the set once no assignment references it
+                    cur.execute(
+                        """DELETE FROM question_set
+                           WHERE question_set_id = %s::uuid
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM assignment
+                                 WHERE question_set_id = %s::uuid
+                             )""",
+                        (question_set_id, question_set_id),
+                    )
+                repo.conn.commit()
+
+                return {"deleted": True, "assignment_id": assignment_id}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+# ── Shared helpers ────────────────────────────────────────────────────────────
+
+def _guard(deps, fn):
+    """Run a handler; map errors to appropriate HTTP status codes.
+
+    Error mapping:
+    - AuthorizationError -> 403
+    - ValueError, KeyError -> 400 (bad client input)
+    - Everything else -> 500 (unexpected server error, logged)
+    """
+    try:
+        return fn()
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=f"Bad request: {str(exc)[:120]}")
+    except HTTPException:
+        # Re-raise FastAPI exceptions (e.g. 503 from health check) unchanged
+        raise
+    except Exception:
+        logger.exception("Unhandled error in request handler")
+        raise HTTPException(
+            status_code=500,
+            detail="An internal error occurred. Please try again or contact support.",
+        )
+
+
+
+def _heuristic_eval(answer_text: str) -> tuple:
+    """Fallback answer evaluation when Bedrock is unavailable."""
+    answer_lower = answer_text.strip().lower()
+    if not answer_lower or answer_lower in (
+        "i don't know", "idk", "not sure", "no idea", "skip"
+    ):
+        return False, False, "", "Can you try to think about what key concept relates to this?"
+    causal_markers = [
+        "because", "therefore", "causes", "leads to",
+        "results in", "due to", "since", "so that",
+    ]
+    has_causal = any(m in answer_lower for m in causal_markers)
+    adequate = has_causal and len(answer_lower) > 40
+    feedback = "Good attempt." if not adequate else ""
+    probe = "Can you explain the causal mechanism behind your answer?" if not adequate else ""
+    return True, adequate, feedback, probe
+
+
+app = create_app()
