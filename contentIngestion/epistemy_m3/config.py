@@ -27,6 +27,13 @@ class Settings:
     queue_name: str = os.getenv("EPISTEMY_QUEUE", "epistemy-ingest-dev")
     kms_alias: str = os.getenv("EPISTEMY_KMS_ALIAS", "alias/epistemy-materials-dev")
     llm_model: str = os.getenv("EPISTEMY_LLM_MODEL", LLM_MODEL_ID)
+    # LLM provider: "anthropic" routes to Claude via the Anthropic SDK; anything
+    # else falls back to Bedrock Converse. anthropic_model is the Claude model id.
+    llm_provider: str = os.getenv("EPISTEMY_LLM_PROVIDER", "anthropic")
+    anthropic_model: str = os.getenv("EPISTEMY_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    # Secrets Manager id holding the Anthropic API key; fetched at runtime by the
+    # task role (never placed in the task definition or image).
+    anthropic_secret: str = os.getenv("EPISTEMY_ANTHROPIC_SECRET", "")
     embed_model: str = os.getenv("EPISTEMY_EMBED_MODEL", EMBED_MODEL_ID)
     embed_dims: int = int(os.getenv("EPISTEMY_EMBED_DIMS", "1024"))
     bedrock_region: str = os.getenv("EPISTEMY_BEDROCK_REGION", "us-west-2")
@@ -64,6 +71,11 @@ class Settings:
     def db_secret_name(self) -> str:
         """Secrets Manager name holding the DB credentials."""
         return f"epistemy/db-{self.env}"
+
+    @property
+    def anthropic_secret_name(self) -> str:
+        """Secrets Manager id for the Anthropic API key (override via env, else default)."""
+        return self.anthropic_secret or f"epistemy/anthropic-api-key-{self.env}"
 
     @property
     def log_group(self) -> str:
