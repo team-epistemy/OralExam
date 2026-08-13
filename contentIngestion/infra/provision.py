@@ -9,6 +9,7 @@ internal ALB (load balancer + target group + listener) → ECS Fargate service.
 from __future__ import annotations
 import argparse
 import json
+import os
 import pathlib
 
 import boto3
@@ -176,12 +177,31 @@ def _register_task(ecs_c, settings, image, core, found, log_group) -> str:
 
 def _task_env(settings: Settings, core: dict, found: dict) -> list:
     """Environment variables consumed by the container at runtime."""
+    # Store the Anthropic key in Secrets Manager; the container fetches it at
+    # runtime via the task role. The plaintext key never enters the task def.
+    _ensure_anthropic_secret(settings)
     pairs = {"AWS_REGION": settings.region, "EPISTEMY_BUCKET": settings.bucket,
              "EPISTEMY_QUEUE_URL": core["queue_url"],
              "EPISTEMY_DB_SECRET_ARN": found["db_secret_arn"],
              "EPISTEMY_BEDROCK_REGION": settings.bedrock_region,
-             "EPISTEMY_USE_BEDROCK": "1"}
+             "EPISTEMY_USE_BEDROCK": "1",
+             "EPISTEMY_LLM_PROVIDER": settings.llm_provider,
+             "EPISTEMY_ANTHROPIC_MODEL": settings.anthropic_model,
+             "EPISTEMY_ANTHROPIC_SECRET": settings.anthropic_secret_name}
     return [{"name": k, "value": v} for k, v in pairs.items()]
+
+
+def _ensure_anthropic_secret(settings: Settings) -> None:
+    """Create/update the Anthropic key secret from the deploy host's env, if set."""
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        return  # assume the secret was provisioned out-of-band
+    sm = boto3.client("secretsmanager", region_name=settings.region)
+    name = settings.anthropic_secret_name
+    try:
+        sm.create_secret(Name=name, SecretString=key)
+    except sm.exceptions.ResourceExistsException:
+        sm.put_secret_value(SecretId=name, SecretString=key)
 
 
 def _parse_args() -> argparse.Namespace:

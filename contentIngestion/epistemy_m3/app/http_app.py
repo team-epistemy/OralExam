@@ -30,6 +30,9 @@ from epistemy_m3.tools.materials_tools import MaterialsTools
 from epistemy_m3.tools.search_tools import SearchTools
 from epistemy_m3.search.corpus_search import CorpusSearcher
 from epistemy_m3.bedrock_helper import call_bedrock
+from epistemy_m3.graph.layout import build_node_ids, compute_layout
+from epistemy_m3.graph.layout import neighbors as graph_neighbors
+from epistemy_m3.questions.exam_builder import build_variants, assemble_questions
 from epistemy_m3.app import factory, routes as R
 from epistemy_m3.db.postgres import PostgresRepository
 
@@ -808,13 +811,20 @@ def _register_graph(app: FastAPI, deps) -> None:
 
                 combined = "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH])
                 system_prompt = (
-                    "You are an expert knowledge graph builder for educational content. "
-                    "Given course material, extract key concepts and their relationships. "
-                    "Return ONLY valid JSON: "
-                    '{"concepts": [{"label": "...", "definition": "...", "abstraction_level": 0.5}], '
+                    "You are building the concept map for an oral exam. From THIS course "
+                    "material only, extract the core concepts a student would be examined on "
+                    "(8 to 14). Do not introduce concepts that are not present in the material. "
+                    "Treat broad or introductory material sparsely, as a few high-level concepts; "
+                    "for specific, quantitative, or formula-driven material capture concepts more "
+                    "granularly. For EACH concept also write 4 oral-exam questions grounded strictly "
+                    "in the material that probe understanding of that concept, and identify the "
+                    "prerequisite relationships between concepts. "
+                    "Return ONLY valid JSON, no prose, no markdown fences: "
+                    '{"concepts": [{"label": "2-5 word noun phrase", "definition": "1 sentence", '
+                    '"abstraction_level": 0.5, "questions": ["...", "...", "...", "..."]}], '
                     '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
                     "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
-                    "Extract 10-30 concepts. Only return JSON."
+                    "src is a prerequisite of dst. Labels are short noun phrases, no numbering."
                 )
                 data = call_bedrock(
                     settings, system_prompt,
@@ -823,6 +833,12 @@ def _register_graph(app: FastAPI, deps) -> None:
                 )
                 concepts = data.get("concepts", [])
                 relations = data.get("relations", [])
+
+                # Stamp stable slug ids and cap each concept's question bank at 4 (demo contract).
+                label_ids = build_node_ids(concepts)
+                for c in concepts:
+                    c["id"] = label_ids.get(c.get("label", ""), "")
+                    c["questions"] = [q for q in (c.get("questions") or []) if isinstance(q, str)][:4]
 
                 version_id = str(_uuid.uuid4())
                 # s3_key column repurposed to store graph JSON inline (no S3 for MVP)
@@ -856,11 +872,29 @@ def _register_graph(app: FastAPI, deps) -> None:
     @app.get(R.GRAPH_NEIGHBORS)
     def get_neighbors(
         concept_id: str,
+        course_id: Optional[str] = None,
         x_org_name: str = Header(...),
         x_user_id: str = Header("operator"),
         x_role: str = Header("professor"),
     ):
-        return {"concept_id": concept_id, "neighbors": []}
+        """Direct neighbors of a concept within a course's active graph."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                if not course_id:
+                    return {"concept_id": concept_id, "neighbors": []}
+                graph = _query_graph_version(repo, caller.org_id, course_id)
+                nbrs = graph_neighbors(
+                    graph.get("relations", []), concept_id, graph.get("concepts", []),
+                )
+                return {"concept_id": concept_id, "neighbors": nbrs}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
 
 def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
@@ -886,6 +920,9 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
                 graph_data = _json.loads(row[5]) if row[5] and row[5].startswith("{") else {}
             except (ValueError, TypeError):
                 pass
+            concepts = graph_data.get("concepts", [])
+            relations = graph_data.get("relations", [])
+            layout = compute_layout(concepts, relations)  # nodes {id,label,x,y} + [from,to] edges
             return {
                 "status": "ready",
                 "version_id": str(row[0]),
@@ -895,8 +932,10 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
                 "validation_score": float(row[4]) if row[4] else 0.0,
                 "created_at": row[6].isoformat() if row[6] else None,
                 "is_stale": bool(row[7]),
-                "concepts": graph_data.get("concepts", []),
-                "edges": graph_data.get("relations", []),
+                "concepts": concepts,
+                "relations": relations,
+                "nodes": layout["nodes"],
+                "edges": layout["edges"],
             }
     except psycopg2.ProgrammingError:
         # Table may not exist yet in early migrations
@@ -911,6 +950,18 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
         "concepts": [],
         "edges": [],
     }
+
+
+def _concept_banks(concepts: list) -> dict:
+    """Map each concept's id AND label to its extracted question bank."""
+    banks = {}
+    for c in concepts:
+        qs = [q for q in (c.get("questions") or []) if isinstance(q, str)]
+        if c.get("id"):
+            banks[c["id"]] = qs
+        if c.get("label"):
+            banks.setdefault(c["label"], qs)
+    return banks
 
 
 # ── M5 Questions ─────────────────────────────────────────────────────────────
@@ -928,6 +979,14 @@ class GenerateQuestionsRequest(BaseModel):
     count: int = Field(default=5, ge=1, le=MAX_QUESTION_COUNT)
     difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
     domain: str = Field(default="general", min_length=1, max_length=200)
+
+
+class BuildExamRequest(BaseModel):
+    """POST body for deterministic exam assembly (3 variants, no LLM)."""
+    concept_ids: Optional[List[str]] = None
+    q_count: int = Field(default=12, ge=1, le=MAX_QUESTION_COUNT)
+    exam_len: int = Field(default=30, ge=5, le=180)
+    difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
 
 
 def _register_questions(app: FastAPI, deps) -> None:
@@ -962,7 +1021,7 @@ def _register_questions(app: FastAPI, deps) -> None:
                 if req.concept_ids and concepts:
                     concept_set = set(req.concept_ids)
                     concepts = [c for c in concepts if c.get("label") in concept_set
-                                or c.get("node_id") in concept_set]
+                                or c.get("id") in concept_set or c.get("node_id") in concept_set]
 
                 with repo.conn.cursor() as cur:
                     if req.material_version_ids:
@@ -1139,6 +1198,47 @@ def _register_questions(app: FastAPI, deps) -> None:
                     "generated_count": len(stored_questions),
                     "questions": stored_questions,
                 }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.EXAM_BUILD)
+    def build_exam(
+        course_id: str,
+        req: BuildExamRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Assemble 3 exam variants from the graph's per-concept banks — no LLM."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                graph = _query_graph_version(repo, caller.org_id, course_id)
+                concepts = graph.get("concepts", [])
+                if not concepts:
+                    return {"status": "error",
+                            "message": "No concept graph found. Build the graph first."}
+
+                if req.concept_ids:
+                    sel = set(req.concept_ids)
+                    concepts = [c for c in concepts
+                                if c.get("id") in sel or c.get("label") in sel]
+
+                simple = [{"id": c.get("id") or c.get("label", ""), "label": c.get("label", "")}
+                          for c in concepts]
+                banks = _concept_banks(concepts)
+                variants = build_variants(simple, req.q_count, req.difficulty, req.exam_len)
+                for v in variants:
+                    v["questions"] = assemble_questions(v["distribution"], banks)
+                return {"status": "completed", "concept_count": len(simple), "variants": variants}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
