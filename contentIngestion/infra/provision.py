@@ -181,6 +181,7 @@ def _task_env(settings: Settings, core: dict, found: dict) -> list:
     # runtime via the task role. The plaintext key never enters the task def.
     _ensure_anthropic_secret(settings)
     pairs = {"AWS_REGION": settings.region, "EPISTEMY_BUCKET": settings.bucket,
+             "EPISTEMY_ACCOUNT": settings.account_id, "EPISTEMY_ENV": settings.env,
              "EPISTEMY_QUEUE_URL": core["queue_url"],
              "EPISTEMY_DB_SECRET_ARN": found["db_secret_arn"],
              "EPISTEMY_BEDROCK_REGION": settings.bedrock_region,
