@@ -92,3 +92,49 @@ export async function getExamResults(assignmentId: string): Promise<ExamResult> 
 export function connectToExamSSE(sessionId: string): EventSource {
   return createSSEConnection(`/api/sessions/${sessionId}/stream`);
 }
+
+// ── Exam builder: 3 deterministic variants from the concept graph ────────────
+
+export interface ExamVariantQuestion {
+  topic: string;
+  concept_id: string;
+  q: string;
+}
+
+export interface ExamVariantDistribution {
+  id: string;
+  label: string;
+  count: number;
+}
+
+export interface ExamVariant {
+  id: string;
+  bank_key: string;
+  title: string;
+  badge: string;
+  badge_label: string;
+  description: string;
+  q_count: number;
+  duration: string;
+  eds_focus: string;
+  distribution: ExamVariantDistribution[];
+  questions: ExamVariantQuestion[];
+}
+
+export interface BuildExamResponse {
+  status: string;
+  concept_count?: number;
+  variants?: ExamVariant[];
+  message?: string;
+}
+
+export interface BuildExamConfig {
+  q_count: number;
+  exam_len: number;
+  difficulty: 'recall' | 'balanced' | 'deep';
+  concept_ids?: string[];
+}
+
+export async function buildExam(courseId: string, cfg: BuildExamConfig): Promise<BuildExamResponse> {
+  return post<BuildExamResponse>(`/api/courses/${courseId}/exams/build`, cfg);
+}
