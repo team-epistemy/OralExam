@@ -1,0 +1,3 @@
+# Ignore dropped-in PDFs, but keep the bundled sample + docs.
+*.pdf
+!sample-operations.pdf
