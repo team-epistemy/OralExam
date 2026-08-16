@@ -13,10 +13,21 @@ __pycache__/
 .venv/
 venv/
 
-# ─── Secrets / local config ───
+# ─── Secrets / local config — NEVER commit real credentials ───
 .env
 *.env
 !*.env.example
+# Credential material (IAM keys, certs, private keys)
+*accessKey*
+*credential*.csv
+*-credentials.csv
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+# Local-only infra notes with real resource values
+*.local.md
 
 # ─── Frontend (Vite / Node) ───
 frontend/node_modules/
