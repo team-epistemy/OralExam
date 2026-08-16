@@ -337,7 +337,12 @@ def _mount_demo(app: FastAPI) -> None:
 
         @app.get("/app/{path:path}")
         def serve_frontend(path: str = ""):
-            return FileResponse(str(frontend / "index.html"))
+            # The SPA shell must always revalidate so a redeploy's newly-hashed
+            # bundle is picked up immediately; hashed /app/assets stay cacheable.
+            return FileResponse(
+                str(frontend / "index.html"),
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
 
         @app.get("/")
         def root():
