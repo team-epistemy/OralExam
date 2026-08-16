@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   Upload,
   ClipboardList,
+  FileText,
   LogOut,
   Menu,
   X,
@@ -29,6 +30,7 @@ function getUser(): User | null {
 const professorLinks = [
   { to: '/professor/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/professor/upload', label: 'Upload Material', icon: Upload },
+  { to: '/professor/exam-builder', label: 'Build Exam', icon: FileText },
   { to: '/professor/assignments/new', label: 'Create Assignment', icon: ClipboardList },
 ];
 

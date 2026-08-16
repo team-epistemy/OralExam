@@ -716,6 +716,25 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
+    @app.get(R.STUDENT_ASSIGNMENTS)
+    def student_assignments(
+        x_org_name: str = Header(DEFAULT_ORG_NAME),
+        x_user_id: str = Header("student"),
+        x_role: str = Header("student"),
+    ):
+        """Active assignments available to the student (frontend: listStudentAssignments)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                return _query_student_assignments(repo, caller.org_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
 
 def _query_student_assignments(repo, org_id: str) -> list:
     """Get all active assignments for the org with course names."""
@@ -742,6 +761,60 @@ def _query_student_assignments(repo, org_id: str) -> list:
         }
         for r in rows
     ]
+
+
+def _extract_feedback(raw) -> str:
+    """Pull a feedback string out of the stored evaluation LLM output (JSONB)."""
+    if isinstance(raw, dict):
+        return raw.get("feedback") or raw.get("explanation") or ""
+    return ""
+
+
+def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
+    """Assemble the caller's exam results from their most-recent session."""
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """SELECT session_id, status, completed_at FROM exam_session
+               WHERE assignment_id = %s::uuid AND student_id = %s
+               ORDER BY started_at DESC LIMIT 1""",
+            (assignment_id, student_id),
+        )
+        srow = cur.fetchone()
+    if not srow:
+        return {"assignment_id": assignment_id, "session_id": None, "status": "not_started",
+                "score": 0, "total_questions": 0, "questions_answered": 0,
+                "feedback": "No exam session found for this assignment.",
+                "question_results": [], "completed_at": None}
+    session_id = str(srow[0])
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """SELECT st.question_id, q.text, st.student_answer,
+                      COALESCE(e.eds_score, 0), e.raw_llm_output
+               FROM session_turn st
+               JOIN question q ON q.question_id = st.question_id
+               LEFT JOIN evaluation e ON e.turn_id = st.turn_id
+               WHERE st.session_id = %s::uuid ORDER BY st.turn_index""",
+            (session_id,),
+        )
+        rows = cur.fetchall()
+    q_results, answered, score_sum = [], 0, 0.0
+    for r in rows:
+        if r[2]:
+            answered += 1
+        eds = float(r[3] or 0)
+        score_sum += eds
+        q_results.append({"question_id": str(r[0]), "question_text": r[1],
+                          "answer": r[2] or "", "score": round(eds * 100),
+                          "feedback": _extract_feedback(r[4])})
+    total = len(rows)
+    overall = round(score_sum / total * 100) if total else 0
+    return {
+        "session_id": session_id, "assignment_id": assignment_id, "status": srow[1],
+        "score": overall, "total_questions": total, "questions_answered": answered,
+        "feedback": f"Answered {answered} of {total} questions · epistemic-depth score {overall}%.",
+        "question_results": q_results,
+        "completed_at": srow[2].isoformat() if srow[2] else None,
+    }
 
 
 # ── M4 Graph ─────────────────────────────────────────────────────────────────
@@ -933,9 +1006,12 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
                 "created_at": row[6].isoformat() if row[6] else None,
                 "is_stale": bool(row[7]),
                 "concepts": concepts,
-                "relations": relations,
-                "nodes": layout["nodes"],
-                "edges": layout["edges"],
+                # `edges` stays the relation objects the UI renders ({src,dst,edge_type,confidence}).
+                # Layout for node/edge rendering is exposed separately so it doesn't clobber them.
+                "edges": relations,
+                "relations": relations,            # same list; consumed by the neighbors endpoint
+                "nodes": layout["nodes"],          # {id, label, x, y}
+                "graph_edges": layout["edges"],    # [from_id, to_id] pairs
             }
     except psycopg2.ProgrammingError:
         # Table may not exist yet in early migrations
@@ -1821,6 +1897,27 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 if not row:
                     raise AuthorizationError("assignment not found")
                 return {"assignment_id": str(row[0]), "status": "closed"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/assignments/{assignment_id}/results ──────────────────────
+    @app.get(R.ASSIGNMENT_RESULTS)
+    def exam_results(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """The caller's most-recent exam results (frontend: getExamResults)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                return _query_exam_results(repo, assignment_id, caller.user_id)
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

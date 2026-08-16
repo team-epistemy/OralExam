@@ -6,6 +6,7 @@ import ProfessorDashboard from './pages/professor/Dashboard';
 import CourseDetail from './pages/professor/CourseDetail';
 import UploadMaterial from './pages/professor/UploadMaterial';
 import ConceptGraph from './pages/professor/ConceptGraph';
+import BuildExam from './pages/professor/BuildExam';
 import CreateAssignment from './pages/professor/CreateAssignment';
 import GradeView from './pages/professor/GradeView';
 import StudentDashboard from './pages/student/Dashboard';
@@ -80,6 +81,10 @@ export const router = createBrowserRouter([
       {
         path: '/professor/graph',
         element: <RequireRole role="professor"><ConceptGraph /></RequireRole>,
+      },
+      {
+        path: '/professor/exam-builder',
+        element: <RequireRole role="professor"><BuildExam /></RequireRole>,
       },
       {
         path: '/professor/assignments/new',
