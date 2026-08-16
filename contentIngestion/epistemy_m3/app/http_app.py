@@ -2769,6 +2769,7 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                     raw = er[4] if isinstance(er[4], dict) else (_json.loads(er[4]) if er[4] else {})
                     total_eds += float(er[2])
                     evaluations.append({
+                        "turn_id": str(er[1]),  # lets clients drill into GET /api/evaluations/{turn_id}
                         "turn_index": er[5],
                         "eds_score": float(er[2]),
                         "eds_bucket": er[3],
