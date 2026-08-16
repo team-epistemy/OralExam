@@ -374,8 +374,14 @@ export default function CreateAssignment() {
             Create Another
           </button>
           <button
-            onClick={() => navigate('/professor/dashboard')}
+            onClick={() => navigate(`/professor/assignments/${assignmentId}/grades`)}
             className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+          >
+            View Grades →
+          </button>
+          <button
+            onClick={() => navigate('/professor/dashboard')}
+            className="px-5 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
           >
             Back to Dashboard
           </button>

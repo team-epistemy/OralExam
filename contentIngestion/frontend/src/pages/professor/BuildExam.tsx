@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { FileText, Loader2, Sparkles, AlertCircle } from 'lucide-react';
 import { get } from '../../api/client';
@@ -205,6 +206,14 @@ export default function BuildExam() {
               </li>
             ))}
           </ol>
+          <div className="mt-4 pt-3 border-t border-gray-100">
+            <Link
+              to={`/professor/assignments/new${courseId ? `?course=${courseId}` : ''}`}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors"
+            >
+              Create Assignment from these concepts →
+            </Link>
+          </div>
         </div>
       )}
     </div>

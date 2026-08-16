@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { CheckCircle, AlertCircle, Loader2, Network } from 'lucide-react';
 import { uploadMaterial, listVersions } from '../../api/materials';
 import type { MaterialVersion } from '../../api/materials';
 import FileUpload from '../../components/FileUpload';
@@ -164,20 +165,28 @@ export default function UploadMaterial() {
           </div>
         )}
 
-        {/* Reset */}
+        {/* Next steps */}
         {success && (
-          <button
-            onClick={() => {
-              setSuccess(false);
-              setProgress(0);
-              setUploadResult(null);
-              setVersions([]);
-              if (pollInterval) clearInterval(pollInterval);
-            }}
-            className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-          >
-            Upload Another
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <Link
+              to="/professor/graph"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+            >
+              <Network className="w-4 h-4" /> View Concept Graph →
+            </Link>
+            <button
+              onClick={() => {
+                setSuccess(false);
+                setProgress(0);
+                setUploadResult(null);
+                setVersions([]);
+                if (pollInterval) clearInterval(pollInterval);
+              }}
+              className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              Upload Another
+            </button>
+          </div>
         )}
       </div>
 

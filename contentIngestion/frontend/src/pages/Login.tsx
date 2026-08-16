@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { post } from '../api/client';
 import { Loader2 } from 'lucide-react';
 
@@ -106,10 +106,8 @@ export default function Login() {
       </form>
 
       <p className="mt-6 text-center text-sm text-muted">
-        Don't have an account?{' '}
-        <Link to="/signup" className="text-gold hover:text-gold-light font-medium">
-          Sign up
-        </Link>
+        Use a seeded account — professor <span className="font-medium">prof1@univ.edu</span> or
+        student <span className="font-medium">student1@univ.edu</span>.
       </p>
     </div>
   );

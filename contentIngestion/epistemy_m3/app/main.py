@@ -68,6 +68,19 @@ def migrate() -> None:
     print("all schemas applied")
 
 
+def clean() -> None:
+    """Truncate all domain data (keep schema + org tenants) for a fresh test env."""
+    from epistemy_m3.app import factory
+    conn = factory.db_connection(load_settings())
+    with conn.cursor() as cur:
+        cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+        tables = [r[0] for r in cur.fetchall() if r[0] != "org"]
+        if tables:
+            cur.execute("TRUNCATE " + ", ".join(tables) + " RESTART IDENTITY CASCADE")
+    conn.commit()
+    print(f"cleaned {len(tables)} tables (kept 'org'): {sorted(tables)}")
+
+
 def smoke() -> None:
     """End-to-end AWS test: seed → upload → enqueue → poll worker to ready."""
     from epistemy_m3.app import smoke_test
@@ -78,7 +91,7 @@ def main() -> None:
     """Dispatch on the first CLI argument."""
     command = sys.argv[1] if len(sys.argv) > 1 else "serve"
     {"serve": serve, "worker": worker, "migrate": migrate,
-     "smoke": smoke}.get(command, serve)()
+     "clean": clean, "smoke": smoke}.get(command, serve)()
 
 
 if __name__ == "__main__":
