@@ -1,0 +1,5 @@
+pydantic>=2.0
+boto3>=1.28
+python-pptx>=0.6.21
+psycopg2-binary>=2.9
+pytest>=7.0

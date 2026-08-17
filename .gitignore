@@ -1,10 +1,43 @@
-# Python build artifacts
+# ─── OS / editor ───
+.DS_Store
+.vscode/
+.idea/
+
+# ─── Python ───
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv/
 venv/
 
+# ─── Secrets / local config — NEVER commit real credentials ───
+.env
+*.env
+!*.env.example
+# Credential material (IAM keys, certs, private keys)
+*accessKey*
+*credential*.csv
+*-credentials.csv
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+# Local-only infra notes with real resource values
+*.local.md
 # Local Claude Code MCP config (machine-specific paths)
 .mcp.json
+
+# ─── Frontend (Vite / Node) ───
+frontend/node_modules/
+frontend/dist/
+
+# ─── Deploy-generated build artifacts (infra/deploy_full.py) ───
+# The built SPA is copied here at deploy time; source lives in frontend/.
+backend/app/static/frontend/
+
+# ─── Logs ───
+*.log
