@@ -800,6 +800,44 @@ def _extract_feedback(raw) -> str:
     return ""
 
 
+def _threshold_rationale(score: float, bucket: str, comp: dict, feedback: str) -> str:
+    """Explain, in plain language, why an answer landed in its EDS band.
+
+    Combines the model's qualitative feedback with the quantitative EDS drivers
+    (authenticity gate, concept coverage, causal-link coverage) so a professor
+    can see *why* a score sits at a given threshold, not just the number.
+    """
+    pct = round(score * 100)
+    if not comp:
+        lead = (feedback or "").strip()
+        return (f"{lead} " if lead else "") + f"Scored {pct}/100 ({bucket} band)."
+
+    r = comp.get("r_gate")
+    node = comp.get("node_score")
+    edge = comp.get("edge_score")
+    nodes_n = len(comp.get("nodes_detected") or [])
+    edges_n = len(comp.get("edges_demonstrated") or [])
+
+    parts = []
+    if r is not None:
+        if r >= 0.75:
+            auth = "authentic reasoning"
+        elif r >= 0.4:
+            auth = "partly recited"
+        else:
+            auth = "mostly keyword recitation"
+        parts.append(f"authenticity gate R={round(r, 2)} ({auth})")
+    if node is not None:
+        parts.append(f"concept coverage {round(node * 100)}% ({nodes_n} nodes)")
+    if edge is not None:
+        parts.append(f"causal-link coverage {round(edge * 100)}% ({edges_n} links)")
+
+    detail = "; ".join(parts)
+    lead = (feedback or "").strip()
+    tail = f"Scored {pct}/100 → {bucket} band" + (f" because {detail}." if detail else ".")
+    return (f"{lead} " if lead else "") + tail
+
+
 def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
     """Assemble the caller's exam results from their most-recent session."""
     with repo.conn.cursor() as cur:
@@ -2920,26 +2958,24 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                     )
                     grade_row = cur.fetchone()
 
-                if grade_row:
-                    if grade_row[3] != "released" and caller.role != Role.PROFESSOR:
-                        raise AuthorizationError("grades not yet released")
-                    return {
-                        "grade_id": str(grade_row[0]),
-                        "session_id": session_id,
-                        "final_score": float(grade_row[1]),
-                        "component_scores": grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}"),
-                        "status": grade_row[3],
-                        "released_at": grade_row[4].isoformat() if grade_row[4] else None,
-                    }
+                if grade_row and grade_row[3] != "released" and caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("grades not yet released")
 
+                # Per-turn detail: question text, the student's own answer, the
+                # model's feedback, and the quantitative EDS drivers — so a
+                # reviewer sees the response and *why* each score sits where it
+                # does. Included whether or not a final grade has been released.
                 with repo.conn.cursor() as cur:
                     cur.execute(
-                        """SELECT e.evaluation_id, e.turn_id, e.eds_score, e.eds_bucket,
-                                  e.raw_llm_output, st.turn_index
+                        """SELECT e.turn_id, e.eds_score, e.eds_bucket,
+                                  e.raw_llm_output, e.eds_components,
+                                  st.turn_index, st.sub_turn_index,
+                                  st.student_answer, q.text
                            FROM evaluation e
                            JOIN session_turn st ON st.turn_id = e.turn_id
+                           LEFT JOIN question q ON q.question_id = st.question_id
                            WHERE st.session_id = %s::uuid
-                           ORDER BY st.turn_index""",
+                           ORDER BY st.turn_index, st.sub_turn_index""",
                         (session_id,),
                     )
                     eval_rows = cur.fetchall()
@@ -2947,17 +2983,45 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                 evaluations = []
                 total_eds = 0.0
                 for er in eval_rows:
-                    raw = er[4] if isinstance(er[4], dict) else (_json.loads(er[4]) if er[4] else {})
-                    total_eds += float(er[2])
+                    raw = er[3] if isinstance(er[3], dict) else (_json.loads(er[3]) if er[3] else {})
+                    comp = er[4] if isinstance(er[4], dict) else (_json.loads(er[4]) if er[4] else {})
+                    score = float(er[1])
+                    total_eds += score
+                    fb = raw.get("feedback", "")
                     evaluations.append({
-                        "turn_id": str(er[1]),  # lets clients drill into GET /api/evaluations/{turn_id}
+                        "turn_id": str(er[0]),  # lets clients drill into GET /api/evaluations/{turn_id}
                         "turn_index": er[5],
-                        "eds_score": float(er[2]),
-                        "eds_bucket": er[3],
+                        "sub_turn_index": er[6],
+                        "question_text": er[8] or "",
+                        "student_answer": er[7] or "",
+                        "eds_score": score,
+                        "eds_bucket": er[2],
                         "answered": raw.get("answered", True),
                         "adequate": raw.get("adequate", False),
+                        "feedback": fb,
                         "eds_delta": raw.get("eds_delta", 0),
+                        "components": {
+                            "node_coverage": comp.get("node_score"),
+                            "edge_coverage": comp.get("edge_score"),
+                            "recitation_gate": comp.get("r_gate"),
+                            "nodes_detected": comp.get("nodes_detected", []),
+                            "edges_demonstrated": comp.get("edges_demonstrated", []),
+                        },
+                        "rationale": _threshold_rationale(score, er[2], comp, fb),
                     })
+
+                if grade_row:
+                    return {
+                        "grade_id": str(grade_row[0]),
+                        "session_id": session_id,
+                        "final_score": float(grade_row[1]),
+                        "component_scores": grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}"),
+                        "status": grade_row[3],
+                        "released_at": grade_row[4].isoformat() if grade_row[4] else None,
+                        "total_eds": round(total_eds, 2),
+                        "turns_evaluated": len(evaluations),
+                        "evaluations": evaluations,
+                    }
 
                 return {
                     "session_id": session_id,

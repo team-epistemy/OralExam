@@ -37,11 +37,23 @@ interface SessionGrade {
 
 interface TurnEvaluation {
   turn_index: number;
+  sub_turn_index?: number;
+  question_text?: string;
+  student_answer?: string;
   eds_score: number;
   eds_bucket: string;
   answered: boolean;
   adequate: boolean;
   eds_delta: number;
+  feedback?: string;
+  rationale?: string;
+  components?: {
+    node_coverage?: number | null;
+    edge_coverage?: number | null;
+    recitation_gate?: number | null;
+    nodes_detected?: string[];
+    edges_demonstrated?: number[];
+  };
 }
 
 interface GradeReleaseResponse {
@@ -78,6 +90,28 @@ function edsBand(score: number | null): string {
   if (score >= 70) return 'Proficient';
   if (score >= 50) return 'Developing';
   return 'Starting';
+}
+
+function groupByQuestion(evals: TurnEvaluation[]) {
+  const map = new Map<number, TurnEvaluation[]>();
+  for (const ev of evals) {
+    const arr = map.get(ev.turn_index) || [];
+    arr.push(ev);
+    map.set(ev.turn_index, arr);
+  }
+  return Array.from(map.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([turn_index, attempts]) => {
+      attempts.sort((a, b) => (a.sub_turn_index ?? 0) - (b.sub_turn_index ?? 0));
+      const best = attempts.reduce((m, e) => (e.eds_score > m.eds_score ? e : m), attempts[0]);
+      return {
+        turn_index,
+        question_text: attempts.find((a) => a.question_text)?.question_text || '',
+        eds_score: best.eds_score,
+        eds_bucket: best.eds_bucket,
+        attempts,
+      };
+    });
 }
 
 function statusBadge(status: string) {
@@ -411,26 +445,57 @@ function SessionDetail({
 
   return (
     <div className="space-y-4">
-      {/* Per-turn evaluations */}
+      {/* Per-question responses, scores, and reasoning */}
       {sessionGrade.evaluations && sessionGrade.evaluations.length > 0 ? (
         <div>
           <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
-            Turn-by-Turn Evaluation
+            Responses &amp; Scoring
           </h4>
-          <div className="space-y-2">
-            {sessionGrade.evaluations.map((ev) => (
-              <div
-                key={ev.turn_index}
-                className="flex items-center gap-4 bg-white rounded-lg border border-gray-100 px-4 py-2"
-              >
-                <span className="text-xs font-mono text-gray-400 w-8">Q{ev.turn_index + 1}</span>
-                <span className={`text-xs font-medium px-2 py-0.5 rounded ${ev.adequate ? 'bg-green-50 text-green-700' : ev.answered ? 'bg-yellow-50 text-yellow-700' : 'bg-red-50 text-red-700'}`}>
-                  {ev.adequate ? 'Adequate' : ev.answered ? 'Partial' : 'Not Answered'}
-                </span>
-                <span className="text-xs text-gray-500">EDS: +{ev.eds_delta}</span>
-                <span className={`text-xs font-medium ${edsColor(ev.eds_score * 100)}`}>
-                  {ev.eds_bucket}
-                </span>
+          <div className="space-y-3">
+            {groupByQuestion(sessionGrade.evaluations).map((group) => (
+              <div key={group.turn_index} className="bg-white rounded-lg border border-gray-100 p-4">
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <p className="text-sm font-medium text-gray-900">
+                    Q{group.turn_index + 1}. {group.question_text || 'Question'}
+                  </p>
+                  <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${edsBgColor(group.eds_score * 100)} ${edsColor(group.eds_score * 100)}`}>
+                    {Math.round(group.eds_score * 100)} · {group.eds_bucket}
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {group.attempts.map((ev, i) => (
+                    <div key={i} className="border-l-2 border-gray-100 pl-3">
+                      {group.attempts.length > 1 && (
+                        <p className="text-[11px] uppercase tracking-wide text-gray-400">
+                          {i === 0 ? 'Initial answer' : `Probe response ${i}`}
+                        </p>
+                      )}
+                      <p className="text-sm text-gray-700">
+                        <span className="text-gray-400">Answer:</span>{' '}
+                        {ev.student_answer || <em className="text-gray-400">no answer</em>}
+                      </p>
+                      {(ev.rationale || ev.feedback) && (
+                        <p className="mt-1 text-xs text-gray-500">
+                          <span className="font-medium text-gray-600">Why this score:</span>{' '}
+                          {ev.rationale || ev.feedback}
+                        </p>
+                      )}
+                      {ev.components && (
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-400">
+                          {ev.components.recitation_gate != null && (
+                            <span>authenticity R={ev.components.recitation_gate.toFixed(2)}</span>
+                          )}
+                          {ev.components.node_coverage != null && (
+                            <span>concepts {Math.round(ev.components.node_coverage * 100)}%</span>
+                          )}
+                          {ev.components.edge_coverage != null && (
+                            <span>causal links {Math.round(ev.components.edge_coverage * 100)}%</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>

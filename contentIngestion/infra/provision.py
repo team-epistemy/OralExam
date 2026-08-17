@@ -177,9 +177,10 @@ def _register_task(ecs_c, settings, image, core, found, log_group) -> str:
 
 def _task_env(settings: Settings, core: dict, found: dict) -> list:
     """Environment variables consumed by the container at runtime."""
-    # Store the Anthropic key in Secrets Manager; the container fetches it at
-    # runtime via the task role. The plaintext key never enters the task def.
+    # Store the Anthropic + ElevenLabs keys in Secrets Manager; the container
+    # fetches them at runtime via the task role. Plaintext never enters the task def.
     _ensure_anthropic_secret(settings)
+    _ensure_elevenlabs_secret(settings)
     pairs = {"AWS_REGION": settings.region, "EPISTEMY_BUCKET": settings.bucket,
              "EPISTEMY_ACCOUNT": settings.account_id, "EPISTEMY_ENV": settings.env,
              "EPISTEMY_QUEUE_URL": core["queue_url"],
@@ -196,15 +197,23 @@ def _task_env(settings: Settings, core: dict, found: dict) -> list:
 
 def _ensure_anthropic_secret(settings: Settings) -> None:
     """Create/update the Anthropic key secret from the deploy host's env, if set."""
-    key = os.getenv("ANTHROPIC_API_KEY")
-    if not key:
+    _ensure_secret(settings, os.getenv("ANTHROPIC_API_KEY"), settings.anthropic_secret_name)
+
+
+def _ensure_elevenlabs_secret(settings: Settings) -> None:
+    """Create/update the ElevenLabs key secret from the deploy host's env, if set."""
+    _ensure_secret(settings, os.getenv("ELEVENLABS_API_KEY"), settings.elevenlabs_secret_name)
+
+
+def _ensure_secret(settings: Settings, value: str, name: str) -> None:
+    """Store `value` in Secrets Manager under `name`; no-op if value is unset."""
+    if not value:
         return  # assume the secret was provisioned out-of-band
     sm = boto3.client("secretsmanager", region_name=settings.region)
-    name = settings.anthropic_secret_name
     try:
-        sm.create_secret(Name=name, SecretString=key)
+        sm.create_secret(Name=name, SecretString=value)
     except sm.exceptions.ResourceExistsException:
-        sm.put_secret_value(SecretId=name, SecretString=key)
+        sm.put_secret_value(SecretId=name, SecretString=value)
 
 
 def _parse_args() -> argparse.Namespace:
