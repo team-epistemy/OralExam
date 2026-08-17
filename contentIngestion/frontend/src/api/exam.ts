@@ -138,3 +138,17 @@ export interface BuildExamConfig {
 export async function buildExam(courseId: string, cfg: BuildExamConfig): Promise<BuildExamResponse> {
   return post<BuildExamResponse>(`/api/courses/${courseId}/exams/build`, cfg);
 }
+
+export interface AssignExamResult {
+  status: string;
+  assignment_id?: string;
+  question_count?: number;
+  message?: string;
+}
+
+export async function assignExam(
+  courseId: string,
+  body: { title: string; questions: ExamVariantQuestion[]; difficulty: string; duration_minutes?: number },
+): Promise<AssignExamResult> {
+  return post<AssignExamResult>(`/api/courses/${courseId}/exams/assign`, body);
+}

@@ -486,9 +486,20 @@ export default function CreateAssignment() {
                 </button>
               </div>
               {questions.length === 0 ? (
-                <p className="text-sm text-gray-500 p-4 bg-gray-50 rounded-lg text-center">
-                  No questions available. Generate questions from the course materials first.
-                </p>
+                <div className="p-4 bg-gray-50 rounded-lg text-center space-y-2">
+                  <p className="text-sm text-gray-500">No questions for this course yet.</p>
+                  <p className="text-xs text-gray-500">
+                    Fastest path: use{' '}
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/professor/exam-builder`)}
+                      className="text-blue-600 hover:text-blue-700 font-medium underline"
+                    >
+                      Build Exam
+                    </button>{' '}
+                    to auto-generate an exam from the concept graph and assign it in one step — or generate &amp; approve questions from the course's Questions tab first.
+                  </p>
+                </div>
               ) : (
                 <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-80 overflow-y-auto">
                   {questions.map((q: any, i: number) => (

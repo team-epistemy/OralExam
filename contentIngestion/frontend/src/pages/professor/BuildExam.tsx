@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { FileText, Loader2, Sparkles, AlertCircle } from 'lucide-react';
 import { get } from '../../api/client';
-import { buildExam, type BuildExamResponse, type ExamVariant } from '../../api/exam';
+import { buildExam, assignExam, type BuildExamResponse, type ExamVariant } from '../../api/exam';
 
 interface Course {
   course_id: string;
@@ -32,6 +32,9 @@ export default function BuildExam() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [assigning, setAssigning] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const { data: courses = [] } = useQuery({
     queryKey: ['professor-courses'],
@@ -71,6 +74,31 @@ export default function BuildExam() {
       setError(e instanceof Error ? e.message : 'Failed to build exam.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleAssign = async () => {
+    if (!selected || !courseId) return;
+    const title = window.prompt('Name this assignment:', `${selected.title}`);
+    if (!title) return;
+    setAssigning(true);
+    setAssignError(null);
+    try {
+      const res = await assignExam(courseId, {
+        title,
+        questions: selected.questions,
+        difficulty,
+        duration_minutes: examLen,
+      });
+      if (res.status === 'completed' && res.assignment_id) {
+        navigate(`/professor/assignments/${res.assignment_id}/grades`);
+      } else {
+        setAssignError(res.message || 'Failed to create assignment.');
+      }
+    } catch (e) {
+      setAssignError(e instanceof Error ? e.message : 'Failed to create assignment.');
+    } finally {
+      setAssigning(false);
     }
   };
 
@@ -206,13 +234,16 @@ export default function BuildExam() {
               </li>
             ))}
           </ol>
-          <div className="mt-4 pt-3 border-t border-gray-100">
-            <Link
-              to={`/professor/assignments/new${courseId ? `?course=${courseId}` : ''}`}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors"
+          <div className="mt-4 pt-3 border-t border-gray-100 flex flex-wrap items-center gap-3">
+            <button
+              onClick={handleAssign}
+              disabled={assigning}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
             >
-              Create Assignment from these concepts →
-            </Link>
+              {assigning ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              Assign this exam to students →
+            </button>
+            {assignError && <span className="text-sm text-red-600">{assignError}</span>}
           </div>
         </div>
       )}

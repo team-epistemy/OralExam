@@ -183,6 +183,9 @@ END $$;
 
 -- FK back-reference: question.generation_job_id -> generation_job.job_id
 -- Added after both tables exist to avoid ordering issues.
+-- The column is added idempotently first: an existing `question` table (created by
+-- schema.sql) predates this column, so the CREATE TABLE above is a no-op for it.
+ALTER TABLE question ADD COLUMN IF NOT EXISTS generation_job_id UUID;
 DO $$ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.table_constraints

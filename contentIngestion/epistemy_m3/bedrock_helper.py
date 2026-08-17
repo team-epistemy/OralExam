@@ -75,10 +75,22 @@ def call_bedrock(
     max_tokens: int = 4000,
     temperature: float = 0.1,
 ) -> dict:
-    """Dispatch to Claude or Bedrock, then parse the JSON response. Name kept for compat."""
-    if getattr(settings, "llm_provider", "anthropic") == "anthropic":
-        return _call_anthropic(settings, system_prompt, user_message, max_tokens)
-    return _call_bedrock_converse(settings, system_prompt, user_message, max_tokens, temperature)
+    """Dispatch to Claude or Bedrock, then parse the JSON response. Name kept for compat.
+
+    Retries on a JSON parse failure: LLMs occasionally emit slightly-malformed JSON
+    on large nested outputs, and a fresh sample almost always parses cleanly.
+    """
+    anthropic_provider = getattr(settings, "llm_provider", "anthropic") == "anthropic"
+    last_err: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            if anthropic_provider:
+                return _call_anthropic(settings, system_prompt, user_message, max_tokens)
+            return _call_bedrock_converse(settings, system_prompt, user_message, max_tokens, temperature)
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_err = exc
+            logger.warning("LLM JSON parse failed (attempt %d/3): %s", attempt + 1, exc)
+    raise last_err  # exhausted retries
 
 
 def _call_anthropic(

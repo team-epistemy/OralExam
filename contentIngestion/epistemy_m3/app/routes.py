@@ -40,6 +40,7 @@ QUESTION_UPDATE = "/api/questions/{question_id}"
 QUESTION_APPROVE = "/api/questions/{question_id}/approve"
 QUESTION_REJECT = "/api/questions/{question_id}/reject"
 EXAM_BUILD = "/api/courses/{course_id}/exams/build"
+EXAM_ASSIGN = "/api/courses/{course_id}/exams/assign"
 
 # ── M6 Delivery routes ──────────────────────────────────────────────────────
 ASSIGNMENTS_LIST = "/api/courses/{course_id}/assignments"
@@ -85,6 +86,7 @@ def frontend_config() -> dict:
             "questionApprove": QUESTION_APPROVE,
             "questionReject": QUESTION_REJECT,
             "examBuild": EXAM_BUILD,
+            "examAssign": EXAM_ASSIGN,
             "studentAssignments": STUDENT_ASSIGNMENTS,
             "assignmentsList": ASSIGNMENTS_LIST,
             "assignmentGet": ASSIGNMENT_GET,
