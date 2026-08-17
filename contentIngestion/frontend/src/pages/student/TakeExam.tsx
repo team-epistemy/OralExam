@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock } from 'lucide-react';
+import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { startExamSession, submitAnswer, getSessionStatus, completeSession } from '../../api/exam';
 import { get } from '../../api/client';
+import { API_BASE_URL } from '../../config';
 import type { ExamQuestion, AnswerResponse, EDSComponents } from '../../api/exam';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -415,6 +416,55 @@ export default function TakeExam() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Voice: TTS (ElevenLabs proxy) speaks questions/probes; ASR (Web Speech API) dictates answers.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const recognitionRef = useRef<{ stop: () => void; start: () => void } | null>(null);
+  const spokenRef = useRef<string>('');
+  const [listening, setListening] = useState(false);
+  const [ttsOn, setTtsOn] = useState(true);
+
+  const speak = useCallback(async (text: string) => {
+    if (!ttsOn || !text) return;
+    try {
+      const token = localStorage.getItem('token');
+      const resp = await fetch(`${API_BASE_URL}/api/tts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ text }),
+      });
+      if (!resp.ok) return; // 503 = TTS not configured -> stay silent
+      const url = URL.createObjectURL(await resp.blob());
+      audioRef.current?.pause();
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.play().catch(() => { /* autoplay may be blocked until a gesture */ });
+    } catch { /* network / unsupported -> silent */ }
+  }, [ttsOn]);
+
+  const toggleMic = () => {
+    const SR = (window as unknown as { SpeechRecognition?: new () => any; webkitSpeechRecognition?: new () => any });
+    const Ctor = SR.SpeechRecognition || SR.webkitSpeechRecognition;
+    if (!Ctor) { setError('Speech recognition is not supported here — try Chrome, Edge, or Safari.'); return; }
+    if (listening) { recognitionRef.current?.stop(); setListening(false); return; }
+    const rec: any = new Ctor();
+    rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
+    let base = draft;
+    rec.onresult = (e: any) => {
+      let interim = '', finalT = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalT += t; else interim += t;
+      }
+      if (finalT) base = (base ? base + ' ' : '') + finalT.trim();
+      setDraft((base + (interim ? ' ' + interim : '')).trim());
+    };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    recognitionRef.current = rec;
+    rec.start();
+    setListening(true);
+  };
+
   // Prevent two-tab desync via BroadcastChannel
   useEffect(() => {
     if (!assignmentId) return;
@@ -429,6 +479,18 @@ export default function TakeExam() {
   // Derived
   const N = questions.length;
   const cur = qData[current];
+
+  // Auto-speak the latest examiner line (question or probe) as it appears.
+  useEffect(() => {
+    if (phase !== 'taking' || !cur) return;
+    const evals = cur.turns.filter((t) => t.role === 'evaluator');
+    const last = evals[evals.length - 1]?.text;
+    if (last && last !== spokenRef.current) {
+      spokenRef.current = last;
+      speak(last);
+    }
+  }, [cur, phase, speak]);
+
   const attemptedQuestions = qData.filter(q => q.attempted);
   const edsScore = attemptedQuestions.length > 0
     ? Math.round((attemptedQuestions.reduce((s, q) => s + q.score, 0) / attemptedQuestions.length) * 100)
@@ -1157,6 +1219,20 @@ export default function TakeExam() {
                 className="w-full px-4 py-3 border border-gray-300 rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50"
               />
               <div className="flex gap-2 mt-2">
+                <button
+                  onClick={toggleMic}
+                  title={listening ? 'Stop dictation' : 'Answer by voice'}
+                  className={`flex items-center justify-center px-3 py-2.5 rounded-lg border text-sm font-medium transition-colors ${listening ? 'bg-red-50 border-red-300 text-red-600 animate-pulse' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                >
+                  {listening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={() => { setTtsOn((v) => !v); if (ttsOn) audioRef.current?.pause(); }}
+                  title={ttsOn ? 'Mute question audio' : 'Unmute question audio'}
+                  className="flex items-center justify-center px-3 py-2.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium transition-colors"
+                >
+                  {ttsOn ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+                </button>
                 <button
                   onClick={handleAnswer}
                   disabled={!draft.trim() || answerMutation.isPending}

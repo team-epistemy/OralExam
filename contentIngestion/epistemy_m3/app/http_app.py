@@ -407,6 +407,31 @@ def _register_routes(app: FastAPI, deps) -> None:
     _register_delivery(app, deps)
     _register_evaluation(app, deps)
     _register_delete_endpoints(app, deps)
+    _register_tts(app, deps)
+
+
+class TTSRequest(BaseModel):
+    """POST body for the ElevenLabs TTS proxy."""
+    text: str = Field(min_length=1, max_length=5000)
+    voice_id: Optional[str] = None
+
+
+def _register_tts(app: FastAPI, deps) -> None:
+    """ElevenLabs TTS proxy — keeps the key server-side; 503 when not configured."""
+    from starlette.responses import Response
+    from epistemy_m3 import tts_helper
+
+    @app.post(R.TTS)
+    def synthesize_speech(
+        req: TTSRequest,
+        x_user_id: str = Header("student"),
+        x_role: str = Header("student"),
+    ):
+        audio = tts_helper.synthesize(deps()["settings"], req.text, req.voice_id)
+        if not audio:
+            raise HTTPException(status_code=503, detail="TTS is not configured")
+        return Response(content=audio, media_type="audio/mpeg",
+                        headers={"Cache-Control": "no-store"})
 
 
 def _register_auth(app: FastAPI) -> None:

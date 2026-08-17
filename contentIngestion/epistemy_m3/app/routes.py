@@ -42,6 +42,9 @@ QUESTION_REJECT = "/api/questions/{question_id}/reject"
 EXAM_BUILD = "/api/courses/{course_id}/exams/build"
 EXAM_ASSIGN = "/api/courses/{course_id}/exams/assign"
 
+# ── Text-to-speech (ElevenLabs proxy) ────────────────────────────────────────
+TTS = "/api/tts"
+
 # ── M6 Delivery routes ──────────────────────────────────────────────────────
 ASSIGNMENTS_LIST = "/api/courses/{course_id}/assignments"
 ASSIGNMENT_GET = "/api/assignments/{assignment_id}"
@@ -87,6 +90,7 @@ def frontend_config() -> dict:
             "questionReject": QUESTION_REJECT,
             "examBuild": EXAM_BUILD,
             "examAssign": EXAM_ASSIGN,
+            "tts": TTS,
             "studentAssignments": STUDENT_ASSIGNMENTS,
             "assignmentsList": ASSIGNMENTS_LIST,
             "assignmentGet": ASSIGNMENT_GET,
