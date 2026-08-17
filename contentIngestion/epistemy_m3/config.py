@@ -34,6 +34,10 @@ class Settings:
     # Secrets Manager id holding the Anthropic API key; fetched at runtime by the
     # task role (never placed in the task definition or image).
     anthropic_secret: str = os.getenv("EPISTEMY_ANTHROPIC_SECRET", "")
+    # ElevenLabs TTS: Secrets Manager id for the API key, voice, and model.
+    elevenlabs_secret: str = os.getenv("EPISTEMY_ELEVENLABS_SECRET", "")
+    elevenlabs_voice_id: str = os.getenv("EPISTEMY_ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+    elevenlabs_model: str = os.getenv("EPISTEMY_ELEVENLABS_MODEL", "eleven_turbo_v2_5")
     embed_model: str = os.getenv("EPISTEMY_EMBED_MODEL", EMBED_MODEL_ID)
     embed_dims: int = int(os.getenv("EPISTEMY_EMBED_DIMS", "1024"))
     bedrock_region: str = os.getenv("EPISTEMY_BEDROCK_REGION", "us-west-2")
@@ -76,6 +80,11 @@ class Settings:
     def anthropic_secret_name(self) -> str:
         """Secrets Manager id for the Anthropic API key (override via env, else default)."""
         return self.anthropic_secret or f"epistemy/anthropic-api-key-{self.env}"
+
+    @property
+    def elevenlabs_secret_name(self) -> str:
+        """Secrets Manager id for the ElevenLabs API key (override via env, else default)."""
+        return self.elevenlabs_secret or f"epistemy/elevenlabs-api-key-{self.env}"
 
     @property
     def log_group(self) -> str:

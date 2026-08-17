@@ -188,7 +188,9 @@ def _task_env(settings: Settings, core: dict, found: dict) -> list:
              "EPISTEMY_USE_BEDROCK": "1",
              "EPISTEMY_LLM_PROVIDER": settings.llm_provider,
              "EPISTEMY_ANTHROPIC_MODEL": settings.anthropic_model,
-             "EPISTEMY_ANTHROPIC_SECRET": settings.anthropic_secret_name}
+             "EPISTEMY_ANTHROPIC_SECRET": settings.anthropic_secret_name,
+             "EPISTEMY_ELEVENLABS_SECRET": settings.elevenlabs_secret_name,
+             "EPISTEMY_ELEVENLABS_VOICE_ID": settings.elevenlabs_voice_id}
     return [{"name": k, "value": v} for k, v in pairs.items()]
 
 

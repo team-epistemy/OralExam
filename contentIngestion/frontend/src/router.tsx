@@ -11,6 +11,7 @@ import CreateAssignment from './pages/professor/CreateAssignment';
 import GradeView from './pages/professor/GradeView';
 import StudentDashboard from './pages/student/Dashboard';
 import TakeExam from './pages/student/TakeExam';
+import Results from './pages/student/Results';
 
 function getUser() {
   const raw = localStorage.getItem('user');
@@ -102,6 +103,10 @@ export const router = createBrowserRouter([
       {
         path: '/student/exam/:assignmentId',
         element: <RequireRole role="student"><TakeExam /></RequireRole>,
+      },
+      {
+        path: '/student/results/:assignmentId',
+        element: <RequireRole role="student"><Results /></RequireRole>,
       },
     ],
   },

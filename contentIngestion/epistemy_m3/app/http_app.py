@@ -407,6 +407,31 @@ def _register_routes(app: FastAPI, deps) -> None:
     _register_delivery(app, deps)
     _register_evaluation(app, deps)
     _register_delete_endpoints(app, deps)
+    _register_tts(app, deps)
+
+
+class TTSRequest(BaseModel):
+    """POST body for the ElevenLabs TTS proxy."""
+    text: str = Field(min_length=1, max_length=5000)
+    voice_id: Optional[str] = None
+
+
+def _register_tts(app: FastAPI, deps) -> None:
+    """ElevenLabs TTS proxy — keeps the key server-side; 503 when not configured."""
+    from starlette.responses import Response
+    from epistemy_m3 import tts_helper
+
+    @app.post(R.TTS)
+    def synthesize_speech(
+        req: TTSRequest,
+        x_user_id: str = Header("student"),
+        x_role: str = Header("student"),
+    ):
+        audio = tts_helper.synthesize(deps()["settings"], req.text, req.voice_id)
+        if not audio:
+            raise HTTPException(status_code=503, detail="TTS is not configured")
+        return Response(content=audio, media_type="audio/mpeg",
+                        headers={"Cache-Control": "no-store"})
 
 
 def _register_auth(app: FastAPI) -> None:
@@ -1045,6 +1070,44 @@ def _concept_banks(concepts: list) -> dict:
     return banks
 
 
+def _generate_expected_paths(settings, questions: list, concepts: list, relations: list) -> dict:
+    """Claude-generate an expected reasoning path per question (for EDS scoring).
+
+    Grounds nodes/edges in the course concept graph. Returns {index: {nodes,edges,extensions}};
+    empty on any failure so assignment still succeeds (EDS just degrades on those questions).
+    """
+    if not questions:
+        return {}
+    concept_lines = "\n".join(f"- {c.get('label')}: {c.get('definition', '')}" for c in concepts)
+    rel_lines = "\n".join(
+        f"- {r.get('src')} {r.get('edge_type')} {r.get('dst')}" for r in relations)
+    q_lines = "\n".join(f"{i}. {q.q}" for i, q in enumerate(questions))
+    system_prompt = (
+        "For each oral-exam question, produce the EXPECTED REASONING PATH a strong answer must "
+        "demonstrate, grounded in the course concept graph. For each question return: "
+        '"nodes" (key concepts that must be DEMONSTRATED with understanding, each {"label","definition"}), '
+        '"edges" (causal links that must be ARTICULATED, each {"src","dst",'
+        '"link_type":"CAUSES|ENABLES|PREVENTS|INCREASES|DECREASES","explanation"}), and '
+        '"extensions" (1-3 bonus concepts, each {"label","connection"}). Prefer concepts from the graph. '
+        'Return ONLY JSON: {"paths": [{"index": 0, "nodes": [...], "edges": [...], "extensions": [...]}]}'
+    )
+    user = (f"Concept graph:\n{concept_lines}\n\nRelations:\n{rel_lines}\n\n"
+            f"Questions:\n{q_lines}")
+    try:
+        data = call_bedrock(settings, system_prompt, user,
+                            max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.2)
+        out = {}
+        for p in (data.get("paths") or []):
+            idx = p.get("index")
+            if isinstance(idx, int):
+                out[idx] = {"nodes": p.get("nodes", []), "edges": p.get("edges", []),
+                            "extensions": p.get("extensions", [])}
+        return out
+    except Exception as exc:  # noqa: BLE001 - EDS degrades, assignment still succeeds
+        logger.warning("expected_path generation failed: %s", exc)
+        return {}
+
+
 # ── M5 Questions ─────────────────────────────────────────────────────────────
 
 class UpdateQuestionRequest(BaseModel):
@@ -1068,6 +1131,21 @@ class BuildExamRequest(BaseModel):
     q_count: int = Field(default=12, ge=1, le=MAX_QUESTION_COUNT)
     exam_len: int = Field(default=30, ge=5, le=180)
     difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
+
+
+class ExamAssignQuestion(BaseModel):
+    """One question from a built exam variant."""
+    concept_id: str = ""
+    topic: str = ""
+    q: str = Field(min_length=1, max_length=5000)
+
+
+class AssignExamRequest(BaseModel):
+    """Persist a built exam variant's questions and create an assignment from them."""
+    title: str = Field(min_length=1, max_length=300)
+    questions: List[ExamAssignQuestion]
+    difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
+    duration_minutes: Optional[int] = None
 
 
 def _register_questions(app: FastAPI, deps) -> None:
@@ -1320,6 +1398,104 @@ def _register_questions(app: FastAPI, deps) -> None:
                 for v in variants:
                     v["questions"] = assemble_questions(v["distribution"], banks)
                 return {"status": "completed", "concept_count": len(simple), "variants": variants}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.EXAM_ASSIGN)
+    def assign_exam(
+        course_id: str,
+        req: AssignExamRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Persist a built exam variant's questions and create an active assignment."""
+        import json as _json, uuid as _uuid
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                if not req.questions:
+                    return {"status": "error", "message": "no questions to assign"}
+
+                diff_json = _json.dumps({
+                    "level": req.difficulty,
+                    "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(req.difficulty, 0.55),
+                })
+                # Generate an expected reasoning path per question so these exams
+                # score with the real EDS formula (node/edge coverage + R-gate).
+                graph = _query_graph_version(repo, caller.org_id, course_id)
+                paths = _generate_expected_paths(
+                    d["settings"], req.questions,
+                    graph.get("concepts", []), graph.get("relations", []))
+                question_ids = []
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT 1 FROM information_schema.columns
+                           WHERE table_name = 'question' AND column_name = 'expected_path'""")
+                    has_ep = cur.fetchone() is not None
+                    for i, q in enumerate(req.questions):
+                        qid = str(_uuid.uuid4())
+                        question_ids.append(qid)
+                        concept_ids = _json.dumps([q.concept_id or q.topic or "general"])
+                        if has_ep:
+                            cur.execute(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks,
+                                    expected_path)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           'oral', %s::jsonb, 'approved', %s, '[]'::jsonb, %s::jsonb)""",
+                                (qid, course_id, caller.org_id, concept_ids, q.q, diff_json,
+                                 caller.user_id, _json.dumps(paths.get(i, {}))),
+                            )
+                        else:
+                            cur.execute(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           'oral', %s::jsonb, 'approved', %s, '[]'::jsonb)""",
+                                (qid, course_id, caller.org_id, concept_ids, q.q, diff_json,
+                                 caller.user_id),
+                            )
+                    qs_id = str(_uuid.uuid4())
+                    cur.execute(
+                        """INSERT INTO question_set (question_set_id, course_id, org_id, title, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s)""",
+                        (qs_id, course_id, caller.org_id, req.title, caller.user_id),
+                    )
+                    for idx, qid in enumerate(question_ids):
+                        cur.execute(
+                            """INSERT INTO question_set_membership
+                               (question_set_id, question_id, org_id, position)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s)""",
+                            (qs_id, qid, caller.org_id, idx),
+                        )
+                    assignment_id = str(_uuid.uuid4())
+                    cfg = _json.dumps({
+                        "adaptive": True, "max_questions": len(question_ids),
+                        "time_limit_minutes": req.duration_minutes,
+                        "difficulty": req.difficulty, "shuffle_questions": False,
+                    })
+                    cur.execute(
+                        """INSERT INTO assignment
+                           (assignment_id, course_id, org_id, title, question_set_id, config,
+                            status, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s::uuid, %s::jsonb,
+                                   'active', %s)""",
+                        (assignment_id, course_id, caller.org_id, req.title, qs_id, cfg, caller.user_id),
+                    )
+                repo.conn.commit()
+                return {"status": "completed", "assignment_id": assignment_id,
+                        "question_count": len(question_ids)}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
