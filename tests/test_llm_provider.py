@@ -1,5 +1,12 @@
-"""Offline tests for LLM provider routing (mocked client — no network/keys)."""
+"""Offline tests for LLM provider routing (mocked client — no network/keys).
+
+The final test is an opt-in live check (EPISTEMY_LIVE_TESTS=1) that actually
+calls the Anthropic API to confirm the direct-SDK path works end to end.
+"""
+import os
 from dataclasses import replace
+
+import pytest
 
 from backend.config import Settings
 from backend import bedrock_helper
@@ -76,3 +83,27 @@ def test_bedrock_route_still_available(monkeypatch):
     result = bedrock_helper.call_bedrock(settings, "s", "u", temperature=0.2)
     assert result == {"from": "bedrock"}
     assert captured["inferenceConfig"]["temperature"] == 0.2  # bedrock still uses temperature
+
+
+@pytest.mark.skipif(
+    os.getenv("EPISTEMY_LIVE_TESTS") != "1",
+    reason="set EPISTEMY_LIVE_TESTS=1 (with ANTHROPIC_API_KEY or AWS creds + "
+           "EPISTEMY_ANTHROPIC_SECRET) to run the live Anthropic API test",
+)
+def test_live_anthropic_direct_api():
+    """Real Claude call via the direct Anthropic SDK (not Bedrock); opt-in only."""
+    settings = Settings()
+    # Confirms the app defaults to the direct Anthropic API path, not Bedrock.
+    assert settings.llm_provider == "anthropic"
+    # When no ANTHROPIC_API_KEY env is set, fetch the key from Secrets Manager by
+    # its computed name (mirrors what the ECS task env does at deploy time).
+    if not os.getenv("ANTHROPIC_API_KEY") and not settings.anthropic_secret:
+        settings = replace(settings, anthropic_secret=settings.anthropic_secret_name)
+
+    result = bedrock_helper.call_bedrock(
+        settings,
+        "You are a JSON API. Respond with ONLY a JSON object, no prose.",
+        'Return exactly {"ok": true}.',
+        max_tokens=50,
+    )
+    assert isinstance(result, dict) and result.get("ok") is True
