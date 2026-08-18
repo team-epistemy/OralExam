@@ -968,10 +968,27 @@ def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
                           "feedback": _extract_feedback(r[4])})
     total = len(rows)
     overall = round(score_sum / total * 100) if total else 0
+    feedback = f"Answered {answered} of {total} questions · epistemic-depth score {overall}%."
+
+    # A released grade is authoritative: show the professor's final score and
+    # overall comment instead of the raw auto EDS.
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            "SELECT final_score, component_scores, status FROM grade WHERE session_id = %s::uuid",
+            (session_id,),
+        )
+        grow = cur.fetchone()
+    if grow and grow[2] == "released":
+        overall = round(float(grow[0]) * 100)
+        comp = grow[1] if isinstance(grow[1], dict) else _json.loads(grow[1] or "{}")
+        comment = comp.get("overall_comment")
+        if comment:
+            feedback = comment
+
     return {
         "session_id": session_id, "assignment_id": assignment_id, "status": srow[1],
         "score": overall, "total_questions": total, "questions_answered": answered,
-        "feedback": f"Answered {answered} of {total} questions · epistemic-depth score {overall}%.",
+        "feedback": feedback,
         "question_results": q_results,
         "completed_at": srow[2].isoformat() if srow[2] else None,
     }
@@ -2959,6 +2976,12 @@ class GradeOverrideRequest(BaseModel):
     reason: str = Field(..., min_length=1, max_length=2000)
 
 
+class GradeUpsertRequest(BaseModel):
+    """Professor edit of a session's grade/comment (0-100 UI scale; both optional)."""
+    score: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    comment: Optional[str] = Field(default=None, max_length=5000)
+
+
 def _register_evaluation(app: FastAPI, deps) -> None:
     """Evaluation and grading endpoints with real DB and Bedrock implementations."""
     import json as _json, uuid as _uuid
@@ -3103,11 +3126,13 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                     })
 
                 if grade_row:
+                    comp_all = grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}")
                     return {
                         "grade_id": str(grade_row[0]),
                         "session_id": session_id,
                         "final_score": float(grade_row[1]),
-                        "component_scores": grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}"),
+                        "overall_comment": comp_all.get("overall_comment", ""),
+                        "component_scores": comp_all,
                         "status": grade_row[3],
                         "released_at": grade_row[4].isoformat() if grade_row[4] else None,
                         "total_eds": round(total_eds, 2),
@@ -3115,12 +3140,137 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                         "evaluations": evaluations,
                     }
 
+                # No grade row yet: surface an auto EDS score so the professor's
+                # edit form starts from a sensible default they can adjust.
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT config FROM assignment WHERE assignment_id = %s::uuid",
+                                (str(srow[2]),))
+                    crow = cur.fetchone()
+                cfg = crow[0] if crow and isinstance(crow[0], dict) else (_json.loads(crow[0]) if crow and crow[0] else {})
+                maxq = cfg.get("max_questions", 10) if isinstance(cfg, dict) else 10
+                auto_score = round(min(1.0, total_eds / max(maxq, 1)), 4)
                 return {
+                    "grade_id": None,
                     "session_id": session_id,
                     "status": "pending",
+                    "final_score": auto_score,
+                    "overall_comment": "",
                     "total_eds": round(total_eds, 2),
                     "turns_evaluated": len(evaluations),
                     "evaluations": evaluations,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/grades/{session_id} — professor edits grade + comment ───
+    @app.post(R.GRADES_SESSION)
+    def upsert_grade(
+        session_id: str,
+        req: GradeUpsertRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Create/update a session's grade and overall comment before release.
+
+        Stores the comment in component_scores.overall_comment (no schema change)
+        and marks a manually-set score via override_by so release preserves it.
+        """
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT student_id, assignment_id, course_id
+                           FROM exam_session WHERE session_id = %s::uuid""",
+                        (session_id,),
+                    )
+                    srow = cur.fetchone()
+                if not srow:
+                    raise AuthorizationError("session not found")
+                student_id, assignment_id, course_id = srow[0], str(srow[1]), str(srow[2])
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT grade_id, final_score, component_scores, status, override_by
+                           FROM grade WHERE session_id = %s::uuid""",
+                        (session_id,),
+                    )
+                    grow = cur.fetchone()
+
+                now = datetime.now(timezone.utc)
+                if grow:
+                    comp = grow[2] if isinstance(grow[2], dict) else _json.loads(grow[2] or "{}")
+                    if req.comment is not None:
+                        comp["overall_comment"] = req.comment
+                    if req.score is not None:
+                        final = round(req.score / 100.0, 4)
+                        override_by = caller.user_id
+                    else:
+                        final = float(grow[1])
+                        override_by = grow[4]
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE grade SET final_score = %s,
+                                   component_scores = %s::jsonb, override_by = %s,
+                                   updated_at = %s
+                               WHERE grade_id = %s::uuid""",
+                            (final, _json.dumps(comp), override_by, now, str(grow[0])),
+                        )
+                    grade_id, status = str(grow[0]), grow[3]
+                else:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT COALESCE(SUM(e.eds_score), 0), COUNT(e.evaluation_id)
+                               FROM evaluation e JOIN session_turn st ON st.turn_id = e.turn_id
+                               WHERE st.session_id = %s::uuid""",
+                            (session_id,),
+                        )
+                        er = cur.fetchone()
+                        cur.execute("SELECT config FROM assignment WHERE assignment_id = %s::uuid",
+                                    (assignment_id,))
+                        crow = cur.fetchone()
+                    total_eds = float(er[0]) if er else 0.0
+                    cfg = crow[0] if crow and isinstance(crow[0], dict) else (_json.loads(crow[0]) if crow and crow[0] else {})
+                    maxq = cfg.get("max_questions", 10) if isinstance(cfg, dict) else 10
+                    auto = round(min(1.0, total_eds / max(maxq, 1)), 4)
+                    final = round(req.score / 100.0, 4) if req.score is not None else auto
+                    override_by = caller.user_id if req.score is not None else None
+                    comp = {"total_eds": round(total_eds, 4),
+                            "turns_evaluated": int(er[1]) if er else 0,
+                            "max_questions": maxq}
+                    if req.comment is not None:
+                        comp["overall_comment"] = req.comment
+                    grade_id = str(_uuid.uuid4())
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO grade
+                               (grade_id, session_id, student_id, assignment_id,
+                                org_id, course_id, final_score, component_scores,
+                                override_by, status)
+                               VALUES (%s::uuid, %s::uuid, %s, %s::uuid, %s::uuid,
+                                       %s::uuid, %s, %s::jsonb, %s, 'pending')""",
+                            (grade_id, session_id, student_id, assignment_id,
+                             caller.org_id, course_id, final, _json.dumps(comp),
+                             override_by),
+                        )
+                    status = "pending"
+
+                repo.conn.commit()
+                return {
+                    "grade_id": grade_id,
+                    "session_id": session_id,
+                    "final_score": final,
+                    "overall_comment": comp.get("overall_comment", ""),
+                    "status": status,
                 }
             finally:
                 _release_repo(d, repo)
@@ -3178,7 +3328,9 @@ def _register_evaluation(app: FastAPI, deps) -> None:
 
                     with repo.conn.cursor() as cur:
                         cur.execute(
-                            "SELECT grade_id, status FROM grade WHERE session_id = %s::uuid",
+                            """SELECT grade_id, status, final_score, component_scores,
+                                      override_by
+                               FROM grade WHERE session_id = %s::uuid""",
                             (sid,),
                         )
                         existing_grade = cur.fetchone()
@@ -3213,6 +3365,14 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                     }
 
                     if existing_grade:
+                        # Preserve the professor's manual grade + overall comment:
+                        # a set override_by means the score was hand-adjusted.
+                        prev_comp = existing_grade[3] if isinstance(existing_grade[3], dict) else _json.loads(existing_grade[3] or "{}")
+                        overall_comment = prev_comp.get("overall_comment")
+                        if overall_comment is not None:
+                            component_scores["overall_comment"] = overall_comment
+                        if existing_grade[4] is not None:  # override_by => manual score
+                            final_score = float(existing_grade[2])
                         with repo.conn.cursor() as cur:
                             cur.execute(
                                 """UPDATE grade SET final_score = %s,
