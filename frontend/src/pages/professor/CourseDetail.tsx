@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileText, Network, HelpCircle, ClipboardList, Upload, Check, Pencil, X, Save, Trash2, AlertTriangle } from 'lucide-react';
@@ -249,7 +249,7 @@ function GraphTab({ courseId }: { courseId: string }) {
     refetchInterval: (query) => (query.state.data?.is_stale ? 8000 : false),
   });
 
-  const rawConcepts = useMemo(() => graphData?.concepts || [], [graphData]);
+  const rawConcepts = graphData?.concepts || [];
   const edges = graphData?.edges || [];
   const nodeCount = graphData?.node_count || rawConcepts.length;
   const isStale = Boolean(graphData?.is_stale);

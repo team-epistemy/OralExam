@@ -1,22 +1,23 @@
 name: unit-tests
 
-# Runs the contentIngestion unit-test suite on every submission (push + PR).
+# Runs the backend unit-test suite on every submission (push + PR).
 on:
   push:
     paths:
-      - "contentIngestion/**"
+      - "backend/**"
+      - "tests/**"
+      - "requirements.txt"
       - ".github/workflows/tests.yml"
   pull_request:
     paths:
-      - "contentIngestion/**"
+      - "backend/**"
+      - "tests/**"
+      - "requirements.txt"
       - ".github/workflows/tests.yml"
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: contentIngestion
     env:
       # Dummy values so Settings() resolves without real cloud credentials.
       EPISTEMY_ACCOUNT: "000000000000"
@@ -29,7 +30,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: contentIngestion/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Install test dependencies
         # requirements.txt is the lean test set; numpy + networkx are the only

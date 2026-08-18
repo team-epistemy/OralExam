@@ -42,6 +42,33 @@ DO $$ BEGIN
 END $$;
 
 
+CREATE TABLE IF NOT EXISTS graph_eds_results (
+    run_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    assessment_id  UUID NOT NULL,
+    student_id     TEXT NOT NULL,
+    org_id         UUID NOT NULL REFERENCES org(org_id),
+    course_id      UUID NOT NULL REFERENCES course(course_id),
+    eds_score      DOUBLE PRECISION NOT NULL,
+    components     JSONB,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_eds_tenant
+    ON graph_eds_results(org_id, course_id, assessment_id);
+CREATE INDEX IF NOT EXISTS idx_graph_eds_student
+    ON graph_eds_results(student_id, course_id);
+
+ALTER TABLE graph_eds_results ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'graph_eds_results' AND policyname = 'graph_eds_results_tenant'
+    ) THEN
+        CREATE POLICY graph_eds_results_tenant ON graph_eds_results
+            USING (org_id = current_setting('app.org_id')::uuid);
+    END IF;
+END $$;
+
+
 -- =============================================================================
 -- M5: Question Generation (backend.questions)
 -- =============================================================================
@@ -57,6 +84,7 @@ CREATE TABLE IF NOT EXISTS question (
     status            TEXT NOT NULL DEFAULT 'draft',
     created_by        TEXT NOT NULL DEFAULT 'system',
     source_chunks     JSONB NOT NULL DEFAULT '[]',
+    generation_job_id UUID,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT question_type_chk CHECK (question_type IN ('free_text', 'oral')),
@@ -120,6 +148,52 @@ DO $$ BEGIN
     ) THEN
         CREATE POLICY question_set_membership_tenant ON question_set_membership
             USING (org_id = current_setting('app.org_id')::uuid);
+    END IF;
+END $$;
+
+
+CREATE TABLE IF NOT EXISTS generation_job (
+    job_id          UUID PRIMARY KEY,
+    org_id          UUID NOT NULL REFERENCES org(org_id),
+    course_id       UUID NOT NULL REFERENCES course(course_id),
+    concept_ids     JSONB NOT NULL DEFAULT '[]',
+    requested_count INT NOT NULL DEFAULT 5,
+    status          TEXT NOT NULL DEFAULT 'queued',
+    generated_count INT NOT NULL DEFAULT 0,
+    question_ids    JSONB NOT NULL DEFAULT '[]',
+    error           JSONB,
+    created_by      TEXT NOT NULL DEFAULT 'system',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT generation_job_status_chk CHECK (status IN ('queued', 'running', 'succeeded', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS generation_job_course_idx ON generation_job(course_id);
+CREATE INDEX IF NOT EXISTS generation_job_status_idx ON generation_job(org_id, status);
+
+ALTER TABLE generation_job ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'generation_job' AND policyname = 'generation_job_tenant'
+    ) THEN
+        CREATE POLICY generation_job_tenant ON generation_job
+            USING (org_id = current_setting('app.org_id')::uuid);
+    END IF;
+END $$;
+
+-- FK back-reference: question.generation_job_id -> generation_job.job_id
+-- Added after both tables exist to avoid ordering issues.
+-- The column is added idempotently first: an existing `question` table (created by
+-- schema.sql) predates this column, so the CREATE TABLE above is a no-op for it.
+ALTER TABLE question ADD COLUMN IF NOT EXISTS generation_job_id UUID;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_name = 'question_generation_job_fk'
+    ) THEN
+        ALTER TABLE question
+            ADD CONSTRAINT question_generation_job_fk
+            FOREIGN KEY (generation_job_id) REFERENCES generation_job(job_id);
     END IF;
 END $$;
 

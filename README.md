@@ -7,7 +7,7 @@ Implements the MVP cut from `M3-tasks.md`: **T1, T2, T3, T4-lite, T5, T6, T7, T9
 ## Layered layout
 
 ```
-backend/
+epistemy_m3/
 ├── config.py              Settings: account, region, bucket, queue, KMS, model ids
 ├── models/                Pydantic schemas + enums (material, version, chunk, tool I/O)
 ├── storage/               S3 key builder + presigned PUT (T3)
@@ -44,8 +44,8 @@ PYTHONPATH=. pytest -q
 ```
 
 ```python
-from backend.async_jobs.worker import IngestWorker
-from backend.testing.fakes import build_offline_worker
+from epistemy_m3.async_jobs.worker import IngestWorker
+from epistemy_m3.testing.fakes import build_offline_worker
 
 worker = build_offline_worker()                       # in-memory S3, DB, queue, embedder
 result = worker.run_demo_markdown("org_acme", "course_cs101")

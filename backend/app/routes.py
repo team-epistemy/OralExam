@@ -25,6 +25,7 @@ COURSE_GET = "/api/courses/{course_id}"
 PROFESSOR_DASHBOARD = "/api/professor/dashboard"
 PROFESSOR_COURSES = "/api/professor/courses"
 STUDENT_DASHBOARD = "/api/student/dashboard"
+STUDENT_ASSIGNMENTS = "/api/student/assignments"
 
 # ── M4 Graph routes ──────────────────────────────────────────────────────────
 GRAPH_GET = "/api/courses/{course_id}/graph"
@@ -38,6 +39,11 @@ QUESTION_GET = "/api/questions/{question_id}"
 QUESTION_UPDATE = "/api/questions/{question_id}"
 QUESTION_APPROVE = "/api/questions/{question_id}/approve"
 QUESTION_REJECT = "/api/questions/{question_id}/reject"
+EXAM_BUILD = "/api/courses/{course_id}/exams/build"
+EXAM_ASSIGN = "/api/courses/{course_id}/exams/assign"
+
+# ── Text-to-speech (ElevenLabs proxy) ────────────────────────────────────────
+TTS = "/api/tts"
 
 # ── M6 Delivery routes ──────────────────────────────────────────────────────
 ASSIGNMENTS_LIST = "/api/courses/{course_id}/assignments"
@@ -47,6 +53,7 @@ ASSIGNMENT_CLOSE = "/api/assignments/{assignment_id}/close"
 ASSIGNMENT_DELETE = "/api/assignments/{assignment_id}"
 MATERIAL_DELETE = "/api/materials/{material_id}"
 ASSIGNMENT_START = "/api/assignments/{assignment_id}/start"
+ASSIGNMENT_RESULTS = "/api/assignments/{assignment_id}/results"
 SESSION_ANSWER = "/api/sessions/{session_id}/answer"
 SESSION_COMPLETE = "/api/sessions/{session_id}/complete"
 SESSION_STATUS = "/api/sessions/{session_id}/status"
@@ -81,9 +88,14 @@ def frontend_config() -> dict:
             "questionUpdate": QUESTION_UPDATE,
             "questionApprove": QUESTION_APPROVE,
             "questionReject": QUESTION_REJECT,
+            "examBuild": EXAM_BUILD,
+            "examAssign": EXAM_ASSIGN,
+            "tts": TTS,
+            "studentAssignments": STUDENT_ASSIGNMENTS,
             "assignmentsList": ASSIGNMENTS_LIST,
             "assignmentGet": ASSIGNMENT_GET,
             "assignmentStart": ASSIGNMENT_START,
+            "assignmentResults": ASSIGNMENT_RESULTS,
             "sessionAnswer": SESSION_ANSWER,
             "sessionStatus": SESSION_STATUS,
             "sessionStream": SESSION_STREAM,

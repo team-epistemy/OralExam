@@ -30,6 +30,9 @@ from backend.tools.materials_tools import MaterialsTools
 from backend.tools.search_tools import SearchTools
 from backend.search.corpus_search import CorpusSearcher
 from backend.bedrock_helper import call_bedrock
+from backend.graph.layout import build_node_ids, compute_layout
+from backend.graph.layout import neighbors as graph_neighbors
+from backend.questions.exam_builder import build_variants, assemble_questions
 from backend.app import factory, routes as R
 from backend.db.postgres import PostgresRepository
 
@@ -334,7 +337,12 @@ def _mount_demo(app: FastAPI) -> None:
 
         @app.get("/app/{path:path}")
         def serve_frontend(path: str = ""):
-            return FileResponse(str(frontend / "index.html"))
+            # The SPA shell must always revalidate so a redeploy's newly-hashed
+            # bundle is picked up immediately; hashed /app/assets stay cacheable.
+            return FileResponse(
+                str(frontend / "index.html"),
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
 
         @app.get("/")
         def root():
@@ -399,6 +407,31 @@ def _register_routes(app: FastAPI, deps) -> None:
     _register_delivery(app, deps)
     _register_evaluation(app, deps)
     _register_delete_endpoints(app, deps)
+    _register_tts(app, deps)
+
+
+class TTSRequest(BaseModel):
+    """POST body for the ElevenLabs TTS proxy."""
+    text: str = Field(min_length=1, max_length=5000)
+    voice_id: Optional[str] = None
+
+
+def _register_tts(app: FastAPI, deps) -> None:
+    """ElevenLabs TTS proxy — keeps the key server-side; 503 when not configured."""
+    from starlette.responses import Response
+    from backend import tts_helper
+
+    @app.post(R.TTS)
+    def synthesize_speech(
+        req: TTSRequest,
+        x_user_id: str = Header("student"),
+        x_role: str = Header("student"),
+    ):
+        audio = tts_helper.synthesize(deps()["settings"], req.text, req.voice_id)
+        if not audio:
+            raise HTTPException(status_code=503, detail="TTS is not configured")
+        return Response(content=audio, media_type="audio/mpeg",
+                        headers={"Cache-Control": "no-store"})
 
 
 def _register_auth(app: FastAPI) -> None:
@@ -713,6 +746,25 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
+    @app.get(R.STUDENT_ASSIGNMENTS)
+    def student_assignments(
+        x_org_name: str = Header(DEFAULT_ORG_NAME),
+        x_user_id: str = Header("student"),
+        x_role: str = Header("student"),
+    ):
+        """Active assignments available to the student (frontend: listStudentAssignments)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                return _query_student_assignments(repo, caller.org_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
 
 def _query_student_assignments(repo, org_id: str) -> list:
     """Get all active assignments for the org with course names."""
@@ -739,6 +791,98 @@ def _query_student_assignments(repo, org_id: str) -> list:
         }
         for r in rows
     ]
+
+
+def _extract_feedback(raw) -> str:
+    """Pull a feedback string out of the stored evaluation LLM output (JSONB)."""
+    if isinstance(raw, dict):
+        return raw.get("feedback") or raw.get("explanation") or ""
+    return ""
+
+
+def _threshold_rationale(score: float, bucket: str, comp: dict, feedback: str) -> str:
+    """Explain, in plain language, why an answer landed in its EDS band.
+
+    Combines the model's qualitative feedback with the quantitative EDS drivers
+    (authenticity gate, concept coverage, causal-link coverage) so a professor
+    can see *why* a score sits at a given threshold, not just the number.
+    """
+    pct = round(score * 100)
+    if not comp:
+        lead = (feedback or "").strip()
+        return (f"{lead} " if lead else "") + f"Scored {pct}/100 ({bucket} band)."
+
+    r = comp.get("r_gate")
+    node = comp.get("node_score")
+    edge = comp.get("edge_score")
+    nodes_n = len(comp.get("nodes_detected") or [])
+    edges_n = len(comp.get("edges_demonstrated") or [])
+
+    parts = []
+    if r is not None:
+        if r >= 0.75:
+            auth = "authentic reasoning"
+        elif r >= 0.4:
+            auth = "partly recited"
+        else:
+            auth = "mostly keyword recitation"
+        parts.append(f"authenticity gate R={round(r, 2)} ({auth})")
+    if node is not None:
+        parts.append(f"concept coverage {round(node * 100)}% ({nodes_n} nodes)")
+    if edge is not None:
+        parts.append(f"causal-link coverage {round(edge * 100)}% ({edges_n} links)")
+
+    detail = "; ".join(parts)
+    lead = (feedback or "").strip()
+    tail = f"Scored {pct}/100 → {bucket} band" + (f" because {detail}." if detail else ".")
+    return (f"{lead} " if lead else "") + tail
+
+
+def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
+    """Assemble the caller's exam results from their most-recent session."""
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """SELECT session_id, status, completed_at FROM exam_session
+               WHERE assignment_id = %s::uuid AND student_id = %s
+               ORDER BY started_at DESC LIMIT 1""",
+            (assignment_id, student_id),
+        )
+        srow = cur.fetchone()
+    if not srow:
+        return {"assignment_id": assignment_id, "session_id": None, "status": "not_started",
+                "score": 0, "total_questions": 0, "questions_answered": 0,
+                "feedback": "No exam session found for this assignment.",
+                "question_results": [], "completed_at": None}
+    session_id = str(srow[0])
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """SELECT st.question_id, q.text, st.student_answer,
+                      COALESCE(e.eds_score, 0), e.raw_llm_output
+               FROM session_turn st
+               JOIN question q ON q.question_id = st.question_id
+               LEFT JOIN evaluation e ON e.turn_id = st.turn_id
+               WHERE st.session_id = %s::uuid ORDER BY st.turn_index""",
+            (session_id,),
+        )
+        rows = cur.fetchall()
+    q_results, answered, score_sum = [], 0, 0.0
+    for r in rows:
+        if r[2]:
+            answered += 1
+        eds = float(r[3] or 0)
+        score_sum += eds
+        q_results.append({"question_id": str(r[0]), "question_text": r[1],
+                          "answer": r[2] or "", "score": round(eds * 100),
+                          "feedback": _extract_feedback(r[4])})
+    total = len(rows)
+    overall = round(score_sum / total * 100) if total else 0
+    return {
+        "session_id": session_id, "assignment_id": assignment_id, "status": srow[1],
+        "score": overall, "total_questions": total, "questions_answered": answered,
+        "feedback": f"Answered {answered} of {total} questions · epistemic-depth score {overall}%.",
+        "question_results": q_results,
+        "completed_at": srow[2].isoformat() if srow[2] else None,
+    }
 
 
 # ── M4 Graph ─────────────────────────────────────────────────────────────────
@@ -808,13 +952,20 @@ def _register_graph(app: FastAPI, deps) -> None:
 
                 combined = "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH])
                 system_prompt = (
-                    "You are an expert knowledge graph builder for educational content. "
-                    "Given course material, extract key concepts and their relationships. "
-                    "Return ONLY valid JSON: "
-                    '{"concepts": [{"label": "...", "definition": "...", "abstraction_level": 0.5}], '
+                    "You are building the concept map for an oral exam. From THIS course "
+                    "material only, extract the core concepts a student would be examined on "
+                    "(8 to 14). Do not introduce concepts that are not present in the material. "
+                    "Treat broad or introductory material sparsely, as a few high-level concepts; "
+                    "for specific, quantitative, or formula-driven material capture concepts more "
+                    "granularly. For EACH concept also write 4 oral-exam questions grounded strictly "
+                    "in the material that probe understanding of that concept, and identify the "
+                    "prerequisite relationships between concepts. "
+                    "Return ONLY valid JSON, no prose, no markdown fences: "
+                    '{"concepts": [{"label": "2-5 word noun phrase", "definition": "1 sentence", '
+                    '"abstraction_level": 0.5, "questions": ["...", "...", "...", "..."]}], '
                     '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
                     "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
-                    "Extract 10-30 concepts. Only return JSON."
+                    "src is a prerequisite of dst. Labels are short noun phrases, no numbering."
                 )
                 data = call_bedrock(
                     settings, system_prompt,
@@ -823,6 +974,12 @@ def _register_graph(app: FastAPI, deps) -> None:
                 )
                 concepts = data.get("concepts", [])
                 relations = data.get("relations", [])
+
+                # Stamp stable slug ids and cap each concept's question bank at 4 (demo contract).
+                label_ids = build_node_ids(concepts)
+                for c in concepts:
+                    c["id"] = label_ids.get(c.get("label", ""), "")
+                    c["questions"] = [q for q in (c.get("questions") or []) if isinstance(q, str)][:4]
 
                 version_id = str(_uuid.uuid4())
                 # s3_key column repurposed to store graph JSON inline (no S3 for MVP)
@@ -856,11 +1013,29 @@ def _register_graph(app: FastAPI, deps) -> None:
     @app.get(R.GRAPH_NEIGHBORS)
     def get_neighbors(
         concept_id: str,
+        course_id: Optional[str] = None,
         x_org_name: str = Header(...),
         x_user_id: str = Header("operator"),
         x_role: str = Header("professor"),
     ):
-        return {"concept_id": concept_id, "neighbors": []}
+        """Direct neighbors of a concept within a course's active graph."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                if not course_id:
+                    return {"concept_id": concept_id, "neighbors": []}
+                graph = _query_graph_version(repo, caller.org_id, course_id)
+                nbrs = graph_neighbors(
+                    graph.get("relations", []), concept_id, graph.get("concepts", []),
+                )
+                return {"concept_id": concept_id, "neighbors": nbrs}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
 
 def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
@@ -886,6 +1061,9 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
                 graph_data = _json.loads(row[5]) if row[5] and row[5].startswith("{") else {}
             except (ValueError, TypeError):
                 pass
+            concepts = graph_data.get("concepts", [])
+            relations = graph_data.get("relations", [])
+            layout = compute_layout(concepts, relations)  # nodes {id,label,x,y} + [from,to] edges
             return {
                 "status": "ready",
                 "version_id": str(row[0]),
@@ -895,8 +1073,13 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
                 "validation_score": float(row[4]) if row[4] else 0.0,
                 "created_at": row[6].isoformat() if row[6] else None,
                 "is_stale": bool(row[7]),
-                "concepts": graph_data.get("concepts", []),
-                "edges": graph_data.get("relations", []),
+                "concepts": concepts,
+                # `edges` stays the relation objects the UI renders ({src,dst,edge_type,confidence}).
+                # Layout for node/edge rendering is exposed separately so it doesn't clobber them.
+                "edges": relations,
+                "relations": relations,            # same list; consumed by the neighbors endpoint
+                "nodes": layout["nodes"],          # {id, label, x, y}
+                "graph_edges": layout["edges"],    # [from_id, to_id] pairs
             }
     except psycopg2.ProgrammingError:
         # Table may not exist yet in early migrations
@@ -911,6 +1094,56 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
         "concepts": [],
         "edges": [],
     }
+
+
+def _concept_banks(concepts: list) -> dict:
+    """Map each concept's id AND label to its extracted question bank."""
+    banks = {}
+    for c in concepts:
+        qs = [q for q in (c.get("questions") or []) if isinstance(q, str)]
+        if c.get("id"):
+            banks[c["id"]] = qs
+        if c.get("label"):
+            banks.setdefault(c["label"], qs)
+    return banks
+
+
+def _generate_expected_paths(settings, questions: list, concepts: list, relations: list) -> dict:
+    """Claude-generate an expected reasoning path per question (for EDS scoring).
+
+    Grounds nodes/edges in the course concept graph. Returns {index: {nodes,edges,extensions}};
+    empty on any failure so assignment still succeeds (EDS just degrades on those questions).
+    """
+    if not questions:
+        return {}
+    concept_lines = "\n".join(f"- {c.get('label')}: {c.get('definition', '')}" for c in concepts)
+    rel_lines = "\n".join(
+        f"- {r.get('src')} {r.get('edge_type')} {r.get('dst')}" for r in relations)
+    q_lines = "\n".join(f"{i}. {q.q}" for i, q in enumerate(questions))
+    system_prompt = (
+        "For each oral-exam question, produce the EXPECTED REASONING PATH a strong answer must "
+        "demonstrate, grounded in the course concept graph. For each question return: "
+        '"nodes" (key concepts that must be DEMONSTRATED with understanding, each {"label","definition"}), '
+        '"edges" (causal links that must be ARTICULATED, each {"src","dst",'
+        '"link_type":"CAUSES|ENABLES|PREVENTS|INCREASES|DECREASES","explanation"}), and '
+        '"extensions" (1-3 bonus concepts, each {"label","connection"}). Prefer concepts from the graph. '
+        'Return ONLY JSON: {"paths": [{"index": 0, "nodes": [...], "edges": [...], "extensions": [...]}]}'
+    )
+    user = (f"Concept graph:\n{concept_lines}\n\nRelations:\n{rel_lines}\n\n"
+            f"Questions:\n{q_lines}")
+    try:
+        data = call_bedrock(settings, system_prompt, user,
+                            max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.2)
+        out = {}
+        for p in (data.get("paths") or []):
+            idx = p.get("index")
+            if isinstance(idx, int):
+                out[idx] = {"nodes": p.get("nodes", []), "edges": p.get("edges", []),
+                            "extensions": p.get("extensions", [])}
+        return out
+    except Exception as exc:  # noqa: BLE001 - EDS degrades, assignment still succeeds
+        logger.warning("expected_path generation failed: %s", exc)
+        return {}
 
 
 # ── M5 Questions ─────────────────────────────────────────────────────────────
@@ -928,6 +1161,29 @@ class GenerateQuestionsRequest(BaseModel):
     count: int = Field(default=5, ge=1, le=MAX_QUESTION_COUNT)
     difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
     domain: str = Field(default="general", min_length=1, max_length=200)
+
+
+class BuildExamRequest(BaseModel):
+    """POST body for deterministic exam assembly (3 variants, no LLM)."""
+    concept_ids: Optional[List[str]] = None
+    q_count: int = Field(default=12, ge=1, le=MAX_QUESTION_COUNT)
+    exam_len: int = Field(default=30, ge=5, le=180)
+    difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
+
+
+class ExamAssignQuestion(BaseModel):
+    """One question from a built exam variant."""
+    concept_id: str = ""
+    topic: str = ""
+    q: str = Field(min_length=1, max_length=5000)
+
+
+class AssignExamRequest(BaseModel):
+    """Persist a built exam variant's questions and create an assignment from them."""
+    title: str = Field(min_length=1, max_length=300)
+    questions: List[ExamAssignQuestion]
+    difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
+    duration_minutes: Optional[int] = None
 
 
 def _register_questions(app: FastAPI, deps) -> None:
@@ -962,7 +1218,7 @@ def _register_questions(app: FastAPI, deps) -> None:
                 if req.concept_ids and concepts:
                     concept_set = set(req.concept_ids)
                     concepts = [c for c in concepts if c.get("label") in concept_set
-                                or c.get("node_id") in concept_set]
+                                or c.get("id") in concept_set or c.get("node_id") in concept_set]
 
                 with repo.conn.cursor() as cur:
                     if req.material_version_ids:
@@ -1139,6 +1395,145 @@ def _register_questions(app: FastAPI, deps) -> None:
                     "generated_count": len(stored_questions),
                     "questions": stored_questions,
                 }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.EXAM_BUILD)
+    def build_exam(
+        course_id: str,
+        req: BuildExamRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Assemble 3 exam variants from the graph's per-concept banks — no LLM."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                graph = _query_graph_version(repo, caller.org_id, course_id)
+                concepts = graph.get("concepts", [])
+                if not concepts:
+                    return {"status": "error",
+                            "message": "No concept graph found. Build the graph first."}
+
+                if req.concept_ids:
+                    sel = set(req.concept_ids)
+                    concepts = [c for c in concepts
+                                if c.get("id") in sel or c.get("label") in sel]
+
+                simple = [{"id": c.get("id") or c.get("label", ""), "label": c.get("label", "")}
+                          for c in concepts]
+                banks = _concept_banks(concepts)
+                variants = build_variants(simple, req.q_count, req.difficulty, req.exam_len)
+                for v in variants:
+                    v["questions"] = assemble_questions(v["distribution"], banks)
+                return {"status": "completed", "concept_count": len(simple), "variants": variants}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.EXAM_ASSIGN)
+    def assign_exam(
+        course_id: str,
+        req: AssignExamRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Persist a built exam variant's questions and create an active assignment."""
+        import json as _json, uuid as _uuid
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                if not req.questions:
+                    return {"status": "error", "message": "no questions to assign"}
+
+                diff_json = _json.dumps({
+                    "level": req.difficulty,
+                    "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(req.difficulty, 0.55),
+                })
+                # Generate an expected reasoning path per question so these exams
+                # score with the real EDS formula (node/edge coverage + R-gate).
+                graph = _query_graph_version(repo, caller.org_id, course_id)
+                paths = _generate_expected_paths(
+                    d["settings"], req.questions,
+                    graph.get("concepts", []), graph.get("relations", []))
+                question_ids = []
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT 1 FROM information_schema.columns
+                           WHERE table_name = 'question' AND column_name = 'expected_path'""")
+                    has_ep = cur.fetchone() is not None
+                    for i, q in enumerate(req.questions):
+                        qid = str(_uuid.uuid4())
+                        question_ids.append(qid)
+                        concept_ids = _json.dumps([q.concept_id or q.topic or "general"])
+                        if has_ep:
+                            cur.execute(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks,
+                                    expected_path)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           'oral', %s::jsonb, 'approved', %s, '[]'::jsonb, %s::jsonb)""",
+                                (qid, course_id, caller.org_id, concept_ids, q.q, diff_json,
+                                 caller.user_id, _json.dumps(paths.get(i, {}))),
+                            )
+                        else:
+                            cur.execute(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           'oral', %s::jsonb, 'approved', %s, '[]'::jsonb)""",
+                                (qid, course_id, caller.org_id, concept_ids, q.q, diff_json,
+                                 caller.user_id),
+                            )
+                    qs_id = str(_uuid.uuid4())
+                    cur.execute(
+                        """INSERT INTO question_set (question_set_id, course_id, org_id, title, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s)""",
+                        (qs_id, course_id, caller.org_id, req.title, caller.user_id),
+                    )
+                    for idx, qid in enumerate(question_ids):
+                        cur.execute(
+                            """INSERT INTO question_set_membership
+                               (question_set_id, question_id, org_id, position)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s)""",
+                            (qs_id, qid, caller.org_id, idx),
+                        )
+                    assignment_id = str(_uuid.uuid4())
+                    cfg = _json.dumps({
+                        "adaptive": True, "max_questions": len(question_ids),
+                        "time_limit_minutes": req.duration_minutes,
+                        "difficulty": req.difficulty, "shuffle_questions": False,
+                    })
+                    cur.execute(
+                        """INSERT INTO assignment
+                           (assignment_id, course_id, org_id, title, question_set_id, config,
+                            status, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s::uuid, %s::jsonb,
+                                   'active', %s)""",
+                        (assignment_id, course_id, caller.org_id, req.title, qs_id, cfg, caller.user_id),
+                    )
+                repo.conn.commit()
+                return {"status": "completed", "assignment_id": assignment_id,
+                        "question_count": len(question_ids)}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -1721,6 +2116,27 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 if not row:
                     raise AuthorizationError("assignment not found")
                 return {"assignment_id": str(row[0]), "status": "closed"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/assignments/{assignment_id}/results ──────────────────────
+    @app.get(R.ASSIGNMENT_RESULTS)
+    def exam_results(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """The caller's most-recent exam results (frontend: getExamResults)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                return _query_exam_results(repo, assignment_id, caller.user_id)
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -2542,26 +2958,24 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                     )
                     grade_row = cur.fetchone()
 
-                if grade_row:
-                    if grade_row[3] != "released" and caller.role != Role.PROFESSOR:
-                        raise AuthorizationError("grades not yet released")
-                    return {
-                        "grade_id": str(grade_row[0]),
-                        "session_id": session_id,
-                        "final_score": float(grade_row[1]),
-                        "component_scores": grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}"),
-                        "status": grade_row[3],
-                        "released_at": grade_row[4].isoformat() if grade_row[4] else None,
-                    }
+                if grade_row and grade_row[3] != "released" and caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("grades not yet released")
 
+                # Per-turn detail: question text, the student's own answer, the
+                # model's feedback, and the quantitative EDS drivers — so a
+                # reviewer sees the response and *why* each score sits where it
+                # does. Included whether or not a final grade has been released.
                 with repo.conn.cursor() as cur:
                     cur.execute(
-                        """SELECT e.evaluation_id, e.turn_id, e.eds_score, e.eds_bucket,
-                                  e.raw_llm_output, st.turn_index
+                        """SELECT e.turn_id, e.eds_score, e.eds_bucket,
+                                  e.raw_llm_output, e.eds_components,
+                                  st.turn_index, st.sub_turn_index,
+                                  st.student_answer, q.text
                            FROM evaluation e
                            JOIN session_turn st ON st.turn_id = e.turn_id
+                           LEFT JOIN question q ON q.question_id = st.question_id
                            WHERE st.session_id = %s::uuid
-                           ORDER BY st.turn_index""",
+                           ORDER BY st.turn_index, st.sub_turn_index""",
                         (session_id,),
                     )
                     eval_rows = cur.fetchall()
@@ -2569,16 +2983,45 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                 evaluations = []
                 total_eds = 0.0
                 for er in eval_rows:
-                    raw = er[4] if isinstance(er[4], dict) else (_json.loads(er[4]) if er[4] else {})
-                    total_eds += float(er[2])
+                    raw = er[3] if isinstance(er[3], dict) else (_json.loads(er[3]) if er[3] else {})
+                    comp = er[4] if isinstance(er[4], dict) else (_json.loads(er[4]) if er[4] else {})
+                    score = float(er[1])
+                    total_eds += score
+                    fb = raw.get("feedback", "")
                     evaluations.append({
+                        "turn_id": str(er[0]),  # lets clients drill into GET /api/evaluations/{turn_id}
                         "turn_index": er[5],
-                        "eds_score": float(er[2]),
-                        "eds_bucket": er[3],
+                        "sub_turn_index": er[6],
+                        "question_text": er[8] or "",
+                        "student_answer": er[7] or "",
+                        "eds_score": score,
+                        "eds_bucket": er[2],
                         "answered": raw.get("answered", True),
                         "adequate": raw.get("adequate", False),
+                        "feedback": fb,
                         "eds_delta": raw.get("eds_delta", 0),
+                        "components": {
+                            "node_coverage": comp.get("node_score"),
+                            "edge_coverage": comp.get("edge_score"),
+                            "recitation_gate": comp.get("r_gate"),
+                            "nodes_detected": comp.get("nodes_detected", []),
+                            "edges_demonstrated": comp.get("edges_demonstrated", []),
+                        },
+                        "rationale": _threshold_rationale(score, er[2], comp, fb),
                     })
+
+                if grade_row:
+                    return {
+                        "grade_id": str(grade_row[0]),
+                        "session_id": session_id,
+                        "final_score": float(grade_row[1]),
+                        "component_scores": grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}"),
+                        "status": grade_row[3],
+                        "released_at": grade_row[4].isoformat() if grade_row[4] else None,
+                        "total_eds": round(total_eds, 2),
+                        "turns_evaluated": len(evaluations),
+                        "evaluations": evaluations,
+                    }
 
                 return {
                     "session_id": session_id,

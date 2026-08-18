@@ -1,30 +1,10 @@
-"""Manually apply a single migration SQL file directly to the RDS database.
+"""Apply migration_002_modules.sql directly to the RDS instance.
 
-This is an OPERATOR / one-off tool, not part of normal deploys. It fetches DB
-credentials from AWS Secrets Manager, opens a direct psycopg2 connection to the
-Postgres instance, runs the given .sql file in a transaction, and then verifies
-that the expected tables exist.
-
-When to use it:
-  - You need to apply or re-test ONE specific migration file out-of-band
-    (e.g. debugging a migration, or a hotfix) without rebuilding/redeploying.
-  - You want the post-apply table-existence check that this script performs.
-
-When NOT to use it (use the normal path instead):
-  - Routine deploys apply the FULL migration chain (schema.sql + 002/003/004)
-    automatically via `python -m backend.app.main migrate`, run as an ECS task
-    by infra/deploy_full.py. Prefer that for anything shipping through deploy.
-
-Prerequisite / gotcha:
-  - This connects DIRECTLY to RDS, whose security group only allows access from
-    INSIDE the VPC. It will NOT connect from a laptop on the public internet.
-    Run it from a VPC host/bastion, or apply migrations via the ECS migrate task.
-
-Defaults to backend/db/migration_002_modules.sql against the epistemy/db-dev
-secret; override with the flags below.
+Reads DB credentials from AWS Secrets Manager (epistemy/db-dev by default),
+connects to the Aurora Postgres cluster, and executes the migration SQL.
 
 Usage:
-    PYTHONPATH=. python -m infra.apply_migration                      # default file + dev secret
+    PYTHONPATH=. python -m infra.apply_migration
     PYTHONPATH=. python -m infra.apply_migration --secret epistemy/db-prod
     PYTHONPATH=. python -m infra.apply_migration --migration path/to/file.sql
 """
@@ -144,8 +124,8 @@ def main() -> None:
     # Step 4: Verify tables exist
     print("Verifying new tables...")
     expected_tables = [
-        "graph_version",
-        "question", "question_set", "question_set_membership",
+        "graph_version", "graph_eds_results",
+        "question", "question_set", "question_set_membership", "generation_job",
         "assignment", "exam_session", "session_turn",
         "evaluation", "grade",
     ]
