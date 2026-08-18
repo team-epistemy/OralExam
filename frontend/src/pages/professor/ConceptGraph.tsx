@@ -260,6 +260,19 @@ export default function ConceptGraph() {
             </div>
             <p className="text-xs text-gray-400">Arrows point from a concept to what it enables / is a prerequisite for. Scroll to see the full graph.</p>
 
+            {/* Concepts as text */}
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900 mb-2">Concepts</h3>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {concepts.map((c) => (
+                  <div key={c.id || c.node_id || c.label} className="rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2">
+                    <p className="text-sm font-medium text-gray-900">{c.label}</p>
+                    {c.definition && <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{c.definition}</p>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
             {/* Next steps */}
             <div className="flex flex-wrap gap-3 pt-2 border-t border-gray-100">
               <Link to="/professor/exam-builder" className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">

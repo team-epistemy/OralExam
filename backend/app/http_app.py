@@ -1576,12 +1576,11 @@ def _register_questions(app: FastAPI, deps) -> None:
                     "level": req.difficulty,
                     "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(req.difficulty, 0.55),
                 })
-                # Generate an expected reasoning path per question so these exams
-                # score with the real EDS formula (node/edge coverage + R-gate).
-                graph = _query_graph_version(repo, caller.org_id, course_id)
-                paths = _generate_expected_paths(
-                    d["settings"], req.questions,
-                    graph.get("concepts", []), graph.get("relations", []))
+                # Expected reasoning paths are filled in lazily on the first answer
+                # to each question (see submit_answer's backfill). Generating them
+                # synchronously here — one large Claude call for every question —
+                # blew past the 60s ALB idle timeout and 504'd the assign request.
+                paths: dict = {}
                 question_ids = []
                 with repo.conn.cursor() as cur:
                     cur.execute(

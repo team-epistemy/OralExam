@@ -25,6 +25,7 @@ type Difficulty = (typeof DIFFICULTIES)[number]['key'];
 
 export default function BuildExam() {
   const [courseId, setCourseId] = useState('');
+  const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
   const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
   const [qCount, setQCount] = useState(12);
   const [examLen, setExamLen] = useState(30);
@@ -63,6 +64,7 @@ export default function BuildExam() {
         q_count: qCount,
         exam_len: examLen,
         difficulty,
+        concept_ids: selectedTopics.length ? selectedTopics : undefined,
       });
       if (res.status !== 'completed' || !res.variants?.length) {
         setError(res.message || 'No concept graph found. Build the concept graph for this course first.');
@@ -120,7 +122,7 @@ export default function BuildExam() {
             <span className="text-sm font-medium text-gray-700">Course</span>
             <select
               value={courseId}
-              onChange={(e) => { setCourseId(e.target.value); setVariants([]); setError(null); }}
+              onChange={(e) => { setCourseId(e.target.value); setVariants([]); setError(null); setSelectedTopics([]); }}
               className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
             >
               <option value="">Select a course…</option>
@@ -154,6 +156,40 @@ export default function BuildExam() {
             ))}
           </div>
         </div>
+
+        {courseId && (graph?.concepts?.length ?? 0) > 0 && (
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-gray-700">
+                Topics <span className="text-gray-400 font-normal">(optional — all topics if none selected)</span>
+              </span>
+              <div className="flex gap-3 text-xs">
+                <button type="button" onClick={() => setSelectedTopics((graph?.concepts || []).map((c) => c.label))} className="text-indigo-600 hover:text-indigo-700">Select all</button>
+                <button type="button" onClick={() => setSelectedTopics([])} className="text-gray-500 hover:text-gray-700">Clear</button>
+              </div>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {(graph?.concepts || []).map((c) => {
+                const on = selectedTopics.includes(c.label);
+                return (
+                  <button
+                    key={c.id || c.node_id || c.label}
+                    type="button"
+                    onClick={() => setSelectedTopics((prev) => (on ? prev.filter((t) => t !== c.label) : [...prev, c.label]))}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                      on ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {c.label}
+                  </button>
+                );
+              })}
+            </div>
+            {selectedTopics.length > 0 && (
+              <p className="mt-1.5 text-xs text-gray-500">{selectedTopics.length} topic{selectedTopics.length === 1 ? '' : 's'} selected — the exam will focus on these.</p>
+            )}
+          </div>
+        )}
 
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="block">

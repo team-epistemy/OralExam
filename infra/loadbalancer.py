@@ -26,12 +26,23 @@ def ensure_load_balancer(elb, name: str, subnets: List[str],
     """
     existing = _find_lb(elb, name)
     if existing:
+        _set_idle_timeout(elb, existing["arn"])
         return existing
     lb = elb.create_load_balancer(
         Name=name, Subnets=subnets, SecurityGroups=[sg_id],
         Scheme=scheme, Type="application", IpAddressType="ipv4",
     )["LoadBalancers"][0]
+    _set_idle_timeout(elb, lb["LoadBalancerArn"])
     return {"arn": lb["LoadBalancerArn"], "dns": lb["DNSName"]}
+
+
+def _set_idle_timeout(elb, arn: str, seconds: int = 180) -> None:
+    """Raise the ALB idle timeout: some endpoints make LLM calls that can run
+    well past the 60s default, which would otherwise surface as a 504."""
+    elb.modify_load_balancer_attributes(
+        LoadBalancerArn=arn,
+        Attributes=[{"Key": "idle_timeout.timeout_seconds", "Value": str(seconds)}],
+    )
 
 
 def _find_lb(elb, name: str):
