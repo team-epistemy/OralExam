@@ -1,8 +1,10 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { BookOpen, Upload, ClipboardList, FileText, ArrowRight } from 'lucide-react';
+import { BookOpen, Upload, ClipboardList, FileText, ArrowRight, Eye } from 'lucide-react';
 import { get } from '../../api/client';
 import StatusBadge from '../../components/StatusBadge';
+import DocumentViewerModal from '../../components/DocumentViewerModal';
 
 interface Course {
   course_id: string;
@@ -38,6 +40,8 @@ export default function ProfessorDashboard() {
     queryFn: () => get<DashboardData>('/api/professor/dashboard'),
     retry: false,
   });
+
+  const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
 
   const courses = data?.courses || [];
   const recentUploads = data?.recent_uploads || [];
@@ -152,6 +156,13 @@ export default function ProfessorDashboard() {
                   <p className="text-xs text-muted">{upload.course_name}</p>
                 </div>
                 <StatusBadge status={upload.status} />
+                <button
+                  onClick={() => setViewing({ id: upload.material_version_id, name: upload.file_name || upload.display_name || 'Document' })}
+                  className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                  title="View document"
+                >
+                  <Eye className="w-4 h-4" />
+                </button>
               </div>
             ))
           )}
@@ -162,9 +173,14 @@ export default function ProfessorDashboard() {
       <div className="bg-white rounded-xl border border-border">
         <div className="px-5 py-4 border-b border-border flex items-center justify-between">
           <h2 className="font-heading text-lg text-navy">Active Assignments</h2>
-          <Link to="/professor/assignments/new" className="text-sm text-gold hover:text-gold-light font-medium">
-            Create New
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link to="/professor/assignments" className="text-sm text-gold hover:text-gold-light font-medium">
+              View all
+            </Link>
+            <Link to="/professor/assignments/new" className="text-sm text-gold hover:text-gold-light font-medium">
+              Create New
+            </Link>
+          </div>
         </div>
         <div className="divide-y divide-border">
           {activeAssignments.length === 0 ? (
@@ -173,9 +189,10 @@ export default function ProfessorDashboard() {
             </div>
           ) : (
             activeAssignments.map((assignment) => (
-              <div
+              <Link
                 key={assignment.assignment_id}
-                className="flex items-center gap-4 px-5 py-3"
+                to={`/professor/assignments/${assignment.assignment_id}/grades`}
+                className="flex items-center gap-4 px-5 py-3 hover:bg-parchment transition-colors"
               >
                 <ClipboardList className="w-4 h-4 text-muted" />
                 <div className="flex-1 min-w-0">
@@ -183,11 +200,20 @@ export default function ProfessorDashboard() {
                   <p className="text-xs text-muted">{assignment.course_name}</p>
                 </div>
                 <StatusBadge status={assignment.status} />
-              </div>
+                <ArrowRight className="w-4 h-4 text-muted" />
+              </Link>
             ))
           )}
         </div>
       </div>
+
+      {viewing && (
+        <DocumentViewerModal
+          materialId={viewing.id}
+          fallbackName={viewing.name}
+          onClose={() => setViewing(null)}
+        />
+      )}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import UploadMaterial from './pages/professor/UploadMaterial';
 import ConceptGraph from './pages/professor/ConceptGraph';
 import BuildExam from './pages/professor/BuildExam';
 import CreateAssignment from './pages/professor/CreateAssignment';
+import ProfessorAssignments from './pages/professor/Assignments';
 import GradeView from './pages/professor/GradeView';
 import StudentDashboard from './pages/student/Dashboard';
 import TakeExam from './pages/student/TakeExam';
@@ -86,6 +87,10 @@ export const router = createBrowserRouter([
       {
         path: '/professor/exam-builder',
         element: <RequireRole role="professor"><BuildExam /></RequireRole>,
+      },
+      {
+        path: '/professor/assignments',
+        element: <RequireRole role="professor"><ProfessorAssignments /></RequireRole>,
       },
       {
         path: '/professor/assignments/new',

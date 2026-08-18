@@ -4,13 +4,22 @@ import {
   LayoutDashboard,
   Upload,
   ClipboardList,
+  ListChecks,
   FileText,
   Network,
   LogOut,
   Menu,
   X,
+  type LucideIcon,
 } from 'lucide-react';
 import { useState } from 'react';
+
+interface NavItem {
+  to: string;
+  label: string;
+  icon: LucideIcon;
+  end?: boolean;
+}
 
 interface User {
   email: string;
@@ -28,15 +37,16 @@ function getUser(): User | null {
   }
 }
 
-const professorLinks = [
+const professorLinks: NavItem[] = [
   { to: '/professor/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/professor/upload', label: 'Upload Material', icon: Upload },
   { to: '/professor/graph', label: 'Concept Graph', icon: Network },
   { to: '/professor/exam-builder', label: 'Build Exam', icon: FileText },
   { to: '/professor/assignments/new', label: 'Create Assignment', icon: ClipboardList },
+  { to: '/professor/assignments', label: 'Active Assignments', icon: ListChecks, end: true },
 ];
 
-const studentLinks = [
+const studentLinks: NavItem[] = [
   { to: '/student/dashboard', label: 'Dashboard', icon: LayoutDashboard },
 ];
 
@@ -80,6 +90,7 @@ export default function AppLayout() {
             <NavLink
               key={link.to}
               to={link.to}
+              end={link.end}
               onClick={() => setSidebarOpen(false)}
               className={({ isActive }) =>
                 `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
