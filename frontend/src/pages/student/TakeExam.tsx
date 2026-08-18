@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
+import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, MicOff, Volume2, VolumeX, BookOpen } from 'lucide-react';
 import { jsPDF } from 'jspdf';
-import { startExamSession, submitAnswer, getSessionStatus, completeSession } from '../../api/exam';
+import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase } from '../../api/exam';
+import type { CaseMaterial } from '../../api/exam';
 import { get } from '../../api/client';
 import { API_BASE_URL } from '../../config';
+import DocumentViewerModal from '../../components/DocumentViewerModal';
 import type { ExamQuestion, AnswerResponse, EDSComponents } from '../../api/exam';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -422,6 +424,20 @@ export default function TakeExam() {
   const spokenRef = useRef<string>('');
   const [listening, setListening] = useState(false);
   const [ttsOn, setTtsOn] = useState(true);
+
+  // Case context: the source document(s) this exam is drawn from, kept viewable
+  // throughout so the student can always re-read the case while answering.
+  const [caseMaterials, setCaseMaterials] = useState<CaseMaterial[]>([]);
+  const [caseViewIdx, setCaseViewIdx] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!assignmentId) return;
+    let cancelled = false;
+    getAssignmentCase(assignmentId)
+      .then((mats) => { if (!cancelled) setCaseMaterials(mats); })
+      .catch(() => { if (!cancelled) setCaseMaterials([]); });
+    return () => { cancelled = true; };
+  }, [assignmentId]);
 
   const speak = useCallback(async (text: string) => {
     if (!ttsOn || !text) return;
@@ -1087,6 +1103,15 @@ export default function TakeExam() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {caseMaterials.length > 0 && (
+            <button
+              onClick={() => setCaseViewIdx(0)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white/15 text-white rounded-lg text-sm font-medium hover:bg-white/25"
+              title="View the case document"
+            >
+              <BookOpen className="w-4 h-4" /> View Case
+            </button>
+          )}
           {secondsRemaining !== null && (
             <div
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-mono font-bold ${
@@ -1116,6 +1141,14 @@ export default function TakeExam() {
           </button>
         </div>
       </div>
+
+      {caseViewIdx !== null && caseMaterials[caseViewIdx] && (
+        <DocumentViewerModal
+          materialId={caseMaterials[caseViewIdx].version_id}
+          fallbackName={caseMaterials[caseViewIdx].file_name}
+          onClose={() => setCaseViewIdx(null)}
+        />
+      )}
 
       {persistWarning && (
         <div className="bg-amber-50 border-x border-amber-200 px-5 py-2 text-xs text-amber-700">

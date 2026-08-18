@@ -516,6 +516,53 @@ def _register_reads(app: FastAPI, deps) -> None:
     _register_list_materials(app, deps)
     _register_list_versions(app, deps)
     _register_material_view(app, deps)
+    _register_assignment_case(app, deps)
+
+
+def _register_assignment_case(app: FastAPI, deps) -> None:
+    """Case context for an exam: the source material(s) a student can view while
+    answering. Student-accessible so the case document stays available throughout."""
+
+    @app.get(R.ASSIGNMENT_CASE)
+    def assignment_case(assignment_id: str, x_org_name: str = Header(...),
+                        x_user_id: str = Header("operator"),
+                        x_role: str = Header("student")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT course_id FROM assignment WHERE assignment_id = %s::uuid",
+                        (assignment_id,),
+                    )
+                    row = cur.fetchone()
+                if not row:
+                    raise AuthorizationError("assignment not found")
+                course_id = str(row[0])
+
+                materials = []
+                for m in repo.list_materials(course_id):
+                    if not m.current_version_id:
+                        continue
+                    v = repo.get_version(m.current_version_id)
+                    if not v or getattr(v.status, "value", str(v.status)) != "ready":
+                        continue
+                    materials.append({
+                        "material_id": m.material_id,
+                        "version_id": v.material_version_id,
+                        "file_name": v.file_name,
+                        "source_type": getattr(v.source_type, "value",
+                                               str(v.source_type)),
+                    })
+                return {"materials": materials}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
 
 def _register_material_view(app: FastAPI, deps) -> None:

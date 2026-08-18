@@ -55,6 +55,7 @@ ASSIGNMENT_DELETE = "/api/assignments/{assignment_id}"
 MATERIAL_DELETE = "/api/materials/{material_id}"
 ASSIGNMENT_START = "/api/assignments/{assignment_id}/start"
 ASSIGNMENT_RESULTS = "/api/assignments/{assignment_id}/results"
+ASSIGNMENT_CASE = "/api/assignments/{assignment_id}/case"
 SESSION_ANSWER = "/api/sessions/{session_id}/answer"
 SESSION_COMPLETE = "/api/sessions/{session_id}/complete"
 SESSION_STATUS = "/api/sessions/{session_id}/status"
@@ -98,6 +99,7 @@ def frontend_config() -> dict:
             "assignmentGet": ASSIGNMENT_GET,
             "assignmentStart": ASSIGNMENT_START,
             "assignmentResults": ASSIGNMENT_RESULTS,
+            "assignmentCase": ASSIGNMENT_CASE,
             "sessionAnswer": SESSION_ANSWER,
             "sessionStatus": SESSION_STATUS,
             "sessionStream": SESSION_STREAM,

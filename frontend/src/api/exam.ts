@@ -41,6 +41,18 @@ export interface SessionStatus {
 
 // ── API calls ────────────────────────────────────────────────────────────────
 
+export interface CaseMaterial {
+  material_id: string;
+  version_id: string;
+  file_name: string;
+  source_type: string;
+}
+
+export async function getAssignmentCase(assignmentId: string): Promise<CaseMaterial[]> {
+  const res = await get<{ materials: CaseMaterial[] }>(`/api/assignments/${assignmentId}/case`);
+  return res.materials || [];
+}
+
 export async function startExamSession(assignmentId: string): Promise<StartExamResponse> {
   return post<StartExamResponse>(`/api/assignments/${assignmentId}/start`, {});
 }
