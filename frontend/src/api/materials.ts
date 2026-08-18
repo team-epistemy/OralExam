@@ -79,6 +79,19 @@ export async function listMaterials(orgNameOrCourseId: string, courseName?: stri
   }
 }
 
+export interface MaterialView {
+  url: string;
+  file_name: string;
+  source_type: string;
+  version_id: string;
+  version_no: number;
+  status: string;
+}
+
+export async function getMaterialView(materialId: string): Promise<MaterialView> {
+  return get<MaterialView>(`/api/materials/${encodeURIComponent(materialId)}/view`);
+}
+
 export async function listVersions(_orgName: string, materialId: string): Promise<MaterialVersion[]> {
   try {
     return await get<MaterialVersion[]>(`/materials/${materialId}/versions`);

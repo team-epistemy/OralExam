@@ -16,6 +16,7 @@ PRESIGN = "/materials:presign"
 REGISTER = "/versions/{version_id}/register"
 LIST_MATERIALS = "/orgs/{org_name}/courses/{course_name}/materials"
 LIST_VERSIONS = "/materials/{material_id}/versions"
+MATERIAL_VIEW = "/api/materials/{material_id}/view"
 SEARCH_CORPUS = "/courses/{course_id}/search"
 
 # ── Course routes ────────────────────────────────────────────────────────────
@@ -76,6 +77,7 @@ def frontend_config() -> dict:
             "register": REGISTER,
             "listVersions": LIST_VERSIONS,
             "listMaterials": LIST_MATERIALS,
+            "materialView": MATERIAL_VIEW,
             "searchCorpus": SEARCH_CORPUS,
             "professorDashboard": PROFESSOR_DASHBOARD,
             "professorCourses": PROFESSOR_COURSES,

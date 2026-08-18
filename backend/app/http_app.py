@@ -515,6 +515,51 @@ def _register_reads(app: FastAPI, deps) -> None:
     """Name-based read routes so a tester can observe status by names."""
     _register_list_materials(app, deps)
     _register_list_versions(app, deps)
+    _register_material_view(app, deps)
+
+
+def _register_material_view(app: FastAPI, deps) -> None:
+    """GET a short-lived presigned URL so the professor can open the document."""
+
+    @app.get(R.MATERIAL_VIEW)
+    def material_view(material_id: str, x_org_name: str = Header(...),
+                      x_user_id: str = Header("operator"),
+                      x_role: str = Header("professor")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+
+                # The id may be a material_id (use its current version) or a
+                # material_version_id directly (the dashboard list surfaces the
+                # latter). Resolve either to a concrete version.
+                version = None
+                material = repo.get_material(material_id)
+                if material and material.current_version_id:
+                    version = repo.get_version(material.current_version_id)
+                if version is None:
+                    version = repo.get_version(material_id)
+                if version is None:
+                    raise AuthorizationError("material not found")
+
+                url = d["storage"].presign_get(
+                    version.s3_key, file_name=version.file_name)
+                return {
+                    "url": url,
+                    "file_name": version.file_name,
+                    "source_type": getattr(version.source_type, "value",
+                                           str(version.source_type)),
+                    "version_id": version.material_version_id,
+                    "version_no": version.version_no,
+                    "status": getattr(version.status, "value",
+                                      str(version.status)),
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
 
 def _register_list_materials(app: FastAPI, deps) -> None:

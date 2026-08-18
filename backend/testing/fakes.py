@@ -18,6 +18,9 @@ class FakeS3:
     def presign_put(self, key: str, mime_type: str, max_bytes: int) -> str:
         return f"https://fake-s3.local/{key}"
 
+    def presign_get(self, key: str, file_name: str = "", ttl: int = 600) -> str:
+        return f"https://fake-s3.local/{key}"
+
     def put(self, key: str, data: bytes) -> None:
         self.objects[key] = data
 

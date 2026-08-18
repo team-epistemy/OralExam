@@ -7,6 +7,7 @@ class S3Storage(Protocol):
     """Storage surface the API and worker depend on."""
 
     def presign_put(self, key: str, mime_type: str, max_bytes: int) -> str: ...
+    def presign_get(self, key: str, file_name: str = "", ttl: int = 600) -> str: ...
     def object_exists(self, key: str) -> bool: ...
     def get_bytes(self, key: str) -> bytes: ...
 
@@ -26,6 +27,19 @@ class BotoS3Storage:
             "put_object",
             Params={"Bucket": self.bucket, "Key": key, "ContentType": mime_type},
             ExpiresIn=self.ttl)
+
+    def presign_get(self, key: str, file_name: str = "", ttl: int = 600) -> str:
+        """Presigned GET so a browser can view/download the object inline.
+
+        The stored object keeps its original Content-Type, so PDFs and images
+        render natively; ResponseContentDisposition=inline hints the browser to
+        display rather than force-download.
+        """
+        params = {"Bucket": self.bucket, "Key": key}
+        if file_name:
+            params["ResponseContentDisposition"] = f'inline; filename="{file_name}"'
+        return self.client.generate_presigned_url(
+            "get_object", Params=params, ExpiresIn=ttl)
 
     def object_exists(self, key: str) -> bool:
         """True when the object is present in the bucket."""
