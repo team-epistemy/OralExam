@@ -308,6 +308,16 @@ def _mount_demo(app: FastAPI) -> None:
     if frontend.exists():
         app.mount("/app/assets", StaticFiles(directory=str(frontend / "assets")), name="frontend-assets")
 
+        @app.get("/app")
+        def app_root_redirect():
+            # Explicit relative redirect for the no-trailing-slash case. Without
+            # it, FastAPI's automatic slash-redirect builds an ABSOLUTE URL from
+            # the host the backend sees (the ALB, http), bouncing HTTPS/CloudFront
+            # visitors onto the plain-HTTP ALB — which breaks the secure-context
+            # crypto the Cognito PKCE sign-in needs. Relative "/app/" stays on the
+            # caller's own host + scheme.
+            return RedirectResponse(url="/app/")
+
         @app.get("/app/{path:path}")
         def serve_frontend(path: str = ""):
             # The SPA shell must always revalidate so a redeploy's newly-hashed
