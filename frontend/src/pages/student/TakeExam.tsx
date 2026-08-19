@@ -461,7 +461,7 @@ export default function TakeExam() {
   // Fully stop dictation. Called on toggle-off, on submit, and on question
   // change so one answer's speech never bleeds into the next (issue: spillover).
   const stopMic = useCallback(() => {
-    const rec = recognitionRef.current;
+    const rec = recognitionRef.current as any;
     recognitionRef.current = null;
     if (rec) { try { rec.onend = null; rec.stop(); } catch { /* already stopped */ } }
     setListening(false);
