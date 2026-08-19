@@ -1,4 +1,5 @@
-import { Outlet, NavLink, useNavigate } from 'react-router-dom';
+import { Outlet, NavLink } from 'react-router-dom';
+import { logout } from '../api/auth';
 import {
   GraduationCap,
   LayoutDashboard,
@@ -6,6 +7,7 @@ import {
   ClipboardList,
   FileText,
   Network,
+  UserPlus,
   LogOut,
   Menu,
   X,
@@ -14,9 +16,15 @@ import { useState } from 'react';
 
 interface User {
   email: string;
-  role: 'professor' | 'student';
+  role: 'professor' | 'student' | 'platform_admin';
   name?: string;
 }
+
+const ROLE_LABELS: Record<string, string> = {
+  professor: 'Professor',
+  student: 'Student',
+  platform_admin: 'Admin',
+};
 
 function getUser(): User | null {
   const raw = localStorage.getItem('user');
@@ -40,17 +48,19 @@ const studentLinks = [
   { to: '/student/dashboard', label: 'Dashboard', icon: LayoutDashboard },
 ];
 
+const adminLinks = [
+  { to: '/admin/professors', label: 'Add Professor', icon: UserPlus },
+];
+
 export default function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const navigate = useNavigate();
   const user = getUser();
-  const links = user?.role === 'professor' ? professorLinks : studentLinks;
+  const links =
+    user?.role === 'platform_admin' ? adminLinks
+    : user?.role === 'professor' ? professorLinks
+    : studentLinks;
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    navigate('/login');
-  };
+  const handleLogout = () => { logout(); };
 
   return (
     <div className="min-h-screen bg-parchment flex">
@@ -104,10 +114,14 @@ export default function AppLayout() {
               <p className="text-sm font-medium text-ink truncate">{user?.email || 'User'}</p>
               <p className="text-xs text-muted capitalize">{user?.role || 'unknown'}</p>
             </div>
-            <button onClick={handleLogout} className="p-1 hover:bg-parchment rounded" title="Logout">
-              <LogOut className="w-4 h-4 text-muted" />
-            </button>
           </div>
+          <button
+            onClick={handleLogout}
+            className="mt-2 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-ink-light border border-border hover:bg-parchment hover:text-ink transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+            Sign out
+          </button>
         </div>
       </aside>
 
@@ -121,9 +135,9 @@ export default function AppLayout() {
           <div className="flex-1" />
           <div className="flex items-center gap-2">
             <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-              user?.role === 'professor' ? 'bg-gold/20 text-gold-light' : 'bg-success-bg text-success'
+              user?.role === 'student' ? 'bg-success-bg text-success' : 'bg-gold/20 text-gold-light'
             }`}>
-              {user?.role === 'professor' ? 'Professor' : 'Student'}
+              {ROLE_LABELS[user?.role || ''] || 'User'}
             </span>
           </div>
         </header>

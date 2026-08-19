@@ -1,4 +1,4 @@
-"""org_name/course_name resolution: server-minted UUIDs, per-org uniqueness."""
+"""course_name resolution within the verified org: server-minted UUIDs, per-org uniqueness."""
 import pytest
 
 from backend.models import IngestRequest
@@ -20,18 +20,19 @@ def _req(org, course):
 
 def test_name_resolves_to_minted_uuid():
     repo, api = _api()
-    resp = api.presign_by_name("op", "professor", _req("berkeley", "data101"))
     org = repo.get_or_create_org("berkeley")
+    # Tenant is the verified org_id, not req.org_name; course resolved by name.
+    resp = api.presign_by_name("op", "professor", org.org_id, _req("berkeley", "data101"))
     course = repo.get_or_create_course(org.org_id, "data101")
     assert resp.s3_key.startswith(f"{org.org_id}/{course.course_id}/materials/")
 
 
 def test_same_course_name_different_orgs_are_distinct():
     repo, api = _api()
-    api.presign_by_name("op", "professor", _req("berkeley", "data101"))
-    api.presign_by_name("op", "professor", _req("stanford", "data101"))
     berkeley = repo.get_or_create_org("berkeley")
     stanford = repo.get_or_create_org("stanford")
+    api.presign_by_name("op", "professor", berkeley.org_id, _req("berkeley", "data101"))
+    api.presign_by_name("op", "professor", stanford.org_id, _req("stanford", "data101"))
     c_b = repo.get_or_create_course(berkeley.org_id, "data101")
     c_s = repo.get_or_create_course(stanford.org_id, "data101")
     assert berkeley.org_id != stanford.org_id

@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate } from 'react-router-dom';
 import AuthLayout from './layouts/AuthLayout';
 import AppLayout from './layouts/AppLayout';
 import Login from './pages/Login';
+import Callback from './pages/Callback';
 import ProfessorDashboard from './pages/professor/Dashboard';
 import CourseDetail from './pages/professor/CourseDetail';
 import UploadMaterial from './pages/professor/UploadMaterial';
@@ -12,6 +13,7 @@ import GradeView from './pages/professor/GradeView';
 import StudentDashboard from './pages/student/Dashboard';
 import TakeExam from './pages/student/TakeExam';
 import Results from './pages/student/Results';
+import AddProfessor from './pages/admin/AddProfessor';
 
 function getUser() {
   const raw = localStorage.getItem('user');
@@ -31,7 +33,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function RequireRole({ role, children }: { role: 'professor' | 'student'; children: React.ReactNode }) {
+function RequireRole({ role, children }: { role: 'professor' | 'student' | 'platform_admin'; children: React.ReactNode }) {
   const user = getUser();
   if (!user || user.role !== role) {
     return <Navigate to="/login" replace />;
@@ -42,6 +44,7 @@ function RequireRole({ role, children }: { role: 'professor' | 'student'; childr
 function RootRedirect() {
   const user = getUser();
   if (!user) return <Navigate to="/login" replace />;
+  if (user.role === 'platform_admin') return <Navigate to="/admin/professors" replace />;
   if (user.role === 'professor') return <Navigate to="/professor/dashboard" replace />;
   return <Navigate to="/student/dashboard" replace />;
 }
@@ -57,6 +60,7 @@ export const router = createBrowserRouter([
     element: <AuthLayout />,
     children: [
       { path: '/login', element: <Login /> },
+      { path: '/callback', element: <Callback /> },
     ],
   },
   {
@@ -66,6 +70,11 @@ export const router = createBrowserRouter([
       </RequireAuth>
     ),
     children: [
+      // Admin routes
+      {
+        path: '/admin/professors',
+        element: <RequireRole role="platform_admin"><AddProfessor /></RequireRole>,
+      },
       // Professor routes
       {
         path: '/professor/dashboard',
