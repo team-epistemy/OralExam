@@ -58,12 +58,6 @@ export default function CourseDetail() {
     enabled: !!courseId,
   });
 
-  const { data: graphData } = useQuery({
-    queryKey: ['course-graph', courseId],
-    queryFn: () => get<any>(`/api/courses/${courseId}/graph`),
-    enabled: !!courseId,
-  });
-
   const { data: questions = [] } = useQuery({
     queryKey: ['questions', courseId],
     queryFn: () => listQuestions(courseId!),
@@ -76,22 +70,6 @@ export default function CourseDetail() {
     enabled: !!courseId,
   });
 
-  // Workflow stepper: derive completion status
-  const hasReadyMaterial = materials.length > 0;
-  const hasGraph = (graphData?.node_count || graphData?.concepts?.length || 0) > 0;
-  const hasApprovedQuestions = questions.some((q: any) => q.status === 'approved');
-  const hasActiveAssignment = (assignments as any[]).some((a: any) => a.status === 'active');
-
-  const workflowSteps: { label: string; tab: Tab; complete: boolean }[] = [
-    { label: 'Materials', tab: 'materials', complete: hasReadyMaterial },
-    { label: 'Concept Graph', tab: 'graph', complete: hasGraph },
-    { label: 'Questions', tab: 'questions', complete: hasApprovedQuestions },
-    { label: 'Assignments', tab: 'assignments', complete: hasActiveAssignment },
-  ];
-
-  // Current step is the first incomplete one
-  const currentStepIndex = workflowSteps.findIndex((s) => !s.complete);
-  const effectiveCurrentStep = currentStepIndex === -1 ? workflowSteps.length : currentStepIndex;
 
   const tabs = [
     { id: 'materials' as Tab, label: 'Materials', icon: FileText },
@@ -124,55 +102,6 @@ export default function CourseDetail() {
         </div>
       </div>
 
-      {/* Workflow Stepper */}
-      <div className="bg-white rounded-xl border border-gray-200 px-6 py-4">
-        <div className="flex items-center justify-between" role="list" aria-label="Course setup progress">
-          {workflowSteps.map((step, i) => (
-            <div key={step.tab} className={`flex items-center ${i < workflowSteps.length - 1 ? 'flex-1' : ''}`} role="listitem">
-              <button
-                onClick={() => setActiveTab(step.tab)}
-                className="flex flex-col items-center gap-1.5 group"
-                aria-label={`Step ${i + 1}: ${step.label} — ${step.complete ? 'completed' : i === effectiveCurrentStep ? 'current' : 'upcoming'}`}
-                aria-current={i === effectiveCurrentStep ? 'step' : undefined}
-              >
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
-                    step.complete
-                      ? 'bg-success border-success text-white'
-                      : i === effectiveCurrentStep
-                        ? 'bg-navy border-gold text-white'
-                        : 'bg-white border-muted text-muted'
-                  }`}
-                >
-                  {step.complete ? (
-                    <Check className="w-4 h-4" />
-                  ) : (
-                    <span>{i + 1}</span>
-                  )}
-                </div>
-                <span
-                  className={`text-xs font-medium transition-colors ${
-                    step.complete
-                      ? 'text-success'
-                      : i === effectiveCurrentStep
-                        ? 'text-navy'
-                        : 'text-muted'
-                  } group-hover:text-gold`}
-                >
-                  {step.label}
-                </span>
-              </button>
-              {i < workflowSteps.length - 1 && (
-                <div
-                  className={`flex-1 h-0.5 mx-3 rounded ${
-                    step.complete ? 'bg-success' : 'bg-gray-200'
-                  }`}
-                />
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
 
       {/* Tabs */}
       <div className="border-b border-gray-200">

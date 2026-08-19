@@ -427,8 +427,15 @@ def _parse_emails(raws) -> list:
 
 
 def _ensure_enrollment_table(repo) -> None:
-    """Create the roster table on first use (no migration needed)."""
+    """Create the roster table on first use.
+
+    The runtime app role is a non-owner without CREATE on schema public, and
+    `CREATE TABLE IF NOT EXISTS` still triggers that privilege check even when
+    the table exists — so skip it entirely once the table is present."""
     with repo.conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.enrollment')")
+        if cur.fetchone()[0] is not None:
+            return
         cur.execute(
             """CREATE TABLE IF NOT EXISTS enrollment (
                    org_id UUID NOT NULL,
@@ -440,8 +447,14 @@ def _ensure_enrollment_table(repo) -> None:
 
 
 def _ensure_syllabus_table(repo) -> None:
-    """Create the per-course syllabus pointer table on first use."""
+    """Create the per-course syllabus pointer table on first use.
+
+    Skips the CREATE when the table exists — the non-owner app role lacks CREATE
+    on schema public, which `CREATE TABLE IF NOT EXISTS` still checks."""
     with repo.conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.course_syllabus')")
+        if cur.fetchone()[0] is not None:
+            return
         cur.execute(
             """CREATE TABLE IF NOT EXISTS course_syllabus (
                    course_id UUID PRIMARY KEY,
