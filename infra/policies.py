@@ -45,6 +45,7 @@ def task_permission_policy(bucket: str, queue_arn: str, key_arn: str) -> str:
         _sqs_statement(queue_arn),
         _kms_statement(key_arn),
         _bedrock_statement(),
+        _cognito_statement(),
         {"Effect": "Allow", "Action": ["secretsmanager:GetSecretValue"],
          "Resource": "*"},
     ]
@@ -72,6 +73,15 @@ def _kms_statement(key_arn: str) -> Dict:
 
 def _bedrock_statement() -> Dict:
     return {"Effect": "Allow", "Action": ["bedrock:InvokeModel"],
+            "Resource": "*"}
+
+
+def _cognito_statement() -> Dict:
+    """Admin user provisioning: professor creation + bootstrap seed."""
+    return {"Effect": "Allow",
+            "Action": ["cognito-idp:AdminCreateUser",
+                       "cognito-idp:AdminGetUser",
+                       "cognito-idp:AdminSetUserPassword"],
             "Resource": "*"}
 
 
