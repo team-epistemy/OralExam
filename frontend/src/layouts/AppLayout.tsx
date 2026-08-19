@@ -1,4 +1,5 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { logout } from '../api/auth';
 import {
   GraduationCap,
   LayoutDashboard,
@@ -13,6 +14,7 @@ import {
   Plus,
   Trash2,
   ChevronLeft,
+  UserPlus,
   LogOut,
   Menu,
   X,
@@ -25,9 +27,15 @@ import { createCourse, deleteCourse, type CourseRef } from '../api/courses';
 
 interface User {
   email: string;
-  role: 'professor' | 'student';
+  role: 'professor' | 'student' | 'platform_admin';
   name?: string;
 }
+
+const ROLE_LABELS: Record<string, string> = {
+  professor: 'Professor',
+  student: 'Student',
+  platform_admin: 'Admin',
+};
 
 function getUser(): User | null {
   const raw = localStorage.getItem('user');
@@ -46,6 +54,10 @@ const navItemClass = ({ isActive }: { isActive: boolean }) =>
 
 const staticItemClass = 'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-ink-light hover:bg-parchment hover:text-ink transition-colors w-full text-left';
 
+const adminLinks = [
+  { to: '/admin/professors', label: 'Add Professor', icon: UserPlus },
+];
+
 export default function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showAddCourse, setShowAddCourse] = useState(false);
@@ -54,6 +66,7 @@ export default function AppLayout() {
   const queryClient = useQueryClient();
   const user = getUser();
   const isProfessor = user?.role === 'professor';
+  const isAdmin = user?.role === 'platform_admin';
 
   const { data: courses = [] } = useQuery({
     queryKey: ['professor-courses'],
@@ -65,11 +78,7 @@ export default function AppLayout() {
   const activeCourseId = courseMatch?.[1];
   const activeCourse = courses.find((c) => c.course_id === activeCourseId);
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    navigate('/login');
-  };
+  const handleLogout = () => { logout(); };
 
   const handleRemoveCourse = async () => {
     if (!activeCourse) return;
@@ -82,6 +91,15 @@ export default function AppLayout() {
   const close = () => setSidebarOpen(false);
 
   const renderNav = () => {
+    // Platform admin: provisioning-only navigation
+    if (isAdmin) {
+      return adminLinks.map((l) => (
+        <NavLink key={l.to} to={l.to} onClick={close} className={navItemClass}>
+          <l.icon className="w-4 h-4" /> {l.label}
+        </NavLink>
+      ));
+    }
+
     if (!isProfessor) {
       return (
         <NavLink to="/student/dashboard" onClick={close} className={navItemClass}>
@@ -187,8 +205,14 @@ export default function AppLayout() {
               <p className="text-sm font-medium text-ink truncate">{user?.email || 'User'}</p>
               <p className="text-xs text-muted capitalize">{user?.role || 'unknown'}</p>
             </div>
-            <button onClick={handleLogout} className="p-1 hover:bg-parchment rounded" title="Logout"><LogOut className="w-4 h-4 text-muted" /></button>
           </div>
+          <button
+            onClick={handleLogout}
+            className="mt-2 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-ink-light border border-border hover:bg-parchment hover:text-ink transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+            Sign out
+          </button>
         </div>
       </aside>
 
@@ -196,11 +220,13 @@ export default function AppLayout() {
         <header className="sticky top-0 z-30 bg-navy border-b-2 border-gold px-4 lg:px-8 py-3 flex items-center gap-4">
           <button className="lg:hidden p-1" onClick={() => setSidebarOpen(true)}><Menu className="w-5 h-5 text-parchment" /></button>
           <div className="flex-1" />
-          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-            isProfessor ? 'bg-gold/20 text-gold-light' : 'bg-success-bg text-success'
-          }`}>
-            {isProfessor ? 'Professor' : 'Student'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+              user?.role === 'student' ? 'bg-success-bg text-success' : 'bg-gold/20 text-gold-light'
+            }`}>
+              {ROLE_LABELS[user?.role || ''] || 'User'}
+            </span>
+          </div>
         </header>
 
         <main className="flex-1 p-4 lg:p-8"><Outlet /></main>
