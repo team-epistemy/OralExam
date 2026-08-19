@@ -73,7 +73,7 @@ class Settings:
 
     @property
     def db_secret_name(self) -> str:
-        """Secrets Manager name holding the DB credentials."""
+        """Secrets Manager name holding the admin (owner) DB credentials."""
         return f"epistemy/db-{self.env}"
 
     @property
@@ -85,6 +85,16 @@ class Settings:
     def elevenlabs_secret_name(self) -> str:
         """Secrets Manager id for the ElevenLabs API key (override via env, else default)."""
         return self.elevenlabs_secret or f"epistemy/elevenlabs-api-key-{self.env}"
+
+    @property
+    def db_app_secret_name(self) -> str:
+        """Secrets Manager name for the least-privilege runtime role (RLS-bound)."""
+        return f"epistemy/db-app-{self.env}"
+
+    @property
+    def cognito_secret_name(self) -> str:
+        """Secrets Manager name holding Cognito config (pool/client/issuer)."""
+        return f"epistemy/cognito-{self.env}"
 
     @property
     def log_group(self) -> str:

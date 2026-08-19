@@ -64,6 +64,18 @@ def migrate() -> None:
             print(f"applying {migration_004.name} ...")
             cur.execute(migration_004.read_text())
 
+        # Always apply migration_005 (RLS hardening; idempotent)
+        migration_005 = db_dir / "migration_005_rls_hardening.sql"
+        if migration_005.exists():
+            print(f"applying {migration_005.name} ...")
+            cur.execute(migration_005.read_text())
+
+        # Always apply migration_006 (auth schema + resolver; idempotent)
+        migration_006 = db_dir / "migration_006_auth_schema.sql"
+        if migration_006.exists():
+            print(f"applying {migration_006.name} ...")
+            cur.execute(migration_006.read_text())
+
     conn.commit()
     print("all schemas applied")
 
@@ -81,6 +93,44 @@ def clean() -> None:
     print(f"cleaned {len(tables)} tables (kept 'org'): {sorted(tables)}")
 
 
+def bootstrap() -> None:
+    """Idempotently seed the platform org + a platform_admin (Cognito + app_user).
+
+    Reads EPISTEMY_ADMIN_EMAIL, EPISTEMY_ADMIN_PASSWORD, EPISTEMY_ORG_NAME.
+    If EPISTEMY_ADMIN_SUB is set the Cognito call is skipped (user already
+    created out of band). Runs as the admin owner so it writes app_user past RLS.
+    """
+    import os
+    import uuid
+    from backend.app import factory
+    from backend.auth.provision import cognito_admin_create, insert_app_user
+    settings = load_settings()
+    email = os.environ["EPISTEMY_ADMIN_EMAIL"]
+    password = os.environ.get("EPISTEMY_ADMIN_PASSWORD")
+    org_name = os.environ.get("EPISTEMY_ORG_NAME", "epistemy")
+    sub = os.environ.get("EPISTEMY_ADMIN_SUB")
+    if sub:
+        print(f"using pre-created cognito sub for {email}")
+    else:
+        print("creating cognito user ...")
+        cognito = factory.build_cognito_config(settings)
+        sub = cognito_admin_create(cognito["user_pool_id"], email,
+                                   cognito["region"], password)
+    print("connecting to db ...")
+    conn = factory.db_connection(settings)
+    print("upserting org + app_user ...")
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO org (org_id, org_name, title) VALUES (%s, %s, %s)
+               ON CONFLICT (org_name) DO UPDATE SET title = EXCLUDED.title
+               RETURNING org_id""",
+            (str(uuid.uuid4()), org_name, org_name.title()))
+        org_id = cur.fetchone()[0]
+        insert_app_user(cur, sub, email, org_id, "platform_admin")
+    conn.commit()
+    print(f"bootstrap complete: admin={email} org={org_name}")
+
+
 def smoke() -> None:
     """End-to-end AWS test: seed → upload → enqueue → poll worker to ready."""
     from backend.app import smoke_test
@@ -91,7 +141,7 @@ def main() -> None:
     """Dispatch on the first CLI argument."""
     command = sys.argv[1] if len(sys.argv) > 1 else "serve"
     {"serve": serve, "worker": worker, "migrate": migrate,
-     "clean": clean, "smoke": smoke}.get(command, serve)()
+     "clean": clean, "bootstrap": bootstrap, "smoke": smoke}.get(command, serve)()
 
 
 if __name__ == "__main__":
