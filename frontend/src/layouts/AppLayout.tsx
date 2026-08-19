@@ -127,7 +127,7 @@ export default function AppLayout() {
           <NavLink to={`/professor/upload?course=${cname}&syllabus=1&courseId=${cid}`} onClick={close} className={staticItemClass}>
             <ScrollText className="w-4 h-4" /> Upload Syllabus
           </NavLink>
-          <NavLink to={`/professor/courses/${cid}/students`} onClick={close} className={navItemClass}>
+          <NavLink to={`/professor/courses/${cid}?tab=students`} onClick={close} className={staticItemClass}>
             <Users className="w-4 h-4" /> Add Students
           </NavLink>
           <button

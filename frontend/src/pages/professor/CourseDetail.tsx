@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, HelpCircle, ClipboardList, Upload, Check, Pencil, X, Save, Trash2, AlertTriangle, Eye } from 'lucide-react';
+import { FileText, Network, HelpCircle, ClipboardList, Upload, Check, Pencil, X, Save, Trash2, AlertTriangle, Eye, Loader2, Users, Copy } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
+import { createStudent } from '../../api/students';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 import type { Question } from '../../api/questions';
 import { listQuestions } from '../../api/questions';
@@ -23,11 +24,26 @@ interface Course {
   join_code?: string;
 }
 
-type Tab = 'materials' | 'graph' | 'questions' | 'assignments';
+type Tab = 'materials' | 'graph' | 'questions' | 'assignments' | 'students';
 
 export default function CourseDetail() {
   const { courseId } = useParams<{ courseId: string }>();
-  const [activeTab, setActiveTab] = useState<Tab>('materials');
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const [activeTab, setActiveTab] = useState<Tab>(
+    (['materials', 'graph', 'questions', 'assignments', 'students'].includes(tabParam || '')
+      ? (tabParam as Tab)
+      : 'materials'),
+  );
+
+  // Keep the active tab in sync with ?tab= so the left-nav "Add Students" link
+  // switches to the Students tab even when the course page is already mounted.
+  useEffect(() => {
+    const t = searchParams.get('tab');
+    if (t && ['materials', 'graph', 'questions', 'assignments', 'students'].includes(t)) {
+      setActiveTab(t as Tab);
+    }
+  }, [searchParams]);
   const queryClient = useQueryClient();
 
   const { data: course } = useQuery({
@@ -82,6 +98,7 @@ export default function CourseDetail() {
     { id: 'graph' as Tab, label: 'Concept Graph', icon: Network },
     { id: 'questions' as Tab, label: 'Questions', icon: HelpCircle },
     { id: 'assignments' as Tab, label: 'Assignments', icon: ClipboardList },
+    { id: 'students' as Tab, label: 'Students', icon: Users },
   ];
 
   return (
@@ -184,6 +201,7 @@ export default function CourseDetail() {
       {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
       {activeTab === 'questions' && <QuestionsTab questions={questions} courseId={courseId!} materials={materials} queryClient={queryClient} />}
       {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
+      {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
     </div>
   );
 }
@@ -859,6 +877,120 @@ function AssignmentsTab({ assignments, courseId, queryClient }: { assignments: A
               </button>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface Roster { email: string; password: string; }
+
+// Provision student accounts for this course: each email becomes a Cognito user
+// enrolled in the course, with a one-time temp password to hand out (no signup).
+function StudentsTab({ courseId }: { courseId: string }) {
+  const [emails, setEmails] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [roster, setRoster] = useState<Roster[]>([]);
+  const [errors, setErrors] = useState<string[]>([]);
+
+  const addStudents = async () => {
+    const list = Array.from(new Set(
+      emails.split(/[\s,;]+/).map((e) => e.trim()).filter(Boolean)
+    ));
+    if (list.length === 0) return;
+    setBusy(true);
+    setErrors([]);
+    const added: Roster[] = [];
+    const failed: string[] = [];
+    for (const email of list) {
+      try {
+        const s = await createStudent(email, courseId);
+        added.push({ email: s.email, password: s.password });
+      } catch (err: any) {
+        failed.push(`${email}: ${err?.message || 'failed'}`);
+      }
+    }
+    setRoster((prev) => [...added, ...prev]);
+    setErrors(failed);
+    setEmails('');
+    setBusy(false);
+  };
+
+  const loginUrl = `${window.location.origin}${import.meta.env.BASE_URL}login`;
+
+  const copyRow = (r: Roster) => {
+    navigator.clipboard?.writeText(`Email: ${r.email}\nPassword: ${r.password}\nSign in: ${loginUrl}`);
+  };
+  const copyAll = () => {
+    const text = roster.map((r) =>
+      `Email: ${r.email}\nPassword: ${r.password}\nSign in: ${loginUrl}\n`).join('\n');
+    navigator.clipboard?.writeText(text);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+        <div>
+          <h3 className="text-sm font-medium text-gray-700">Add Students</h3>
+          <p className="text-xs text-gray-500 mt-1">
+            Paste student emails (one per line, or comma-separated). Each gets an account
+            enrolled in this course and a temporary password to share — no signup needed.
+          </p>
+        </div>
+        <textarea
+          value={emails}
+          onChange={(e) => setEmails(e.target.value)}
+          rows={4}
+          placeholder={"student1@berkeley.edu\nstudent2@berkeley.edu"}
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y font-mono"
+        />
+        <button
+          onClick={addStudents}
+          disabled={busy || !emails.trim()}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Users className="w-4 h-4" />}
+          {busy ? 'Adding...' : 'Add students'}
+        </button>
+      </div>
+
+      {errors.length > 0 && (
+        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 space-y-1">
+          {errors.map((e, i) => <p key={i}>{e}</p>)}
+        </div>
+      )}
+
+      {roster.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-medium text-gray-700">Credentials to share</h3>
+              <p className="text-xs text-amber-600 mt-0.5">
+                Shown once — copy them now. Students sign in at {loginUrl}
+              </p>
+            </div>
+            <button
+              onClick={copyAll}
+              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Copy className="w-3.5 h-3.5" /> Copy all
+            </button>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {roster.map((r, i) => (
+              <div key={i} className="flex items-center gap-4 py-2">
+                <span className="text-sm text-gray-900 flex-1 min-w-0 truncate">{r.email}</span>
+                <span className="text-sm font-mono text-gray-600">{r.password}</span>
+                <button
+                  onClick={() => copyRow(r)}
+                  className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                  title="Copy this student's credentials"
+                >
+                  <Copy className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
