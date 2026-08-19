@@ -9,7 +9,6 @@ import os
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
-import jwt
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -21,7 +20,7 @@ from backend.config import load_settings
 from backend.constants import (
     MAX_CHUNKS_FOR_GRAPH, MAX_CHUNKS_FOR_GENERATION,
     MAX_QUESTION_COUNT, MAX_ANSWER_LENGTH, LLM_MAX_TOKENS_GENERATION,
-    LLM_MAX_TOKENS_EVALUATION, DEFAULT_ORG_NAME,
+    LLM_MAX_TOKENS_EVALUATION,
     EDS_ALPHA, EDS_BETA, EDS_GAMMA,
 )
 from backend.models import Role, IngestRequest
@@ -38,63 +37,28 @@ from backend.db.postgres import PostgresRepository
 
 logger = logging.getLogger(__name__)
 
-# ── Authentication ────────────────────────────────────────────────────────────
+# ── Authentication (Cognito access tokens) ─────────────────────────────────────
+# No shared secret and no user table: the SPA obtains an access token from the
+# Cognito Hosted UI (authorization-code + PKCE) and sends it as a Bearer token.
+# The middleware validates it and resolves it to a provisioned auth.app_user (see
+# backend/auth). Handlers still read x-user-id / x-role / x-org-name; the
+# middleware overwrites those with verified values, so no signature changes.
 
-# Signing key. Falls back to a dev constant so local runs work, but a deployed
-# environment must set EPISTEMY_JWT_SECRET or every token is forgeable by anyone
-# who has read this file.
-_JWT_SECRET = os.environ.get("EPISTEMY_JWT_SECRET", "epistemy-dev-secret-2024")
-_JWT_ALGORITHM = "HS256"
-_JWT_EXPIRY_HOURS = 24
-
-# Reachable without a token: login itself, health, static assets, and the SPA.
-# EventSource cannot set headers, so the SSE stream is exempt here and carries
-# its own session-ownership check inside the handler.
+# Reachable without a token: the Cognito params the login page needs, health,
+# static assets, and the SPA shell. The SSE stream is authenticated via a
+# ?token= query param (EventSource cannot set headers) — see the middleware.
 _PUBLIC_PATH_PREFIXES = (
-    "/api/auth/login", "/health", "/config", "/app", "/static",
+    "/api/auth/config", "/api/auth/invitations/redeem",
+    "/health", "/config", "/app", "/static",
     "/docs", "/openapi.json", "/redoc", "/favicon",
 )
 
-# Hardcoded user list (no database signup needed for MVP)
-_USERS: dict = {
-    "prof1@univ.edu": {"password": "epistemy123", "role": "professor", "name": "Professor One"},
-    "prof2@univ.edu": {"password": "epistemy123", "role": "professor", "name": "Professor Two"},
-}
-# Add students
-for _i in range(1, 21):
-    _USERS[f"student{_i}@univ.edu"] = {"password": "student123", "role": "student", "name": f"Student {_i}"}
 
-
-class _LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-def _create_token(email: str, role: str) -> str:
-    """Mint a signed token carrying the caller's identity, role, and tenant."""
-    payload = {
-        "user_id": email,
-        "role": role,
-        # Tenant name, not the UUID: handlers resolve it the same way headers did,
-        # so the org lookup path is unchanged and only its input becomes trusted.
-        "org_name": DEFAULT_ORG_NAME,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=_JWT_EXPIRY_HOURS),
-    }
-    return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
-
-
-def _decode_token(authorization: str | None) -> dict | None:
-    """Return verified claims, or None when the header is absent or malformed.
-
-    Never raises: the middleware decides what a missing/bad token means per route,
-    so a bad token and no token are handled in one place rather than here.
-    """
-    if not authorization or not authorization.startswith("Bearer "):
-        return None
-    try:
-        return jwt.decode(authorization[7:], _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
-    except jwt.InvalidTokenError:  # covers expired, wrong signature, malformed
-        return None
+def _bearer(authorization: str | None) -> str | None:
+    """Extract a bearer token from an Authorization header, or None."""
+    if authorization and authorization.startswith("Bearer "):
+        return authorization[7:]
+    return None
 
 
 def _prior_coverage(repo, session_id: str, question_index: int) -> tuple:
@@ -267,35 +231,44 @@ def _is_public(path: str) -> bool:
     return path == "/" or path.startswith(_PUBLIC_PATH_PREFIXES)
 
 
-def _install_auth_middleware(app: FastAPI) -> None:
-    """Require a verified token on every non-public route.
+def _install_auth_middleware(app: FastAPI, deps) -> None:
+    """Validate the Cognito access token on every non-public route.
 
     Handlers read identity from x-user-id / x-role / x-org-name. Rather than change
-    31 signatures, this overwrites those headers with the token's claims, so a
-    client-supplied role can no longer reach a handler. Requests are rejected here
-    if the token is missing or invalid, which is what makes the overwrite safe.
+    31 signatures, this overwrites those headers with the verified identity, so a
+    client-supplied role or tenant can never reach a handler. x-org-name carries
+    the verified tenant UUID (org_id), which caller_for_org consumes directly.
+    Requests are rejected here if the token is missing or unresolvable.
     """
+    from starlette.concurrency import run_in_threadpool
+    from backend.auth.token import TokenError
+    from backend.auth.identity import IdentityError
 
     @app.middleware("http")
     async def enforce_auth(request, call_next):
         if request.method == "OPTIONS" or _is_public(request.url.path):
             return await call_next(request)
 
-        claims = _decode_token(request.headers.get("authorization"))
-        if not claims:
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Authentication required. Sign in again."},
-            )
+        # EventSource can't set headers, so SSE carries the token as ?token=.
+        token = _bearer(request.headers.get("authorization")) or \
+            request.query_params.get("token")
+        if not token:
+            return JSONResponse(status_code=401,
+                content={"detail": "Authentication required. Sign in again."})
+        try:
+            identity = await run_in_threadpool(deps()["resolver"].resolve, token)
+        except (TokenError, IdentityError):
+            return JSONResponse(status_code=401,
+                content={"detail": "Session expired or invalid. Sign in again."})
 
         # Starlette exposes raw headers as a list of lowercase byte pairs; replacing
         # them here means downstream Header(...) params see only verified values.
         spoofable = {b"x-user-id", b"x-role", b"x-org-name"}
         headers = [(k, v) for k, v in request.scope["headers"] if k not in spoofable]
         headers += [
-            (b"x-user-id", str(claims.get("user_id", "")).encode()),
-            (b"x-role", str(claims.get("role", "student")).encode()),
-            (b"x-org-name", str(claims.get("org_name", DEFAULT_ORG_NAME)).encode()),
+            (b"x-user-id", identity.user_id.encode()),
+            (b"x-role", identity.role.encode()),
+            (b"x-org-name", identity.org_id.encode()),  # verified tenant UUID
         ]
         request.scope["headers"] = headers
         return await call_next(request)
@@ -314,10 +287,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    _install_auth_middleware(app)
-
     settings = load_settings()
     deps = _lazy_deps(settings)
+    _install_auth_middleware(app, deps)
     _register_routes(app, deps)
     _mount_demo(app)
     return app
@@ -368,8 +340,9 @@ def _lazy_deps(settings):
             storage = factory.build_storage(settings)
             queue = factory.build_queue(settings)
             embedder = factory.build_embedder(settings)
+            resolver = factory.build_identity_resolver(settings, pool)
             cache.update(pool=pool, storage=storage, queue=queue,
-                         embedder=embedder, settings=settings)
+                         embedder=embedder, resolver=resolver, settings=settings)
         return cache
     return deps
 
@@ -395,7 +368,9 @@ def _release_repo(deps_cache: dict, repo: PostgresRepository) -> None:
 
 def _register_routes(app: FastAPI, deps) -> None:
     """Attach all module endpoints."""
-    _register_auth(app)
+    _register_auth(app, deps)
+    from backend.app.auth_routes import register_auth_routes
+    register_auth_routes(app, deps)
     _register_health(app, deps)
     _register_materials(app, deps)
     _register_reads(app, deps)
@@ -434,25 +409,31 @@ def _register_tts(app: FastAPI, deps) -> None:
                         headers={"Cache-Control": "no-store"})
 
 
-def _register_auth(app: FastAPI) -> None:
-    """POST /api/auth/login -- validates credentials, returns JWT."""
+def _register_auth(app: FastAPI, deps) -> None:
+    """Cognito Hosted-UI params (public) + the caller's resolved identity."""
 
-    @app.post("/api/auth/login")
-    def login(req: _LoginRequest):
-        user = _USERS.get(req.email)
-        if not user or user["password"] != req.password:
-            raise HTTPException(status_code=401, detail="Invalid email or password")
+    @app.get("/api/auth/config")
+    def auth_config():
+        """Public: the PKCE params the SPA needs to reach the Hosted UI.
 
-        token = _create_token(req.email, user["role"])
+        Uses settings directly (not deps()) so the login page works even when
+        the DB pool is cold or unavailable.
+        """
+        cognito = factory.build_cognito_config(load_settings())
         return {
-            "token": token,
-            "user": {
-                "id": req.email,
-                "email": req.email,
-                "role": user["role"],
-                "name": user["name"],
-            },
+            "domain": cognito["domain"],
+            "clientId": cognito["client_id"],
+            "region": cognito["region"],
+            "hostedUiUrl": cognito.get("hosted_ui_url"),
+            "scopes": ["openid", "email", "profile"],
         }
+
+    @app.get("/api/auth/me")
+    def me(x_user_id: str = Header(...), x_role: str = Header(...),
+           x_org_name: str = Header(...)):
+        """Authenticated: verified identity for the SPA to route by role."""
+        return {"id": x_user_id, "email": x_user_id, "role": x_role,
+                "orgId": x_org_name}
 
 
 def _register_health(app: FastAPI, deps) -> None:
@@ -485,14 +466,15 @@ def _register_materials(app: FastAPI, deps) -> None:
     # before production deployment.
 
     @app.post(R.PRESIGN)
-    def presign(req: IngestRequest, x_user_id: str = Header("operator"),
-                x_role: str = Header("professor")):
+    def presign(req: IngestRequest, x_org_name: str = Header(...),
+                x_user_id: str = Header("operator"), x_role: str = Header("professor")):
         def _do():
             d = deps()
             repo = _request_repo(d)
             try:
                 api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
-                return api.presign_by_name(x_user_id, x_role, req)
+                # x_org_name is the verified tenant UUID; req.org_name is ignored.
+                return api.presign_by_name(x_user_id, x_role, x_org_name, req)
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -564,7 +546,7 @@ def _register_material_view(app: FastAPI, deps) -> None:
 
 def _register_list_materials(app: FastAPI, deps) -> None:
     @app.get(R.LIST_MATERIALS)
-    def list_materials(org_name: str, course_name: str,
+    def list_materials(course_name: str, x_org_name: str = Header(...),
                        x_user_id: str = Header("operator"),
                        x_role: str = Header("professor")):
         def _do():
@@ -572,8 +554,8 @@ def _register_list_materials(app: FastAPI, deps) -> None:
             repo = _request_repo(d)
             try:
                 api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
-                caller = api.caller_for_org(x_user_id, x_role, org_name)
-                course_id = api.resolve_course_id(org_name, course_name)
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                course_id = api.resolve_course_id(x_org_name, course_name)
                 tools = MaterialsTools(repo, api, lambda c, cid: True)
                 return tools.list_materials(caller, course_id)
             finally:
@@ -768,7 +750,7 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
 
     @app.get(R.STUDENT_DASHBOARD)
     def student_dashboard(
-        x_org_name: str = Header(DEFAULT_ORG_NAME),
+        x_org_name: str = Header(...),
         x_user_id: str = Header("student"),
         x_role: str = Header("student"),
     ):
@@ -793,7 +775,7 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
 
     @app.get(R.STUDENT_ASSIGNMENTS)
     def student_assignments(
-        x_org_name: str = Header(DEFAULT_ORG_NAME),
+        x_org_name: str = Header(...),
         x_user_id: str = Header("student"),
         x_role: str = Header("student"),
     ):

@@ -28,11 +28,11 @@ def db_connection(settings: Settings):
 def build_pool(settings: Settings):
     """Create a ThreadedConnectionPool for the HTTP server.
 
-    Each request acquires its own connection, ensuring tenant-isolation (RLS
-    session vars) cannot leak between concurrent requests.
+    Uses the non-owner runtime role so RLS is enforced; app.org_id is reset on
+    return to the pool so a tenant binding never leaks to the next request.
     """
     from psycopg2.pool import ThreadedConnectionPool
-    creds = _db_credentials(settings)
+    creds = _db_credentials(settings, app_role=True)
     return ThreadedConnectionPool(
         minconn=2, maxconn=10,
         host=creds["host"], port=creds.get("port", 5432),
@@ -43,11 +43,12 @@ def build_pool(settings: Settings):
     )
 
 
-def _db_credentials(settings: Settings) -> dict:
-    """Fetch and parse the DB secret JSON."""
+def _db_credentials(settings: Settings, app_role: bool = False) -> dict:
+    """Fetch DB creds: the runtime app role when app_role else the admin owner."""
+    sid = (settings.db_app_secret_name if app_role
+           else settings.db_secret_arn or settings.db_secret_name)
     sm = boto3.client("secretsmanager", region_name=settings.region)
-    raw = sm.get_secret_value(SecretId=settings.db_secret_arn)["SecretString"]
-    return json.loads(raw)
+    return json.loads(sm.get_secret_value(SecretId=sid)["SecretString"])
 
 
 def build_repo(settings: Settings) -> PostgresRepository:
@@ -61,7 +62,13 @@ def get_connection_from_pool(pool) -> "psycopg2.extensions.connection":
 
 
 def return_connection_to_pool(pool, conn) -> None:
-    """Return a connection to the pool after a request completes."""
+    """Reset tenant state, then return the connection so it can't leak to the next request."""
+    try:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.org_id', '', false)")
+    except Exception:
+        pass
     pool.putconn(conn)
 
 
@@ -89,6 +96,21 @@ def build_embedder(settings: Settings):
         return FakeEmbedder(dims=settings.embed_dims)
     client = boto3.client("bedrock-runtime", region_name=settings.bedrock_region)
     return BedrockEmbedder(client, settings.embed_model, dims=settings.embed_dims)
+
+
+def build_cognito_config(settings: Settings) -> dict:
+    """Load the Cognito pool/client/issuer config from Secrets Manager."""
+    sm = boto3.client("secretsmanager", region_name=settings.region)
+    return json.loads(
+        sm.get_secret_value(SecretId=settings.cognito_secret_name)["SecretString"])
+
+
+def build_identity_resolver(settings: Settings, pool):
+    """Access-token validator + pooled resolver = the request-time chokepoint."""
+    from backend.auth.token import validator_from_config
+    from backend.auth.identity import IdentityResolver
+    cfg = build_cognito_config(settings)
+    return IdentityResolver(validator_from_config(cfg), pool)
 
 
 def build_api(settings: Settings, repo, storage, queue) -> MaterialsApi:

@@ -54,12 +54,16 @@ class MaterialsApi:
         url = self.storage.presign_put(version.s3_key, req.mime_type, req.bytes)
         return self._presign_response(material, version, url)
 
-    def presign_by_name(self, user_id: str, role: str,
+    def presign_by_name(self, user_id: str, role: str, org_id: str,
                         req: IngestRequest) -> PresignResponse:
-        """Resolve org_name/course_name to UUIDs, then presign as usual."""
-        org = self.repo.get_or_create_org(req.org_name)
-        course = self.repo.get_or_create_course(org.org_id, req.course_name)
-        caller = Caller(user_id=user_id, org_id=org.org_id, role=Role(role))
+        """Presign within the caller's verified org; course resolved by name.
+
+        Tenant is the authenticated org_id, never req.org_name — the request body
+        can't redirect an upload into another tenant.
+        """
+        self.repo.set_tenant(org_id)  # RLS is FORCEd: bind tenant before course create
+        course = self.repo.get_or_create_course(org_id, req.course_name)
+        caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         inner = PresignRequest(file_name=req.file_name, mime_type=req.mime_type,
                                bytes=req.bytes, material_id=req.material_id)
         return self.presign(caller, course.course_id, inner)
@@ -110,22 +114,20 @@ class MaterialsApi:
         job = self._enqueue_ingest(caller, version)
         return job
 
-    def register_by_name(self, user_id: str, role: str, org_name: str,
+    def register_by_name(self, user_id: str, role: str, org_id: str,
                         version_id: str) -> AsyncJob:
-        """Resolve org_name to its UUID, then register as usual."""
-        org = self.repo.get_or_create_org(org_name)
-        caller = Caller(user_id=user_id, org_id=org.org_id, role=Role(role))
+        """Register within the caller's verified org."""
+        caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         return self.register(caller, version_id)
 
-    def caller_for_org(self, user_id: str, role: str, org_name: str) -> Caller:
-        """Build a Caller for read tools from an org name."""
-        org = self.repo.get_or_create_org(org_name)
-        return Caller(user_id=user_id, org_id=org.org_id, role=Role(role))
+    def caller_for_org(self, user_id: str, role: str, org_id: str) -> Caller:
+        """Build a Caller from the already-resolved tenant id (chokepoint output)."""
+        return Caller(user_id=user_id, org_id=org_id, role=Role(role))
 
-    def resolve_course_id(self, org_name: str, course_name: str) -> str:
-        """Return the course UUID for an (org_name, course_name) pair."""
-        org = self.repo.get_or_create_org(org_name)
-        course = self.repo.get_or_create_course(org.org_id, course_name)
+    def resolve_course_id(self, org_id: str, course_name: str) -> str:
+        """Return the course UUID for a course name within the caller's org."""
+        self.repo.set_tenant(org_id)  # RLS is FORCEd: bind tenant before course create
+        course = self.repo.get_or_create_course(org_id, course_name)
         return course.course_id
 
     def _authorized_version(self, caller, version_id) -> MaterialVersion:

@@ -44,6 +44,7 @@ class JobStatus(str, Enum):
 
 
 class Role(str, Enum):
+    PLATFORM_ADMIN = "platform_admin"
     PROFESSOR = "professor"
     STUDENT = "student"
 
