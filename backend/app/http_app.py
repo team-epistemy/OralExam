@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
@@ -428,6 +429,18 @@ class SyllabusSetRequest(BaseModel):
     file_name: Optional[str] = None
 
 
+def _parse_emails(raws) -> list:
+    """Unique, lowercased emails from a list that may contain comma/semicolon/
+    whitespace-joined strings (so a pasted CSV works even if not pre-split)."""
+    out = []
+    for raw in raws or []:
+        for tok in re.findall(r"[^\s,;]+@[^\s,;]+", raw or ""):
+            e = tok.strip().lower().rstrip(".")
+            if e and e not in out:
+                out.append(e)
+    return out
+
+
 def _ensure_enrollment_table(repo) -> None:
     """Create the roster table on first use (no migration needed)."""
     with repo.conn.cursor() as cur:
@@ -550,12 +563,7 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 _ensure_enrollment_table(repo)
                 # Accept single emails or comma/semicolon/whitespace-joined strings.
-                emails = []
-                for raw in req.emails:
-                    for tok in re.findall(r"[^\s,;]+@[^\s,;]+", raw or ""):
-                        e = tok.strip().lower().rstrip(".")
-                        if e and e not in emails:
-                            emails.append(e)
+                emails = _parse_emails(req.emails)
                 added = 0
                 with repo.conn.cursor() as cur:
                     for e in emails:
@@ -2774,7 +2782,11 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "- recitation_score: 0.0=fully authentic reasoning, 1.0=pure keyword recitation without understanding\n"
                         "- novel_extensions: valid concepts/links beyond the expected path\n\n"
                         "CRITICAL: adequate=true ONLY if student shows clear mechanistic/causal reasoning.\n"
-                        "ALWAYS provide a probe sub-question (even if adequate, probe a deeper related concept).\n"
+                        "ALWAYS provide a probe sub-question that is grounded in THIS student's actual "
+                        "answer: quote or paraphrase the specific thing they said (or the exact step they "
+                        "skipped) and push on that precise gap or next causal link. Do NOT emit a generic, "
+                        "reusable phrase like 'tell me more', 'explain the mechanism', or 'why does that "
+                        "matter' — the probe must only make sense as a reply to what they just said.\n"
                         + probe_directive + "\n"
                         "Respond ONLY with minified JSON, no prose, no code fences:\n"
                         '{"clarify": false, "answered": true, "adequate": false, '
@@ -2803,10 +2815,14 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "clear mechanistic/causal reasoning with specific details — not just a surface-level or partial answer. "
                         "DEFAULT to adequate=false unless the answer is genuinely thorough. "
                         "When adequate=false, you MUST provide a probe sub-question. "
+                        "The probe must be grounded in THIS student's actual answer — quote or paraphrase "
+                        "the specific thing they said (or the step they skipped) and push on that exact gap. "
+                        "Never emit a generic, reusable phrase like 'tell me more' or 'explain the "
+                        "mechanism'; the probe should only make sense as a reply to what they just said. "
                         "Respond ONLY with minified JSON, no prose and no code fences: "
                         '{"clarify": bool, "answered": bool, "adequate": bool, '
                         '"feedback": "one sentence on what was strong or thin", '
-                        '"probe": "ALWAYS provide ONE short follow-up sub-question — if adequate, probe a related deeper concept; if not adequate, scaffold toward the answer"}'
+                        '"probe": "ONE short follow-up that quotes/paraphrases the student and targets their specific gap"}'
                     )
 
                 ctx = f"Exam question: {question_text}\n\n"

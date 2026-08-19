@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, MicOff, Volume2, VolumeX, BookOpen } from 'lucide-react';
+import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase } from '../../api/exam';
 import type { CaseMaterial } from '../../api/exam';
@@ -28,7 +28,7 @@ interface QuestionState {
 
 type Phase = 'loading' | 'taking' | 'review' | 'done';
 
-const MAX_TURNS = 3;
+const MAX_TURNS = 5;
 const TIMER_WARNING_SECONDS = 5 * 60;
 const TIMER_CRITICAL_SECONDS = 60;
 const STORAGE_KEY_PREFIX = 'epistemy_exam_';
@@ -423,6 +423,7 @@ export default function TakeExam() {
   const recognitionRef = useRef<{ stop: () => void; start: () => void } | null>(null);
   const spokenRef = useRef<string>('');
   const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const [ttsOn, setTtsOn] = useState(true);
 
   // Case context: the source document(s) this exam is drawn from, kept viewable
@@ -457,13 +458,25 @@ export default function TakeExam() {
     } catch { /* network / unsupported -> silent */ }
   }, [ttsOn]);
 
+  // Fully stop dictation. Called on toggle-off, on submit, and on question
+  // change so one answer's speech never bleeds into the next (issue: spillover).
+  const stopMic = useCallback(() => {
+    const rec = recognitionRef.current;
+    recognitionRef.current = null;
+    if (rec) { try { rec.onend = null; rec.stop(); } catch { /* already stopped */ } }
+    setListening(false);
+    setSpeaking(false);
+  }, []);
+
   const toggleMic = () => {
     const SR = (window as unknown as { SpeechRecognition?: new () => any; webkitSpeechRecognition?: new () => any });
     const Ctor = SR.SpeechRecognition || SR.webkitSpeechRecognition;
     if (!Ctor) { setError('Speech recognition is not supported here — try Chrome, Edge, or Safari.'); return; }
-    if (listening) { recognitionRef.current?.stop(); setListening(false); return; }
+    if (listening) { stopMic(); return; }
     const rec: any = new Ctor();
     rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
+    // Anchor dictation to whatever is in the box *now*; a fresh recognizer per
+    // answer means a stale transcript can't carry over into a new question.
     let base = draft;
     rec.onresult = (e: any) => {
       let interim = '', finalT = '';
@@ -474,8 +487,10 @@ export default function TakeExam() {
       if (finalT) base = (base ? base + ' ' : '') + finalT.trim();
       setDraft((base + (interim ? ' ' + interim : '')).trim());
     };
-    rec.onend = () => setListening(false);
-    rec.onerror = () => setListening(false);
+    rec.onspeechstart = () => setSpeaking(true);
+    rec.onspeechend = () => setSpeaking(false);
+    rec.onend = () => { setListening(false); setSpeaking(false); };
+    rec.onerror = () => { setListening(false); setSpeaking(false); };
     recognitionRef.current = rec;
     rec.start();
     setListening(true);
@@ -716,6 +731,7 @@ export default function TakeExam() {
   const handleAnswer = useCallback(() => {
     if (!draft.trim() || answerMutation.isPending || timerExpired) return;
     const studentText = draft.trim();
+    stopMic();          // end dictation so it can't spill into the next turn
     setDraft('');
 
     // Append student message immediately
@@ -729,7 +745,7 @@ export default function TakeExam() {
     scrollBottom();
 
     answerMutation.mutate({ questionIndex: current, text: studentText });
-  }, [draft, current, answerMutation, scrollBottom, timerExpired]);
+  }, [draft, current, answerMutation, scrollBottom, timerExpired, stopMic]);
 
   // ── Keyboard shortcut ──────────────────────────────────────────────────────
 
@@ -744,6 +760,7 @@ export default function TakeExam() {
 
   const goTo = (i: number) => {
     if (i < 0 || i >= N || i === current) return;
+    stopMic();          // discard any in-flight dictation before switching questions
     setDraft('');
     setCurrent(i);
   };
@@ -1255,9 +1272,16 @@ export default function TakeExam() {
                 <button
                   onClick={toggleMic}
                   title={listening ? 'Stop dictation' : 'Answer by voice'}
-                  className={`flex items-center justify-center px-3 py-2.5 rounded-lg border text-sm font-medium transition-colors ${listening ? 'bg-red-50 border-red-300 text-red-600 animate-pulse' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                  className={`relative flex items-center justify-center px-3 py-2.5 rounded-lg border text-sm font-medium transition-colors ${
+                    listening
+                      ? `bg-green-50 border-green-400 text-green-600 ${speaking ? 'ring-2 ring-green-300 animate-pulse' : ''}`
+                      : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                  }`}
                 >
-                  {listening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                  <Mic className="w-4 h-4" />
+                  {listening && (
+                    <span className={`ml-1.5 inline-block w-2 h-2 rounded-full bg-green-500 ${speaking ? 'animate-ping' : 'opacity-60'}`} />
+                  )}
                 </button>
                 <button
                   onClick={() => { setTtsOn((v) => !v); if (ttsOn) audioRef.current?.pause(); }}
