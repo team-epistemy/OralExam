@@ -549,11 +549,13 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 _ensure_enrollment_table(repo)
+                # Accept single emails or comma/semicolon/whitespace-joined strings.
                 emails = []
                 for raw in req.emails:
-                    e = (raw or "").strip().lower()
-                    if e and "@" in e and e not in emails:
-                        emails.append(e)
+                    for tok in re.findall(r"[^\s,;]+@[^\s,;]+", raw or ""):
+                        e = tok.strip().lower().rstrip(".")
+                        if e and e not in emails:
+                            emails.append(e)
                 added = 0
                 with repo.conn.cursor() as cur:
                     for e in emails:
