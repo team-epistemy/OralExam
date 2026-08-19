@@ -20,7 +20,7 @@ import sys
 import boto3
 
 from backend.config import Settings
-from infra import imagebuild, schema_apply
+from infra import imagebuild, schema_apply, frontend_build
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FRONTEND_SRC = ROOT / "frontend"
@@ -60,33 +60,16 @@ def main() -> None:
 # ---------------------------------------------------------------------------
 
 def _step_build_frontend() -> None:
-    """Compile React and replace the served bundle.
+    """Compile React and replace the served bundle (fail-loud, shared helper).
 
-    The Dockerfile copies only backend/, so compiled assets must already sit
-    at static/frontend before the image is built. Wiping the directory first is
-    what prevents a stale bundle from being served alongside the fresh one.
+    The Dockerfile copies only backend/, so compiled assets must already sit at
+    static/frontend before the image is built.
     """
     print("[1/4] building frontend ...")
-    if not (FRONTEND_SRC / "package.json").exists():
-        _abort(f"no package.json under {FRONTEND_SRC}")
-
-    npm = shutil.which("npm")
-    if not npm:
-        _abort("npm not found on PATH — required to build the frontend")
-
-    result = subprocess.run([npm, "run", "build"], cwd=FRONTEND_SRC,
-                            capture_output=True, text=True)
-    if result.returncode != 0:
-        _abort(f"frontend build failed:\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}")
-
-    if not (FRONTEND_DIST / "index.html").exists():
-        _abort(f"build produced no index.html in {FRONTEND_DIST}")
-
-    if FRONTEND_SERVED.exists():
-        shutil.rmtree(FRONTEND_SERVED)
-    shutil.copytree(FRONTEND_DIST, FRONTEND_SERVED)
-
-    bundles = sorted(p.name for p in (FRONTEND_SERVED / "assets").glob("index-*.js"))
+    try:
+        bundles = frontend_build.build_frontend(ROOT)
+    except RuntimeError as exc:
+        _abort(str(exc))
     print(f"[1/4] frontend built: {', '.join(bundles) or 'no js bundle found'}")
 
 
