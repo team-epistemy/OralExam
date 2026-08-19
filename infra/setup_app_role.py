@@ -31,9 +31,14 @@ conn = psycopg2.connect(host=admin["host"], port=admin.get("port", 5432),
                         password=admin["password"], connect_timeout=10)
 conn.autocommit = True; cur = conn.cursor(); role = app["username"]; pw = app["password"]
 cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,))
-verb = "ALTER" if cur.fetchone() else "CREATE"
-cur.execute(sql.SQL(verb + " ROLE {} WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD %s")
-            .format(sql.Identifier(role)), (pw,))
+if cur.fetchone():
+    # Existing role: RDS's master user is not a real SUPERUSER, so it cannot set
+    # the (NO)SUPERUSER/(NO)BYPASSRLS attributes on ALTER. They are already the
+    # non-privileged defaults, so just (re)assert LOGIN + password.
+    cur.execute(sql.SQL("ALTER ROLE {} WITH LOGIN PASSWORD %s").format(sql.Identifier(role)), (pw,))
+else:
+    cur.execute(sql.SQL("CREATE ROLE {} WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD %s")
+                .format(sql.Identifier(role)), (pw,))
 for stmt in [
     "GRANT USAGE ON SCHEMA public TO {r}",
     "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {r}",
