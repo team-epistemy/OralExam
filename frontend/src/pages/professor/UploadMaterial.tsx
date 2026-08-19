@@ -1,14 +1,18 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { CheckCircle, AlertCircle, Loader2, Network } from 'lucide-react';
 import { uploadMaterial, listVersions } from '../../api/materials';
 import type { MaterialVersion } from '../../api/materials';
+import { setSyllabus } from '../../api/courses';
 import FileUpload from '../../components/FileUpload';
 import { DEFAULT_ORG } from '../../config';
 
 export default function UploadMaterial() {
+  const [params] = useSearchParams();
+  const isSyllabus = params.get('syllabus') === '1';
+  const syllabusCourseId = params.get('courseId') || '';
   const [orgName, setOrgName] = useState(DEFAULT_ORG);
-  const [courseName, setCourseName] = useState('');
+  const [courseName, setCourseName] = useState(params.get('course') || '');
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -29,6 +33,19 @@ export default function UploadMaterial() {
       const result = await uploadMaterial(orgName, courseName, files[0], setProgress);
       setUploadResult(result);
       setSuccess(true);
+
+      // If this upload is the course syllabus, mark it so (best-effort).
+      if (isSyllabus && syllabusCourseId) {
+        try {
+          await setSyllabus(syllabusCourseId, {
+            material_id: result.material_id,
+            material_version_id: result.material_version_id,
+            file_name: files[0].name,
+          });
+        } catch {
+          // non-fatal: the material still uploaded
+        }
+      }
 
       // Start polling for version status
       const interval = setInterval(async () => {
@@ -64,9 +81,11 @@ export default function UploadMaterial() {
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Upload Material</h1>
+        <h1 className="text-2xl font-bold text-gray-900">{isSyllabus ? 'Upload Syllabus' : 'Upload Material'}</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Upload course materials to your S3 bucket. The pipeline will extract, chunk, and embed automatically.
+          {isSyllabus
+            ? 'Upload the course syllabus. It is stored as a viewable document (and can inform the concept graph).'
+            : 'Upload course materials to your S3 bucket. The pipeline will extract, chunk, and embed automatically.'}
         </p>
       </div>
 

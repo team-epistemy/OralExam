@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { FileText, Loader2, Sparkles, AlertCircle } from 'lucide-react';
 import { get } from '../../api/client';
@@ -24,7 +24,8 @@ const DIFFICULTIES = [
 type Difficulty = (typeof DIFFICULTIES)[number]['key'];
 
 export default function BuildExam() {
-  const [courseId, setCourseId] = useState('');
+  const [params] = useSearchParams();
+  const [courseId, setCourseId] = useState(params.get('course') || '');
   const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
   const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
   const [qCount, setQCount] = useState(12);
@@ -237,7 +238,7 @@ export default function BuildExam() {
               }`}
             >
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wide text-indigo-600">{v.badge_label}</span>
+                <span className="text-xs font-semibold uppercase tracking-wide text-indigo-600">{v.angle_label || v.badge_label}</span>
                 <span className="text-xs text-gray-400">{v.duration}</span>
               </div>
               <h3 className="mt-1 font-semibold text-gray-900">{v.title}</h3>

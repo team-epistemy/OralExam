@@ -108,6 +108,9 @@ def build_variants(concepts: List[Dict], q_count: int, difficulty: str, exam_len
             "title": f"{meta['name']} · {a['suffix']}",
             "badge": meta["badge"],
             "badge_label": meta["badge_label"],
+            # The three variants share one difficulty, so surface the angle that
+            # actually distinguishes them on the card (avoids 3x "Recall-focused").
+            "angle_label": a["suffix"],
             "description": _angle_description(meta, a["mode"], len(concepts)),
             "q_count": q_count,
             "duration": f"{exam_len} min",

@@ -125,6 +125,7 @@ export interface ExamVariant {
   title: string;
   badge: string;
   badge_label: string;
+  angle_label?: string;
   description: string;
   q_count: number;
   duration: string;

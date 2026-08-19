@@ -20,7 +20,10 @@ MATERIAL_VIEW = "/api/materials/{material_id}/view"
 SEARCH_CORPUS = "/courses/{course_id}/search"
 
 # ── Course routes ────────────────────────────────────────────────────────────
-COURSE_GET = "/api/courses/{course_id}"
+COURSE_GET = "/api/courses/{course_id}"          # GET detail, DELETE removes course
+COURSE_CREATE = "/api/professor/courses"          # POST creates a course
+COURSE_STUDENTS = "/api/courses/{course_id}/students"   # GET roster, POST enroll, DELETE unenroll
+COURSE_SYLLABUS = "/api/courses/{course_id}/syllabus"   # GET syllabus, POST mark a material as syllabus
 
 # ── Dashboard routes ─────────────────────────────────────────────────────────
 PROFESSOR_DASHBOARD = "/api/professor/dashboard"
@@ -82,6 +85,9 @@ def frontend_config() -> dict:
             "searchCorpus": SEARCH_CORPUS,
             "professorDashboard": PROFESSOR_DASHBOARD,
             "professorCourses": PROFESSOR_COURSES,
+            "courseCreate": COURSE_CREATE,
+            "courseStudents": COURSE_STUDENTS,
+            "courseSyllabus": COURSE_SYLLABUS,
             "graphGet": GRAPH_GET,
             "graphRebuild": GRAPH_REBUILD,
             "graphNeighbors": GRAPH_NEIGHBORS,

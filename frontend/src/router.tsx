@@ -4,6 +4,7 @@ import AppLayout from './layouts/AppLayout';
 import Login from './pages/Login';
 import ProfessorDashboard from './pages/professor/Dashboard';
 import CourseDetail from './pages/professor/CourseDetail';
+import CourseStudents from './pages/professor/CourseStudents';
 import UploadMaterial from './pages/professor/UploadMaterial';
 import ConceptGraph from './pages/professor/ConceptGraph';
 import BuildExam from './pages/professor/BuildExam';
@@ -75,6 +76,10 @@ export const router = createBrowserRouter([
       {
         path: '/professor/courses/:courseId',
         element: <RequireRole role="professor"><CourseDetail /></RequireRole>,
+      },
+      {
+        path: '/professor/courses/:courseId/students',
+        element: <RequireRole role="professor"><CourseStudents /></RequireRole>,
       },
       {
         path: '/professor/upload',

@@ -407,7 +407,231 @@ def _register_routes(app: FastAPI, deps) -> None:
     _register_delivery(app, deps)
     _register_evaluation(app, deps)
     _register_delete_endpoints(app, deps)
+    _register_course_ops(app, deps)
     _register_tts(app, deps)
+
+
+class CourseCreateRequest(BaseModel):
+    """POST body to create a course."""
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class EnrollRequest(BaseModel):
+    """POST body to enroll students by email (single or CSV-parsed list)."""
+    emails: List[str] = Field(default_factory=list)
+
+
+class SyllabusSetRequest(BaseModel):
+    """POST body marking an already-uploaded material as the course syllabus."""
+    material_id: Optional[str] = None
+    material_version_id: Optional[str] = None
+    file_name: Optional[str] = None
+
+
+def _ensure_enrollment_table(repo) -> None:
+    """Create the roster table on first use (no migration needed)."""
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS enrollment (
+                   org_id UUID NOT NULL,
+                   course_id UUID NOT NULL,
+                   student_email TEXT NOT NULL,
+                   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                   PRIMARY KEY (course_id, student_email))""")
+    repo.conn.commit()
+
+
+def _ensure_syllabus_table(repo) -> None:
+    """Create the per-course syllabus pointer table on first use."""
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS course_syllabus (
+                   course_id UUID PRIMARY KEY,
+                   org_id UUID NOT NULL,
+                   material_id UUID,
+                   material_version_id UUID,
+                   file_name TEXT,
+                   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    repo.conn.commit()
+
+
+# Ordered wipe for course deletion — FKs to course have no ON DELETE CASCADE,
+# so children are removed before parents (course_id where present, else subquery).
+_COURSE_DELETE_STMTS = (
+    "DELETE FROM evaluation WHERE course_id = %s::uuid",
+    "DELETE FROM session_turn WHERE session_id IN (SELECT session_id FROM exam_session WHERE course_id = %s::uuid)",
+    "DELETE FROM grade WHERE course_id = %s::uuid",
+    "DELETE FROM exam_session WHERE course_id = %s::uuid",
+    "DELETE FROM assignment WHERE course_id = %s::uuid",
+    "DELETE FROM question_set_membership WHERE question_set_id IN (SELECT question_set_id FROM question_set WHERE course_id = %s::uuid)",
+    "DELETE FROM question_set WHERE course_id = %s::uuid",
+    "DELETE FROM question WHERE course_id = %s::uuid",
+    "DELETE FROM chunk WHERE course_id = %s::uuid",
+    "DELETE FROM material_version WHERE material_id IN (SELECT material_id FROM material WHERE course_id = %s::uuid)",
+    "DELETE FROM material WHERE course_id = %s::uuid",
+    "DELETE FROM graph_version WHERE course_id = %s::uuid",
+    "DELETE FROM enrollment WHERE course_id = %s::uuid",
+    "DELETE FROM course_syllabus WHERE course_id = %s::uuid",
+    "DELETE FROM course WHERE course_id = %s::uuid",
+)
+
+
+def _register_course_ops(app: FastAPI, deps) -> None:
+    """Course lifecycle (create/delete), roster enrollment, and syllabus."""
+
+    def _pro(x_user_id, x_role, x_org_name, repo, d):
+        api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+        caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+        if caller.role != Role.PROFESSOR:
+            raise AuthorizationError("professor role required")
+        repo.set_tenant(caller.org_id)
+        return caller
+
+    @app.post(R.COURSE_CREATE)
+    def create_course(req: CourseCreateRequest, x_org_name: str = Header(...),
+                      x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                course = repo.get_or_create_course(caller.org_id, req.name.strip())
+                return {"course_id": str(course.course_id), "course_name": course.course_name}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.delete(R.COURSE_GET)
+    def delete_course(course_id: str, x_org_name: str = Header(...),
+                      x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                _ensure_enrollment_table(repo); _ensure_syllabus_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT course_name FROM course WHERE course_id = %s::uuid AND org_id = %s::uuid",
+                                (course_id, caller.org_id))
+                    row = cur.fetchone()
+                if not row:
+                    raise AuthorizationError("course not found")
+                with repo.conn.cursor() as cur:
+                    for sql in _COURSE_DELETE_STMTS:
+                        cur.execute(sql, (course_id,))
+                repo.conn.commit()
+                return {"status": "deleted", "course_id": course_id, "course_name": row[0]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.COURSE_STUDENTS)
+    def list_students(course_id: str, x_org_name: str = Header(...),
+                      x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                _ensure_enrollment_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute("""SELECT student_email, created_at FROM enrollment
+                                   WHERE course_id = %s::uuid AND org_id = %s::uuid
+                                   ORDER BY student_email""", (course_id, caller.org_id))
+                    rows = cur.fetchall()
+                return {"students": [{"email": r[0], "enrolled_at": r[1].isoformat() if r[1] else None} for r in rows]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.COURSE_STUDENTS)
+    def enroll_students(course_id: str, req: EnrollRequest, x_org_name: str = Header(...),
+                        x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                _ensure_enrollment_table(repo)
+                emails = []
+                for raw in req.emails:
+                    e = (raw or "").strip().lower()
+                    if e and "@" in e and e not in emails:
+                        emails.append(e)
+                added = 0
+                with repo.conn.cursor() as cur:
+                    for e in emails:
+                        cur.execute("""INSERT INTO enrollment (org_id, course_id, student_email)
+                                       VALUES (%s::uuid, %s::uuid, %s)
+                                       ON CONFLICT (course_id, student_email) DO NOTHING""",
+                                    (caller.org_id, course_id, e))
+                        added += cur.rowcount
+                    cur.execute("SELECT student_email FROM enrollment WHERE course_id = %s::uuid ORDER BY student_email", (course_id,))
+                    roster = [r[0] for r in cur.fetchall()]
+                repo.conn.commit()
+                return {"status": "ok", "added": added, "skipped": len(emails) - added,
+                        "count": len(roster), "students": [{"email": e} for e in roster]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.delete(R.COURSE_STUDENTS)
+    def unenroll_student(course_id: str, email: str, x_org_name: str = Header(...),
+                         x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                _pro(x_user_id, x_role, x_org_name, repo, d)
+                _ensure_enrollment_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute("DELETE FROM enrollment WHERE course_id = %s::uuid AND student_email = %s",
+                                (course_id, email.strip().lower()))
+                repo.conn.commit()
+                return {"status": "removed", "email": email}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.COURSE_SYLLABUS)
+    def get_syllabus(course_id: str, x_org_name: str = Header(...),
+                     x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                _pro(x_user_id, x_role, x_org_name, repo, d)
+                _ensure_syllabus_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT material_id, material_version_id, file_name FROM course_syllabus WHERE course_id = %s::uuid", (course_id,))
+                    row = cur.fetchone()
+                if not row:
+                    return {"syllabus": None}
+                return {"syllabus": {"material_id": str(row[0]) if row[0] else None,
+                                     "version_id": str(row[1]) if row[1] else None,
+                                     "file_name": row[2]}}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.COURSE_SYLLABUS)
+    def set_syllabus(course_id: str, req: SyllabusSetRequest, x_org_name: str = Header(...),
+                     x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                _ensure_syllabus_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute("""INSERT INTO course_syllabus
+                                   (course_id, org_id, material_id, material_version_id, file_name)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::uuid, %s)
+                                   ON CONFLICT (course_id) DO UPDATE
+                                   SET material_id = EXCLUDED.material_id,
+                                       material_version_id = EXCLUDED.material_version_id,
+                                       file_name = EXCLUDED.file_name""",
+                                (course_id, caller.org_id,
+                                 req.material_id or None, req.material_version_id or None,
+                                 req.file_name))
+                repo.conn.commit()
+                return {"status": "ok", "file_name": req.file_name}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
 
 class TTSRequest(BaseModel):
@@ -852,14 +1076,19 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
                 api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
                 caller = api.caller_for_org(x_user_id, x_role, x_org_name)
                 repo.set_tenant(caller.org_id)
-                return _query_student_assignments(repo, caller.org_id)
+                return _query_student_assignments(repo, caller.org_id, caller.user_id)
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
 
-def _query_student_assignments(repo, org_id: str) -> list:
-    """Get all active assignments for the org with course names."""
+def _query_student_assignments(repo, org_id: str, student_email: str = "") -> list:
+    """Active assignments for the student's enrolled courses.
+
+    A course with no roster stays open to everyone (backward-compatible); once a
+    roster exists, only enrolled students see that course's assignments."""
+    _ensure_enrollment_table(repo)
+    email = (student_email or "").strip().lower()
     with repo.conn.cursor() as cur:
         cur.execute(
             """SELECT a.assignment_id, a.title, a.status, a.config,
@@ -867,8 +1096,11 @@ def _query_student_assignments(repo, org_id: str) -> list:
                FROM assignment a
                JOIN course c ON c.course_id = a.course_id
                WHERE a.org_id = %s AND a.status = 'active'
+                 AND (NOT EXISTS (SELECT 1 FROM enrollment e WHERE e.course_id = a.course_id)
+                      OR EXISTS (SELECT 1 FROM enrollment e
+                                 WHERE e.course_id = a.course_id AND e.student_email = %s))
                ORDER BY a.created_at DESC""",
-            (org_id,),
+            (org_id, email),
         )
         rows = cur.fetchall()
     return [
