@@ -5,6 +5,7 @@ import Login from './pages/Login';
 import Callback from './pages/Callback';
 import ProfessorDashboard from './pages/professor/Dashboard';
 import CourseDetail from './pages/professor/CourseDetail';
+import CreateCourse from './pages/professor/CreateCourse';
 import UploadMaterial from './pages/professor/UploadMaterial';
 import ConceptGraph from './pages/professor/ConceptGraph';
 import BuildExam from './pages/professor/BuildExam';
@@ -80,6 +81,10 @@ export const router = createBrowserRouter([
       {
         path: '/professor/dashboard',
         element: <RequireRole role="professor"><ProfessorDashboard /></RequireRole>,
+      },
+      {
+        path: '/professor/courses/new',
+        element: <RequireRole role="professor"><CreateCourse /></RequireRole>,
       },
       {
         path: '/professor/courses/:courseId',

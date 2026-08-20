@@ -3775,8 +3775,38 @@ def _register_evaluation(app: FastAPI, deps) -> None:
 
 # ── Delete endpoints ──────────────────────────────────────────────────────────
 
+class CreateCourseRequest(BaseModel):
+    course_name: str
+
+
 def _register_delete_endpoints(app: FastAPI, deps) -> None:
     """DELETE endpoints for materials and assignments (professor only)."""
+
+    @app.post(R.COURSE_CREATE)
+    def create_course(
+        req: CreateCourseRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Create (or resolve) a course owned by the calling professor."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                name = req.course_name.strip()
+                if not name:
+                    raise ValueError("course name required")
+                repo.set_tenant(caller.org_id)
+                course = repo.get_or_create_course(caller.org_id, name, caller.user_id)
+                return {"course_id": course.course_id, "course_name": course.course_name}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
     @app.get(R.COURSE_GET)
     def get_course(

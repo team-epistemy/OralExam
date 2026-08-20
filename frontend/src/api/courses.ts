@@ -5,8 +5,9 @@ export interface CourseRef {
   course_name: string;
 }
 
+// Create (or resolve) a course owned by the calling professor.
 export async function createCourse(name: string): Promise<CourseRef> {
-  return post<CourseRef>('/api/professor/courses', { name });
+  return post<CourseRef>('/api/courses', { course_name: name });
 }
 
 export async function deleteCourse(courseId: string): Promise<unknown> {

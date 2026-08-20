@@ -108,11 +108,14 @@ export default function ProfessorDashboard() {
       <div className="bg-white rounded-xl border border-border">
         <div className="px-5 py-4 border-b border-border flex items-center justify-between">
           <h2 className="font-heading text-lg text-navy">Your Courses</h2>
+          <Link to="/professor/courses/new" className="text-sm text-gold hover:text-gold-light font-medium">
+            + Create Course
+          </Link>
         </div>
         <div className="divide-y divide-border">
           {courses.length === 0 ? (
             <div className="p-8 text-center text-sm text-muted">
-              No courses yet. Upload materials to auto-create a course.
+              No courses yet. Create a course to get started, or upload materials to auto-create one.
             </div>
           ) : (
             courses.map((course) => (
