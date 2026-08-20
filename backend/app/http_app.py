@@ -859,7 +859,7 @@ def _register_list_materials(app: FastAPI, deps) -> None:
             try:
                 api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
                 caller = api.caller_for_org(x_user_id, x_role, x_org_name)
-                course_id = api.resolve_course_id(x_org_name, course_name)
+                course_id = api.resolve_course_id(x_org_name, course_name, caller.user_id)
                 tools = MaterialsTools(repo, api, lambda c, cid: True)
                 return tools.list_materials(caller, course_id)
             finally:
@@ -942,9 +942,9 @@ def _register_dashboard(app: FastAPI, deps) -> None:
                     raise AuthorizationError("professor role required")
                 repo.set_tenant(caller.org_id)
 
-                courses = _query_courses(repo, caller.org_id)
-                recent_uploads = _query_recent_uploads(repo, caller.org_id)
-                active_assignments = _query_active_assignments(repo, caller.org_id)
+                courses = _query_courses(repo, caller.org_id, caller.user_id)
+                recent_uploads = _query_recent_uploads(repo, caller.org_id, caller.user_id)
+                active_assignments = _query_active_assignments(repo, caller.org_id, caller.user_id)
 
                 return {
                     "courses": courses,
@@ -970,37 +970,85 @@ def _register_dashboard(app: FastAPI, deps) -> None:
                 if caller.role != Role.PROFESSOR:
                     raise AuthorizationError("professor role required")
                 repo.set_tenant(caller.org_id)
-                return _query_courses(repo, caller.org_id)
+                return _query_courses(repo, caller.org_id, caller.user_id)
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
 
-def _query_courses(repo, org_id: str) -> list:
-    """Get distinct courses from the course table for this org."""
+def _query_courses(repo, org_id: str, owner: str | None = None) -> list:
+    """Courses for this org. When owner is set (professor), scope to their own."""
+    sql = "SELECT course_id, course_name FROM course WHERE org_id = %s"
+    params = [org_id]
+    if owner is not None:
+        sql += " AND created_by = %s"
+        params.append(owner)
+    sql += " ORDER BY course_name"
+    with repo.conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+    return [{"course_id": str(r[0]), "course_name": r[1]} for r in rows]
+
+
+def _query_enrolled_courses(repo, org_id: str, email: str) -> list:
+    """Courses a student is enrolled in (auth.enrollment), resolved by email."""
     with repo.conn.cursor() as cur:
         cur.execute(
-            "SELECT course_id, course_name FROM course WHERE org_id = %s ORDER BY course_name",
-            (org_id,),
+            """SELECT c.course_id, c.course_name
+               FROM course c
+               JOIN auth.enrollment e ON e.course_id = c.course_id
+               JOIN auth.app_user u ON u.id = e.app_user_id
+               WHERE c.org_id = %s AND u.email = %s
+               ORDER BY c.course_name""",
+            (org_id, email),
         )
         rows = cur.fetchall()
     return [{"course_id": str(r[0]), "course_name": r[1]} for r in rows]
 
 
-def _query_recent_uploads(repo, org_id: str) -> list:
-    """Get last 10 material_versions for this org."""
+def _query_course_students(repo, course_id: str) -> list:
+    """Students enrolled in a course (auth.enrollment → app_user)."""
     with repo.conn.cursor() as cur:
         cur.execute(
-            """SELECT mv.material_version_id, mv.file_name, mv.status,
-                      mv.created_at, m.display_name, c.course_name
-               FROM material_version mv
-               JOIN material m ON m.material_id = mv.material_id
-               JOIN course c ON c.course_id = mv.course_id
-               WHERE mv.org_id = %s
-               ORDER BY mv.created_at DESC
-               LIMIT 10""",
-            (org_id,),
+            """SELECT u.id, u.email, u.status, e.created_at
+               FROM auth.enrollment e
+               JOIN auth.app_user u ON u.id = e.app_user_id
+               WHERE e.course_id = %s::uuid
+               ORDER BY u.email""",
+            (course_id,),
         )
+        rows = cur.fetchall()
+    return [{"id": str(r[0]), "email": r[1], "status": r[2],
+             "enrolled_at": r[3].isoformat() if r[3] else None} for r in rows]
+
+
+def _is_enrolled(repo, course_id: str, email: str) -> bool:
+    """True if the student (by email) has an enrollment in this course."""
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """SELECT 1 FROM auth.enrollment e
+               JOIN auth.app_user u ON u.id = e.app_user_id
+               WHERE e.course_id = %s::uuid AND u.email = %s""",
+            (course_id, email),
+        )
+        return cur.fetchone() is not None
+
+
+def _query_recent_uploads(repo, org_id: str, owner: str | None = None) -> list:
+    """Last 10 material_versions for this org; scoped to owner's courses if set."""
+    sql = """SELECT mv.material_version_id, mv.file_name, mv.status,
+                    mv.created_at, m.display_name, c.course_name
+             FROM material_version mv
+             JOIN material m ON m.material_id = mv.material_id
+             JOIN course c ON c.course_id = mv.course_id
+             WHERE mv.org_id = %s"""
+    params = [org_id]
+    if owner is not None:
+        sql += " AND c.created_by = %s"
+        params.append(owner)
+    sql += " ORDER BY mv.created_at DESC LIMIT 10"
+    with repo.conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
         rows = cur.fetchall()
     return [
         {
@@ -1015,19 +1063,21 @@ def _query_recent_uploads(repo, org_id: str) -> list:
     ]
 
 
-def _query_active_assignments(repo, org_id: str) -> list:
-    """Get active assignments for this org."""
+def _query_active_assignments(repo, org_id: str, owner: str | None = None) -> list:
+    """Active assignments for this org; scoped to owner's courses if set."""
     import psycopg2
     try:
+        sql = """SELECT a.assignment_id, a.title, a.status, a.created_at, c.course_name
+                 FROM assignment a
+                 JOIN course c ON c.course_id = a.course_id
+                 WHERE a.org_id = %s AND a.status = 'active'"""
+        params = [org_id]
+        if owner is not None:
+            sql += " AND c.created_by = %s"
+            params.append(owner)
+        sql += " ORDER BY a.created_at DESC"
         with repo.conn.cursor() as cur:
-            cur.execute(
-                """SELECT a.assignment_id, a.title, a.status, a.created_at, c.course_name
-                   FROM assignment a
-                   JOIN course c ON c.course_id = a.course_id
-                   WHERE a.org_id = %s AND a.status = 'active'
-                   ORDER BY a.created_at DESC""",
-                (org_id,),
-            )
+            cur.execute(sql, tuple(params))
             rows = cur.fetchall()
         return [
             {
@@ -1066,8 +1116,8 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
                 caller = api.caller_for_org(x_user_id, x_role, x_org_name)
                 repo.set_tenant(caller.org_id)
 
-                courses = _query_courses(repo, caller.org_id)
-                assignments = _query_student_assignments(repo, caller.org_id)
+                courses = _query_enrolled_courses(repo, caller.org_id, caller.user_id)
+                assignments = _query_student_assignments(repo, caller.org_id, caller.user_id)
 
                 return {
                     "courses": courses,
@@ -1097,26 +1147,23 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
         return _guard(deps, _do)
 
 
-def _query_student_assignments(repo, org_id: str, student_email: str = "") -> list:
-    """Active assignments for the student's enrolled courses.
-
-    A course with no roster stays open to everyone (backward-compatible); once a
-    roster exists, only enrolled students see that course's assignments."""
-    _ensure_enrollment_table(repo)
-    email = (student_email or "").strip().lower()
+def _query_student_assignments(repo, org_id: str, email: str | None = None) -> list:
+    """Active assignments for the org; scoped to the student's enrollment if set."""
+    sql = """SELECT a.assignment_id, a.title, a.status, a.config,
+                    a.created_at, c.course_name
+             FROM assignment a
+             JOIN course c ON c.course_id = a.course_id"""
+    params = [org_id]
+    if email is not None:
+        sql += """ JOIN auth.enrollment e ON e.course_id = a.course_id
+                   JOIN auth.app_user u ON u.id = e.app_user_id"""
+    sql += " WHERE a.org_id = %s AND a.status = 'active'"
+    if email is not None:
+        sql += " AND u.email = %s"
+        params.append(email)
+    sql += " ORDER BY a.created_at DESC"
     with repo.conn.cursor() as cur:
-        cur.execute(
-            """SELECT a.assignment_id, a.title, a.status, a.config,
-                      a.created_at, c.course_name
-               FROM assignment a
-               JOIN course c ON c.course_id = a.course_id
-               WHERE a.org_id = %s AND a.status = 'active'
-                 AND (NOT EXISTS (SELECT 1 FROM enrollment e WHERE e.course_id = a.course_id)
-                      OR EXISTS (SELECT 1 FROM enrollment e
-                                 WHERE e.course_id = a.course_id AND e.student_email = %s))
-               ORDER BY a.created_at DESC""",
-            (org_id, email),
-        )
+        cur.execute(sql, tuple(params))
         rows = cur.fetchall()
     return [
         {
@@ -3749,13 +3796,20 @@ def _register_delete_endpoints(app: FastAPI, deps) -> None:
 
                 with repo.conn.cursor() as cur:
                     cur.execute(
-                        """SELECT course_id, course_name, title, created_at
+                        """SELECT course_id, course_name, title, created_at, created_by
                            FROM course
                            WHERE course_id = %s::uuid AND org_id = %s::uuid""",
                         (course_id, caller.org_id),
                     )
                     row = cur.fetchone()
                 if not row:
+                    raise AuthorizationError("course not found")
+                # Intra-org isolation: a professor may only open their own course;
+                # a student only a course they're enrolled in.
+                if caller.role == Role.PROFESSOR and row[4] != caller.user_id:
+                    raise AuthorizationError("course not found")
+                if caller.role == Role.STUDENT and not _is_enrolled(
+                        repo, course_id, caller.user_id):
                     raise AuthorizationError("course not found")
 
                 with repo.conn.cursor() as cur:
@@ -3779,6 +3833,65 @@ def _register_delete_endpoints(app: FastAPI, deps) -> None:
                     "join_code": "",
                     "created_at": row[3].isoformat() if row[3] else None,
                 }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.COURSE_STUDENTS)
+    def list_course_students(
+        course_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Students enrolled in the course; owning professor only."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                course = repo.get_course(course_id)
+                if course is None or course.created_by != caller.user_id:
+                    raise AuthorizationError("course not found")
+                return _query_course_students(repo, course_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.delete(R.COURSE_STUDENT_DROP)
+    def drop_course_student(
+        course_id: str,
+        student_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Unenroll a student from the course; owning professor only."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                course = repo.get_course(course_id)
+                if course is None or course.created_by != caller.user_id:
+                    raise AuthorizationError("course not found")
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """DELETE FROM auth.enrollment
+                           WHERE app_user_id = %s::uuid AND course_id = %s::uuid""",
+                        (student_id, course_id),
+                    )
+                    dropped = cur.rowcount
+                repo.conn.commit()
+                return {"dropped": dropped}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

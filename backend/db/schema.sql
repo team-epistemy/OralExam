@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS course (
     org_id      UUID NOT NULL REFERENCES org(org_id),
     course_name TEXT NOT NULL,
     title       TEXT,
+    created_by  TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (org_id, course_name)
 );

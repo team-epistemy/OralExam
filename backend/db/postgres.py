@@ -46,32 +46,39 @@ class PostgresRepository:
         self.conn.commit()
         return org
 
-    def get_or_create_course(self, org_id: str, course_name: str) -> Course:
-        """Resolve a course by name within an org, creating it on first use."""
-        row = self._one("SELECT course_id, org_id, course_name FROM course"
+    def get_or_create_course(self, org_id: str, course_name: str,
+                             created_by: Optional[str] = None) -> Course:
+        """Resolve a course by name within an org, creating it on first use.
+
+        created_by (the caller's email) sets ownership on first creation only.
+        """
+        row = self._one("SELECT course_id, org_id, course_name, created_by FROM course"
                         " WHERE org_id=%s AND course_name=%s", (org_id, course_name))
         if row:
             return Course(course_id=str(row[0]), org_id=str(row[1]),
-                          course_name=row[2])
-        return self._insert_course(org_id, course_name)
+                          course_name=row[2], created_by=row[3])
+        return self._insert_course(org_id, course_name, created_by)
 
-    def _insert_course(self, org_id: str, course_name: str) -> Course:
+    def _insert_course(self, org_id: str, course_name: str,
+                       created_by: Optional[str] = None) -> Course:
         """Insert a new course row with a server-minted UUID."""
-        course = Course(org_id=org_id, course_name=course_name)
+        course = Course(org_id=org_id, course_name=course_name, created_by=created_by)
         with self.conn.cursor() as cur:
-            cur.execute("INSERT INTO course (course_id, org_id, course_name)"
-                        " VALUES (%s,%s,%s)",
-                        (course.course_id, course.org_id, course.course_name))
+            cur.execute("INSERT INTO course (course_id, org_id, course_name, created_by)"
+                        " VALUES (%s,%s,%s,%s)",
+                        (course.course_id, course.org_id, course.course_name,
+                         course.created_by))
         self.conn.commit()
         return course
 
     def get_course(self, course_id: str) -> Optional[Course]:
         """Look up a course by its UUID (for UUID→name display)."""
-        row = self._one("SELECT course_id, org_id, course_name FROM course"
+        row = self._one("SELECT course_id, org_id, course_name, created_by FROM course"
                         " WHERE course_id=%s", (course_id,))
         if not row:
             return None
-        return Course(course_id=str(row[0]), org_id=str(row[1]), course_name=row[2])
+        return Course(course_id=str(row[0]), org_id=str(row[1]), course_name=row[2],
+                      created_by=row[3])
 
     # ── material ──────────────────────────────────────────────────────────────
 

@@ -11,7 +11,6 @@ export default function UploadMaterial() {
   const [params] = useSearchParams();
   const isSyllabus = params.get('syllabus') === '1';
   const syllabusCourseId = params.get('courseId') || '';
-  const [orgName, setOrgName] = useState(DEFAULT_ORG);
   const [courseName, setCourseName] = useState(params.get('course') || '');
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
@@ -30,7 +29,7 @@ export default function UploadMaterial() {
     setVersions([]);
 
     try {
-      const result = await uploadMaterial(orgName, courseName, files[0], setProgress);
+      const result = await uploadMaterial(DEFAULT_ORG, courseName, files[0], setProgress);
       setUploadResult(result);
       setSuccess(true);
 
@@ -50,7 +49,7 @@ export default function UploadMaterial() {
       // Start polling for version status
       const interval = setInterval(async () => {
         try {
-          const vers = await listVersions(orgName, result.material_id);
+          const vers = await listVersions(DEFAULT_ORG, result.material_id);
           setVersions(vers);
           const latest = vers.find((v) => v.material_version_id === result.material_version_id);
           if (latest && (latest.status === 'ready' || latest.status === 'failed')) {
@@ -90,22 +89,6 @@ export default function UploadMaterial() {
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-5">
-        {/* Org name */}
-        <div>
-          <label htmlFor="org" className="block text-sm font-medium text-gray-700 mb-1">
-            Organization Name
-          </label>
-          <input
-            id="org"
-            type="text"
-            value={orgName}
-            onChange={(e) => setOrgName(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder="e.g. epistemy"
-          />
-          <p className="text-xs text-gray-400 mt-1">Your organization/university. Auto-created if new.</p>
-        </div>
-
         {/* Course name */}
         <div>
           <label htmlFor="course" className="block text-sm font-medium text-gray-700 mb-1">

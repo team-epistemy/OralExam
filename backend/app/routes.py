@@ -22,7 +22,8 @@ SEARCH_CORPUS = "/courses/{course_id}/search"
 # ── Course routes ────────────────────────────────────────────────────────────
 COURSE_GET = "/api/courses/{course_id}"          # GET detail, DELETE removes course
 COURSE_CREATE = "/api/professor/courses"          # POST creates a course
-COURSE_STUDENTS = "/api/courses/{course_id}/students"   # GET roster, POST enroll, DELETE unenroll
+COURSE_STUDENTS = "/api/courses/{course_id}/students"   # GET roster, POST enroll
+COURSE_STUDENT_DROP = "/api/courses/{course_id}/students/{student_id}"  # DELETE drops a student
 COURSE_SYLLABUS = "/api/courses/{course_id}/syllabus"   # GET syllabus, POST mark a material as syllabus
 
 # ── Dashboard routes ─────────────────────────────────────────────────────────

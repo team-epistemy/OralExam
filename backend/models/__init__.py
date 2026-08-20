@@ -67,6 +67,7 @@ class Course(BaseModel):
     org_id: str
     course_name: str
     title: Optional[str] = None
+    created_by: Optional[str] = None  # owning professor's email; None = orphan
     created_at: datetime = Field(default_factory=_now)
 
 

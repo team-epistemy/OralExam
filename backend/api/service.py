@@ -1,7 +1,7 @@
 """Presign + register handlers (T3). The backend owns org_id, key, version_no."""
 from __future__ import annotations
 import mimetypes
-from typing import Callable
+from typing import Callable, Optional
 
 from backend.models import (
     Material, MaterialVersion, AsyncJob, IngestMessage, Caller, Role,
@@ -62,7 +62,7 @@ class MaterialsApi:
         can't redirect an upload into another tenant.
         """
         self.repo.set_tenant(org_id)  # RLS is FORCEd: bind tenant before course create
-        course = self.repo.get_or_create_course(org_id, req.course_name)
+        course = self.repo.get_or_create_course(org_id, req.course_name, user_id)
         caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         inner = PresignRequest(file_name=req.file_name, mime_type=req.mime_type,
                                bytes=req.bytes, material_id=req.material_id)
@@ -124,10 +124,11 @@ class MaterialsApi:
         """Build a Caller from the already-resolved tenant id (chokepoint output)."""
         return Caller(user_id=user_id, org_id=org_id, role=Role(role))
 
-    def resolve_course_id(self, org_id: str, course_name: str) -> str:
+    def resolve_course_id(self, org_id: str, course_name: str,
+                          created_by: Optional[str] = None) -> str:
         """Return the course UUID for a course name within the caller's org."""
         self.repo.set_tenant(org_id)  # RLS is FORCEd: bind tenant before course create
-        course = self.repo.get_or_create_course(org_id, course_name)
+        course = self.repo.get_or_create_course(org_id, course_name, created_by)
         return course.course_id
 
     def _authorized_version(self, caller, version_id) -> MaterialVersion:
