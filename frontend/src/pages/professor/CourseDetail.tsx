@@ -119,7 +119,7 @@ export default function CourseDetail() {
 
       {/* Tab content */}
       {activeTab === 'materials' && (
-        <MaterialsTab materials={materials} courseId={courseId!} queryClient={queryClient} />
+        <MaterialsTab materials={materials} courseId={courseId!} courseName={course?.name || ''} queryClient={queryClient} />
       )}
       {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
       {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
@@ -128,7 +128,7 @@ export default function CourseDetail() {
   );
 }
 
-function MaterialsTab({ materials, courseId, queryClient }: { materials: Material[]; courseId: string; queryClient: ReturnType<typeof useQueryClient> }) {
+function MaterialsTab({ materials, courseId, courseName, queryClient }: { materials: Material[]; courseId: string; courseName: string; queryClient: ReturnType<typeof useQueryClient> }) {
   const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
 
   const handleDelete = async (materialId: string) => {
@@ -145,7 +145,7 @@ function MaterialsTab({ materials, courseId, queryClient }: { materials: Materia
     <div className="space-y-4">
       <div className="flex justify-end">
         <Link
-          to={`/professor/upload?course=${courseId}`}
+          to={`/professor/upload?course=${encodeURIComponent(courseName)}&courseId=${courseId}`}
           className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
         >
           <Upload className="w-4 h-4" />

@@ -15,19 +15,12 @@ interface GraphData {
   node_count?: number;
 }
 
-const DIFFICULTIES = [
-  { key: 'recall', label: 'Recall', desc: 'Definitions & formula recall' },
-  { key: 'balanced', label: 'Balanced', desc: 'Recall + causal reasoning' },
-  { key: 'deep', label: 'Deep', desc: 'Causal chains & prerequisites' },
-] as const;
-
-type Difficulty = (typeof DIFFICULTIES)[number]['key'];
-
 export default function BuildExam() {
   const [params] = useSearchParams();
   const [courseId, setCourseId] = useState(params.get('course') || '');
   const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
-  const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
+  // Build Exam is always balanced — recall + causal reasoning.
+  const difficulty = 'balanced';
   const [qCount, setQCount] = useState(12);
   const [examLen, setExamLen] = useState(30);
   const [variants, setVariants] = useState<ExamVariant[]>([]);
@@ -112,7 +105,7 @@ export default function BuildExam() {
           <FileText className="w-6 h-6 text-indigo-600" /> Build Exam
         </h1>
         <p className="text-sm text-gray-500 mt-1">
-          Generate three exam variants from the course concept graph — evenly, foundation-weighted, or advanced-weighted.
+          Build a balanced oral exam — recall + causal reasoning — from the course concept graph.
         </p>
       </div>
 
@@ -134,27 +127,6 @@ export default function BuildExam() {
           </label>
           <div className="flex items-end text-sm text-gray-500">
             {courseId ? `${conceptCount} concept${conceptCount === 1 ? '' : 's'} in the graph` : 'Pick a course to load its concept graph'}
-          </div>
-        </div>
-
-        <div>
-          <span className="text-sm font-medium text-gray-700">Difficulty</span>
-          <div className="mt-1 grid grid-cols-3 gap-2">
-            {DIFFICULTIES.map((d) => (
-              <button
-                key={d.key}
-                type="button"
-                onClick={() => setDifficulty(d.key)}
-                className={`rounded-lg border px-3 py-2 text-left transition-colors ${
-                  difficulty === d.key
-                    ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500'
-                    : 'border-gray-300 hover:bg-gray-50'
-                }`}
-              >
-                <div className="text-sm font-semibold text-gray-900">{d.label}</div>
-                <div className="text-xs text-gray-500">{d.desc}</div>
-              </button>
-            ))}
           </div>
         </div>
 
