@@ -397,33 +397,11 @@ def _register_routes(app: FastAPI, deps) -> None:
     _register_tts(app, deps)
 
 
-class CourseCreateRequest(BaseModel):
-    """POST body to create a course."""
-    name: str = Field(..., min_length=1, max_length=200)
-
-
-class EnrollRequest(BaseModel):
-    """POST body to enroll students by email (single or CSV-parsed list)."""
-    emails: List[str] = Field(default_factory=list)
-
-
 class SyllabusSetRequest(BaseModel):
     """POST body marking an already-uploaded material as the course syllabus."""
     material_id: Optional[str] = None
     material_version_id: Optional[str] = None
     file_name: Optional[str] = None
-
-
-def _parse_emails(raws) -> list:
-    """Unique, lowercased emails from a list that may contain comma/semicolon/
-    whitespace-joined strings (so a pasted CSV works even if not pre-split)."""
-    out = []
-    for raw in raws or []:
-        for tok in re.findall(r"[^\s,;]+@[^\s,;]+", raw or ""):
-            e = tok.strip().lower().rstrip(".")
-            if e and e not in out:
-                out.append(e)
-    return out
 
 
 def _ensure_enrollment_table(repo) -> None:
@@ -498,19 +476,6 @@ def _register_course_ops(app: FastAPI, deps) -> None:
         repo.set_tenant(caller.org_id)
         return caller
 
-    @app.post(R.COURSE_CREATE)
-    def create_course(req: CourseCreateRequest, x_org_name: str = Header(...),
-                      x_user_id: str = Header("operator"), x_role: str = Header("professor")):
-        def _do():
-            d = deps(); repo = _request_repo(d)
-            try:
-                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
-                course = repo.get_or_create_course(caller.org_id, req.name.strip())
-                return {"course_id": str(course.course_id), "course_name": course.course_name}
-            finally:
-                _release_repo(d, repo)
-        return _guard(deps, _do)
-
     @app.delete(R.COURSE_GET)
     def delete_course(course_id: str, x_org_name: str = Header(...),
                       x_user_id: str = Header("operator"), x_role: str = Header("professor")):
@@ -530,68 +495,6 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                         cur.execute(sql, (course_id,))
                 repo.conn.commit()
                 return {"status": "deleted", "course_id": course_id, "course_name": row[0]}
-            finally:
-                _release_repo(d, repo)
-        return _guard(deps, _do)
-
-    @app.get(R.COURSE_STUDENTS)
-    def list_students(course_id: str, x_org_name: str = Header(...),
-                      x_user_id: str = Header("operator"), x_role: str = Header("professor")):
-        def _do():
-            d = deps(); repo = _request_repo(d)
-            try:
-                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
-                _ensure_enrollment_table(repo)
-                with repo.conn.cursor() as cur:
-                    cur.execute("""SELECT student_email, created_at FROM enrollment
-                                   WHERE course_id = %s::uuid AND org_id = %s::uuid
-                                   ORDER BY student_email""", (course_id, caller.org_id))
-                    rows = cur.fetchall()
-                return {"students": [{"email": r[0], "enrolled_at": r[1].isoformat() if r[1] else None} for r in rows]}
-            finally:
-                _release_repo(d, repo)
-        return _guard(deps, _do)
-
-    @app.post(R.COURSE_STUDENTS)
-    def enroll_students(course_id: str, req: EnrollRequest, x_org_name: str = Header(...),
-                        x_user_id: str = Header("operator"), x_role: str = Header("professor")):
-        def _do():
-            d = deps(); repo = _request_repo(d)
-            try:
-                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
-                _ensure_enrollment_table(repo)
-                # Accept single emails or comma/semicolon/whitespace-joined strings.
-                emails = _parse_emails(req.emails)
-                added = 0
-                with repo.conn.cursor() as cur:
-                    for e in emails:
-                        cur.execute("""INSERT INTO enrollment (org_id, course_id, student_email)
-                                       VALUES (%s::uuid, %s::uuid, %s)
-                                       ON CONFLICT (course_id, student_email) DO NOTHING""",
-                                    (caller.org_id, course_id, e))
-                        added += cur.rowcount
-                    cur.execute("SELECT student_email FROM enrollment WHERE course_id = %s::uuid ORDER BY student_email", (course_id,))
-                    roster = [r[0] for r in cur.fetchall()]
-                repo.conn.commit()
-                return {"status": "ok", "added": added, "skipped": len(emails) - added,
-                        "count": len(roster), "students": [{"email": e} for e in roster]}
-            finally:
-                _release_repo(d, repo)
-        return _guard(deps, _do)
-
-    @app.delete(R.COURSE_STUDENTS)
-    def unenroll_student(course_id: str, email: str, x_org_name: str = Header(...),
-                         x_user_id: str = Header("operator"), x_role: str = Header("professor")):
-        def _do():
-            d = deps(); repo = _request_repo(d)
-            try:
-                _pro(x_user_id, x_role, x_org_name, repo, d)
-                _ensure_enrollment_table(repo)
-                with repo.conn.cursor() as cur:
-                    cur.execute("DELETE FROM enrollment WHERE course_id = %s::uuid AND student_email = %s",
-                                (course_id, email.strip().lower()))
-                repo.conn.commit()
-                return {"status": "removed", "email": email}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

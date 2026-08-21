@@ -3,7 +3,6 @@ import { logout } from '../api/auth';
 import {
   GraduationCap,
   LayoutDashboard,
-  BookOpen,
   Upload,
   ScrollText,
   Users,
