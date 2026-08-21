@@ -161,6 +161,8 @@ class PresignRequest(BaseModel):
     mime_type: str
     bytes: int
     material_id: Optional[str] = None
+    # Optional human label (e.g. topic / class session); falls back to file_name.
+    display_name: Optional[str] = None
 
 
 class IngestRequest(BaseModel):
@@ -172,6 +174,8 @@ class IngestRequest(BaseModel):
     mime_type: str
     bytes: int
     material_id: Optional[str] = None
+    # Optional topic / class-session label shown as the material's display name.
+    display_name: Optional[str] = None
 
 
 class PresignResponse(BaseModel):

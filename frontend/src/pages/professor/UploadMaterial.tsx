@@ -12,7 +12,9 @@ export default function UploadMaterial() {
   const isSyllabus = params.get('syllabus') === '1';
   const syllabusCourseId = params.get('courseId') || '';
   const [orgName, setOrgName] = useState(DEFAULT_ORG);
+  const coursePrefilled = !!params.get('course');
   const [courseName, setCourseName] = useState(params.get('course') || '');
+  const [topic, setTopic] = useState('');
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -30,7 +32,7 @@ export default function UploadMaterial() {
     setVersions([]);
 
     try {
-      const result = await uploadMaterial(orgName, courseName, files[0], setProgress);
+      const result = await uploadMaterial(orgName, courseName, files[0], setProgress, topic);
       setUploadResult(result);
       setSuccess(true);
 
@@ -81,11 +83,11 @@ export default function UploadMaterial() {
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">{isSyllabus ? 'Upload Syllabus' : 'Upload Material'}</h1>
+        <h1 className="text-2xl font-bold text-gray-900">{isSyllabus ? 'Upload Syllabus' : 'Upload Course Materials'}</h1>
         <p className="text-sm text-gray-500 mt-1">
           {isSyllabus
             ? 'Upload the course syllabus. It is stored as a viewable document (and can inform the concept graph).'
-            : 'Upload course materials to your S3 bucket. The pipeline will extract, chunk, and embed automatically.'}
+            : 'Upload course materials for your class session. The pipeline extracts, chunks, and embeds them automatically.'}
         </p>
       </div>
 
@@ -116,10 +118,29 @@ export default function UploadMaterial() {
             type="text"
             value={courseName}
             onChange={(e) => setCourseName(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            readOnly={coursePrefilled}
+            className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent ${coursePrefilled ? 'bg-gray-50 text-gray-600 cursor-not-allowed' : ''}`}
             placeholder="e.g. CS101-Intro-to-ML"
           />
-          <p className="text-xs text-gray-400 mt-1">Course name/code. Auto-created if new.</p>
+          <p className="text-xs text-gray-400 mt-1">
+            {coursePrefilled ? 'From the selected course.' : 'Course name/code. Auto-created if new.'}
+          </p>
+        </div>
+
+        {/* Topic / Class Session */}
+        <div>
+          <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-1">
+            Topic / Class Session
+          </label>
+          <input
+            id="topic"
+            type="text"
+            value={topic}
+            onChange={(e) => setTopic(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            placeholder="e.g. Week 3 — Supervised Learning"
+          />
+          <p className="text-xs text-gray-400 mt-1">Optional label for this material. Defaults to the file name if left blank.</p>
         </div>
 
         {/* File upload */}

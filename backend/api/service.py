@@ -65,7 +65,8 @@ class MaterialsApi:
         course = self.repo.get_or_create_course(org_id, req.course_name)
         caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         inner = PresignRequest(file_name=req.file_name, mime_type=req.mime_type,
-                               bytes=req.bytes, material_id=req.material_id)
+                               bytes=req.bytes, material_id=req.material_id,
+                               display_name=req.display_name)
         return self.presign(caller, course.course_id, inner)
 
     def _require_professor(self, caller: Caller, course_id: str) -> None:
@@ -78,7 +79,8 @@ class MaterialsApi:
         if req.material_id:
             return self._existing_material(caller, course_id, req.material_id)
         material = Material(course_id=course_id, org_id=caller.org_id,
-                            created_by=caller.user_id, display_name=req.file_name)
+                            created_by=caller.user_id,
+                            display_name=(req.display_name or "").strip() or req.file_name)
         return self.repo.create_material(material)
 
     def _existing_material(self, caller, course_id, material_id) -> Material:
