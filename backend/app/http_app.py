@@ -3764,13 +3764,19 @@ def _register_delete_endpoints(app: FastAPI, deps) -> None:
                 if not row:
                     raise AuthorizationError("course not found")
 
+                # "Students" = enrolled roster (public.enrollment, keyed by email),
+                # not exam-takers — so it moves the moment a professor adds students.
                 with repo.conn.cursor() as cur:
-                    cur.execute(
-                        """SELECT COUNT(DISTINCT student_id) FROM exam_session
-                           WHERE course_id = %s::uuid""",
-                        (course_id,),
-                    )
-                    student_count = cur.fetchone()[0]
+                    cur.execute("SELECT to_regclass('public.enrollment')")
+                    if cur.fetchone()[0] is not None:
+                        cur.execute(
+                            """SELECT COUNT(*) FROM enrollment
+                               WHERE course_id = %s::uuid AND org_id = %s::uuid""",
+                            (course_id, caller.org_id),
+                        )
+                        student_count = cur.fetchone()[0]
+                    else:
+                        student_count = 0
 
                 # code/description/join_code have no columns yet; course_name doubles
                 # as the code so the UI header renders without inventing data.

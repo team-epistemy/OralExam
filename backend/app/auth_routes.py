@@ -72,6 +72,24 @@ def _audit(cur, action: str, target: str, org_id: str, actor: str) -> None:
         (action, target, org_id, json.dumps({"actor": actor})))
 
 
+def _mirror_public_enrollment(cur, org_id: str, course_id: str, email: str) -> None:
+    """Mirror an enrollment into public.enrollment (keyed by student email).
+
+    The roster (list_students), the course student_count, and student assignment
+    visibility all key off public.enrollment by email — auth.enrollment (by
+    app_user_id) is invisible to them. Without this, a provisioned student never
+    shows up as enrolled and may not see their assignments. Best-effort: the
+    roster table is created lazily, so skip if it isn't present yet.
+    """
+    cur.execute("SELECT to_regclass('public.enrollment')")
+    if cur.fetchone()[0] is None:
+        return
+    cur.execute(
+        """INSERT INTO enrollment (org_id, course_id, student_email)
+           VALUES (%s, %s, %s) ON CONFLICT (course_id, student_email) DO NOTHING""",
+        (org_id, course_id, email.strip().lower()))
+
+
 def register_auth_routes(app: FastAPI, deps) -> None:
     """Attach professor-provisioning and invitation endpoints."""
 
@@ -122,6 +140,7 @@ def register_auth_routes(app: FastAPI, deps) -> None:
                            VALUES (%s, %s, %s)
                            ON CONFLICT (app_user_id, course_id) DO NOTHING""",
                         (uid, req.course_id, x_org_name))
+                    _mirror_public_enrollment(cur, x_org_name, req.course_id, req.email)
                 _audit(cur, "create_student", req.email, x_org_name, x_user_id)
             conn.commit()
         finally:
@@ -168,6 +187,7 @@ def register_auth_routes(app: FastAPI, deps) -> None:
                                VALUES (%s, %s, %s)
                                ON CONFLICT (app_user_id, course_id) DO NOTHING""",
                             (uid, req.course_id, x_org_name))
+                        _mirror_public_enrollment(cur, x_org_name, req.course_id, email)
                     _audit(cur, "create_student", email, x_org_name, x_user_id)
                 conn.commit()
                 results.append({"email": email, "id": uid,

@@ -6,6 +6,7 @@ import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch } from '../../api/students';
+import { listStudents } from '../../api/courses';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 import type { Question } from '../../api/questions';
 
@@ -834,6 +835,13 @@ function StudentsTab({ courseId }: { courseId: string }) {
   const [errors, setErrors] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const [csvNote, setCsvNote] = useState('');
+  const queryClient = useQueryClient();
+
+  const { data: enrolled = [] } = useQuery({
+    queryKey: ['course-roster', courseId],
+    queryFn: () => listStudents(courseId),
+    enabled: !!courseId,
+  });
 
   // Pull every email-looking token out of a CSV/text file, regardless of column
   // layout or header row, and merge them (deduped) into the textarea for review.
@@ -888,6 +896,8 @@ function StudentsTab({ courseId }: { courseId: string }) {
     setErrors(failed);
     setEmails('');
     setCsvNote(`Done — ${added.length} new, ${existing} already enrolled, ${failed.length} failed.`);
+    queryClient.invalidateQueries({ queryKey: ['course-roster', courseId] });
+    queryClient.invalidateQueries({ queryKey: ['course', courseId] });
     setBusy(false);
   };
 
@@ -950,6 +960,17 @@ function StudentsTab({ courseId }: { courseId: string }) {
       {errors.length > 0 && (
         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 space-y-1">
           {errors.map((e, i) => <p key={i}>{e}</p>)}
+        </div>
+      )}
+
+      {enrolled.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h3 className="text-sm font-medium text-gray-700 mb-3">Enrolled students ({enrolled.length})</h3>
+          <div className="divide-y divide-gray-100 max-h-72 overflow-auto">
+            {enrolled.map((s) => (
+              <div key={s.email} className="py-2 text-sm text-gray-900 truncate">{s.email}</div>
+            ))}
+          </div>
         </div>
       )}
 
