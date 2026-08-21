@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileText, Network, HelpCircle, ClipboardList, Upload, Check, Pencil, X, Save, Trash2, AlertTriangle, Eye, Loader2, Users, Copy } from 'lucide-react';
@@ -832,6 +832,28 @@ function StudentsTab({ courseId }: { courseId: string }) {
   const [busy, setBusy] = useState(false);
   const [roster, setRoster] = useState<Roster[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [csvNote, setCsvNote] = useState('');
+
+  // Pull every email-looking token out of a CSV/text file, regardless of column
+  // layout or header row, and merge them (deduped) into the textarea for review.
+  const loadCsv = async (file?: File) => {
+    if (!file) return;
+    setCsvNote('');
+    const text = await file.text();
+    const found = Array.from(new Set(
+      (text.match(/[^\s,;"']+@[^\s,;"']+\.[^\s,;"']+/g) || []).map((e) => e.trim().toLowerCase())
+    ));
+    if (found.length === 0) {
+      setCsvNote(`No email addresses found in ${file.name}.`);
+      return;
+    }
+    setEmails((prev) => {
+      const have = new Set(prev.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean));
+      return [...have, ...found.filter((e) => !have.has(e))].join('\n');
+    });
+    setCsvNote(`Loaded ${found.length} email${found.length === 1 ? '' : 's'} from ${file.name}. Review below, then Add students.`);
+  };
 
   const addStudents = async () => {
     const list = Array.from(new Set(
@@ -853,6 +875,7 @@ function StudentsTab({ courseId }: { courseId: string }) {
     setRoster((prev) => [...added, ...prev]);
     setErrors(failed);
     setEmails('');
+    setCsvNote('');
     setBusy(false);
   };
 
@@ -873,8 +896,8 @@ function StudentsTab({ courseId }: { courseId: string }) {
         <div>
           <h3 className="text-sm font-medium text-gray-700">Add Students</h3>
           <p className="text-xs text-gray-500 mt-1">
-            Paste student emails (one per line, or comma-separated). Each gets an account
-            enrolled in this course and a temporary password to share — no signup needed.
+            Paste student emails (one per line, or comma-separated), or upload a CSV. Each gets an
+            account enrolled in this course and a temporary password to share — no signup needed.
           </p>
         </div>
         <textarea
@@ -884,14 +907,32 @@ function StudentsTab({ courseId }: { courseId: string }) {
           placeholder={"student1@berkeley.edu\nstudent2@berkeley.edu"}
           className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y font-mono"
         />
-        <button
-          onClick={addStudents}
-          disabled={busy || !emails.trim()}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
-        >
-          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Users className="w-4 h-4" />}
-          {busy ? 'Adding...' : 'Add students'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={addStudents}
+            disabled={busy || !emails.trim()}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Users className="w-4 h-4" />}
+            {busy ? 'Adding...' : 'Add students'}
+          </button>
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            disabled={busy}
+            className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors disabled:opacity-50"
+          >
+            <Upload className="w-4 h-4" /> Upload CSV
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,.txt"
+            className="hidden"
+            onChange={(e) => { loadCsv(e.target.files?.[0] ?? undefined); e.target.value = ''; }}
+          />
+        </div>
+        {csvNote && <p className="text-xs text-gray-500">{csvNote}</p>}
       </div>
 
       {errors.length > 0 && (
