@@ -64,6 +64,7 @@ export async function beginLogin(): Promise<void> {
 export async function logout(): Promise<void> {
   localStorage.removeItem('token');
   localStorage.removeItem('user');
+  localStorage.removeItem('refresh_token');
   const logoutUri = `${window.location.origin}${import.meta.env.BASE_URL}login`;
   try {
     const cfg = await authConfig();
@@ -99,5 +100,44 @@ export async function completeLogin(code: string, state: string): Promise<string
   const tokens = await res.json();
   sessionStorage.removeItem('pkce_verifier');
   sessionStorage.removeItem('pkce_state');
+  // Keep the refresh token so the session can be renewed silently (see
+  // refreshAccessToken) instead of bouncing the user to login every ~hour.
+  if (tokens.refresh_token) localStorage.setItem('refresh_token', tokens.refresh_token);
   return tokens.access_token as string;
+}
+
+// Single-flight silent refresh: exchange the stored refresh token for a fresh
+// access token. Concurrent callers share one in-flight request. Returns the new
+// access token (also written to localStorage) or null if refresh isn't possible.
+let _refreshPromise: Promise<string | null> | null = null;
+
+export function refreshAccessToken(): Promise<string | null> {
+  if (_refreshPromise) return _refreshPromise;
+  _refreshPromise = (async () => {
+    const refreshToken = localStorage.getItem('refresh_token');
+    if (!refreshToken) return null;
+    try {
+      const cfg = await authConfig();
+      const res = await fetch(`${cfg.hostedUiUrl}/oauth2/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          client_id: cfg.clientId,
+          refresh_token: refreshToken,
+        }).toString(),
+      });
+      if (!res.ok) return null;
+      const tokens = await res.json();
+      const access = tokens.access_token as string | undefined;
+      if (!access) return null;
+      localStorage.setItem('token', access);
+      return access;
+    } catch {
+      return null;
+    } finally {
+      _refreshPromise = null;
+    }
+  })();
+  return _refreshPromise;
 }
