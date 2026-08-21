@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileText, Network, HelpCircle, ClipboardList, Upload, Check, Pencil, X, Save, Trash2, AlertTriangle, Eye, Loader2, Users, Copy } from 'lucide-react';
@@ -8,6 +8,9 @@ import { listMaterials } from '../../api/materials';
 import { createStudent } from '../../api/students';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 import type { Question } from '../../api/questions';
+
+// Cytoscape is heavy — load it only when a graph is actually rendered.
+const ConceptGraphCanvas = lazy(() => import('../../components/ConceptGraphCanvas'));
 import { listQuestions } from '../../api/questions';
 import type { Assignment } from '../../api/assignments';
 import { listAssignments } from '../../api/assignments';
@@ -292,6 +295,14 @@ function GraphTab({ courseId }: { courseId: string }) {
             <p className="text-3xl font-bold text-purple-600">{edges.length}</p>
             <p className="text-xs text-gray-500">Connections</p>
           </div>
+        </div>
+
+        {/* Zoomable concept map */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h3 className="text-sm font-medium text-gray-700 mb-3">Concept Map</h3>
+          <Suspense fallback={<div className="h-[520px] flex items-center justify-center text-sm text-gray-400">Loading map…</div>}>
+            <ConceptGraphCanvas concepts={rawConcepts} edges={edges} />
+          </Suspense>
         </div>
 
         {/* Concept chips - Review & Curate */}
