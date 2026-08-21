@@ -5,7 +5,7 @@ import { FileText, Network, HelpCircle, ClipboardList, Upload, Check, Pencil, X,
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
-import { createStudent } from '../../api/students';
+import { createStudentsBatch } from '../../api/students';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 import type { Question } from '../../api/questions';
 
@@ -857,25 +857,37 @@ function StudentsTab({ courseId }: { courseId: string }) {
 
   const addStudents = async () => {
     const list = Array.from(new Set(
-      emails.split(/[\s,;]+/).map((e) => e.trim()).filter(Boolean)
+      emails.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean)
     ));
     if (list.length === 0) return;
     setBusy(true);
     setErrors([]);
     const added: Roster[] = [];
     const failed: string[] = [];
-    for (const email of list) {
+    let existing = 0;
+    let done = 0;
+    // Chunk large rosters so each request stays well under the edge timeout and
+    // the professor sees progress; the batch endpoint handles each row resiliently.
+    const CHUNK = 25;
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const chunk = list.slice(i, i + CHUNK);
       try {
-        const s = await createStudent(email, courseId);
-        added.push({ email: s.email, password: s.password });
+        const res = await createStudentsBatch(chunk, courseId);
+        for (const r of res.results) {
+          if (r.status === 'created' && r.password) added.push({ email: r.email, password: r.password });
+          else if (r.status === 'exists') existing += 1;
+          else if (r.status === 'failed') failed.push(`${r.email}: ${r.error || 'failed'}`);
+        }
       } catch (err: any) {
-        failed.push(`${email}: ${err?.message || 'failed'}`);
+        failed.push(...chunk.map((e) => `${e}: ${err?.message || 'request failed'}`));
       }
+      done = Math.min(done + chunk.length, list.length);
+      if (list.length > CHUNK) setCsvNote(`Provisioning ${done}/${list.length}…`);
     }
     setRoster((prev) => [...added, ...prev]);
     setErrors(failed);
     setEmails('');
-    setCsvNote('');
+    setCsvNote(`Done — ${added.length} new, ${existing} already enrolled, ${failed.length} failed.`);
     setBusy(false);
   };
 

@@ -40,6 +40,30 @@ def cognito_admin_create(pool_id: str, email: str, region: str,
     return sub
 
 
+def cognito_provision_student(pool_id: str, email: str, region: str,
+                              password: str) -> tuple[str, bool]:
+    """Create a student Cognito user; return (sub, created).
+
+    Unlike cognito_admin_create, an already-existing user is left untouched — its
+    password is NOT reset — so re-running a roster upload never churns passwords
+    already handed out. `created` is False for such users.
+    """
+    idp = boto3.client("cognito-idp", region_name=region)
+    try:
+        attrs = idp.admin_create_user(
+            UserPoolId=pool_id, Username=email, MessageAction="SUPPRESS",
+            UserAttributes=[{"Name": "email", "Value": email},
+                            {"Name": "email_verified", "Value": "true"}],
+        )["User"]["Attributes"]
+        idp.admin_set_user_password(UserPoolId=pool_id, Username=email,
+                                    Password=password, Permanent=True)
+        return _sub_of(attrs), True
+    except idp.exceptions.UsernameExistsException:
+        sub = _sub_of(idp.admin_get_user(
+            UserPoolId=pool_id, Username=email)["UserAttributes"])
+        return sub, False
+
+
 def insert_app_user(cur, cognito_sub: str, email: str, org_id, role: str,
                     status: str = "active") -> str:
     """Upsert the app_user mapping; returns its id. Caller commits."""
