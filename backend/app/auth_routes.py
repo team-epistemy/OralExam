@@ -178,21 +178,33 @@ def register_auth_routes(app: FastAPI, deps) -> None:
                 continue
             conn = pool.getconn()
             try:
+                skipped_role = None
                 with conn.cursor() as cur:
                     cur.execute("SELECT set_config('app.org_id', %s, false)", (x_org_name,))
                     uid = insert_app_user(cur, sub, email, x_org_name, "student")
-                    if req.course_id:
-                        cur.execute(
-                            """INSERT INTO auth.enrollment (app_user_id, course_id, org_id)
-                               VALUES (%s, %s, %s)
-                               ON CONFLICT (app_user_id, course_id) DO NOTHING""",
-                            (uid, req.course_id, x_org_name))
-                        _mirror_public_enrollment(cur, x_org_name, req.course_id, email)
-                    _audit(cur, "create_student", email, x_org_name, x_user_id)
+                    cur.execute("SELECT role FROM auth.app_user WHERE id = %s", (uid,))
+                    actual_role = cur.fetchone()[0]
+                    if actual_role != "student":
+                        # An existing professor/admin: role was preserved above —
+                        # don't enroll them into the course as a student.
+                        skipped_role = actual_role
+                    else:
+                        if req.course_id:
+                            cur.execute(
+                                """INSERT INTO auth.enrollment (app_user_id, course_id, org_id)
+                                   VALUES (%s, %s, %s)
+                                   ON CONFLICT (app_user_id, course_id) DO NOTHING""",
+                                (uid, req.course_id, x_org_name))
+                            _mirror_public_enrollment(cur, x_org_name, req.course_id, email)
+                        _audit(cur, "create_student", email, x_org_name, x_user_id)
                 conn.commit()
-                results.append({"email": email, "id": uid,
-                                "status": "created" if created else "exists",
-                                "password": password if created else None})
+                if skipped_role:
+                    results.append({"email": email, "status": "skipped",
+                                    "error": f"already a {skipped_role} — not added as a student"})
+                else:
+                    results.append({"email": email, "id": uid,
+                                    "status": "created" if created else "exists",
+                                    "password": password if created else None})
             except Exception as ex:
                 conn.rollback()
                 results.append({"email": email, "status": "failed", "error": str(ex)[:200]})
@@ -204,6 +216,7 @@ def register_auth_routes(app: FastAPI, deps) -> None:
             "count": len(results),
             "created": sum(1 for r in results if r["status"] == "created"),
             "existing": sum(1 for r in results if r["status"] == "exists"),
+            "skipped": sum(1 for r in results if r["status"] == "skipped"),
             "failed": sum(1 for r in results if r["status"] == "failed"),
         }
 

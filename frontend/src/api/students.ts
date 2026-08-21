@@ -19,7 +19,7 @@ export function createStudent(email: string, courseId?: string, password?: strin
 
 export interface BatchStudentResult {
   email: string;
-  status: 'created' | 'exists' | 'failed';
+  status: 'created' | 'exists' | 'skipped' | 'failed';
   password?: string | null;
   error?: string;
 }
@@ -29,6 +29,7 @@ export interface BatchResult {
   count: number;
   created: number;
   existing: number;
+  skipped: number;
   failed: number;
 }
 

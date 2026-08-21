@@ -66,13 +66,22 @@ def cognito_provision_student(pool_id: str, email: str, region: str,
 
 def insert_app_user(cur, cognito_sub: str, email: str, org_id, role: str,
                     status: str = "active") -> str:
-    """Upsert the app_user mapping; returns its id. Caller commits."""
+    """Upsert the app_user mapping; returns its id. Caller commits.
+
+    On conflict a student provision NEVER downgrades an existing professor/
+    platform_admin — otherwise adding someone's email to a course roster would
+    silently strip their privileges (they'd be re-routed as a student).
+    """
     cur.execute(
         """INSERT INTO auth.app_user (cognito_sub, email, org_id, role, status)
            VALUES (%s, %s, %s, %s, %s)
            ON CONFLICT (cognito_sub) DO UPDATE
              SET email = EXCLUDED.email, org_id = EXCLUDED.org_id,
-                 role = EXCLUDED.role, status = EXCLUDED.status
+                 status = EXCLUDED.status,
+                 role = CASE
+                     WHEN auth.app_user.role IN ('professor', 'platform_admin')
+                          AND EXCLUDED.role = 'student'
+                     THEN auth.app_user.role ELSE EXCLUDED.role END
            RETURNING id""",
         (cognito_sub, email, str(org_id), role, status))
     return str(cur.fetchone()[0])

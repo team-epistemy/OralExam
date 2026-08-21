@@ -873,6 +873,7 @@ function StudentsTab({ courseId }: { courseId: string }) {
     const added: Roster[] = [];
     const failed: string[] = [];
     let existing = 0;
+    let skipped = 0;
     let done = 0;
     // Chunk large rosters so each request stays well under the edge timeout and
     // the professor sees progress; the batch endpoint handles each row resiliently.
@@ -884,6 +885,7 @@ function StudentsTab({ courseId }: { courseId: string }) {
         for (const r of res.results) {
           if (r.status === 'created' && r.password) added.push({ email: r.email, password: r.password });
           else if (r.status === 'exists') existing += 1;
+          else if (r.status === 'skipped') skipped += 1;
           else if (r.status === 'failed') failed.push(`${r.email}: ${r.error || 'failed'}`);
         }
       } catch (err: any) {
@@ -895,7 +897,7 @@ function StudentsTab({ courseId }: { courseId: string }) {
     setRoster((prev) => [...added, ...prev]);
     setErrors(failed);
     setEmails('');
-    setCsvNote(`Done — ${added.length} new, ${existing} already enrolled, ${failed.length} failed.`);
+    setCsvNote(`Done — ${added.length} new, ${existing} already enrolled${skipped ? `, ${skipped} skipped (already staff)` : ''}, ${failed.length} failed.`);
     queryClient.invalidateQueries({ queryKey: ['course-roster', courseId] });
     queryClient.invalidateQueries({ queryKey: ['course', courseId] });
     setBusy(false);
