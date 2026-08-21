@@ -40,9 +40,22 @@ export default function CreateAssignment() {
     queryFn: () => get<Course[]>('/api/professor/courses'),
   });
 
+  // Questions are assembled from the concept graph, which builds automatically
+  // (and asynchronously) after materials are uploaded. Poll until it's ready so
+  // we only enable assignment creation once there's something to assemble from.
+  const { data: graph } = useQuery<{ node_count?: number }>({
+    queryKey: ['assignment-graph', courseId],
+    queryFn: () => get(`/api/courses/${courseId}/graph`),
+    enabled: !!courseId && !created,
+    refetchInterval: (q) => ((q.state.data?.node_count || 0) > 0 ? false : 6000),
+  });
+  const conceptCount = graph?.node_count || 0;
+  const graphReady = conceptCount > 0;
+  const maxQuestions = Math.min(50, conceptCount * 4);
+
   const courseName = courses.find((c) => c.course_id === courseId)?.course_name || '';
   const backTo = courseId ? `/professor/courses/${courseId}?tab=assignments` : '/professor/dashboard';
-  const canSubmit = !!courseId && !!title.trim() && qCount >= 1;
+  const canSubmit = !!courseId && !!title.trim() && qCount >= 1 && graphReady;
 
   const handleCreate = async () => {
     if (!canSubmit) return;
@@ -269,6 +282,22 @@ export default function CreateAssignment() {
           </div>
         </div>
 
+        {/* Concept-graph readiness — questions come from it */}
+        {courseId && !graphReady && (
+          <div className="flex items-start gap-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
+            <Loader2 className="w-4 h-4 animate-spin flex-shrink-0 mt-0.5" />
+            <span>
+              Preparing this course's concept graph — questions become available once it's built. This runs automatically after you upload materials and can take a minute. If you haven't added materials yet, upload them from the course's <span className="font-medium">Materials</span> tab.
+            </span>
+          </div>
+        )}
+        {courseId && graphReady && (
+          <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
+            <CheckCircle className="w-4 h-4 flex-shrink-0" />
+            <span>{conceptCount} concept{conceptCount !== 1 ? 's' : ''} ready — up to {maxQuestions} questions available.</span>
+          </div>
+        )}
+
         {error && (
           <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
         )}
@@ -279,7 +308,9 @@ export default function CreateAssignment() {
           className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           {creating && <Loader2 className="w-4 h-4 animate-spin" />}
-          {creating ? 'Generating & creating…' : 'Generate Questions & Create Assignment'}
+          {creating ? 'Generating & creating…'
+            : courseId && !graphReady ? 'Waiting for concept graph…'
+            : 'Generate Questions & Create Assignment'}
         </button>
       </div>
     </div>
