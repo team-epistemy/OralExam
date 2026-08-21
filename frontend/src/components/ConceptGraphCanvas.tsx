@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import cytoscape from 'cytoscape';
 import type { Core, ElementDefinition } from 'cytoscape';
 import fcose from 'cytoscape-fcose';
+import Graph from 'graphology';
+import louvain from 'graphology-communities-louvain';
 import { Maximize2, ZoomIn, ZoomOut, Layers, Boxes } from 'lucide-react';
 
 // Register the fcose layout once (guard against HMR double-registration).
@@ -25,43 +27,78 @@ export interface GEdge {
   confidence?: number;
 }
 
-// ── Clustering: group concepts into abstraction-level bands ───────────────────
-// Lower abstraction_level = more concrete/foundational; higher = more abstract.
-// Bands become the "top-level" nodes you collapse to and expand from.
-const BANDS = [
-  { id: '__band_foundational', label: 'Foundational', color: '#2563eb', max: 0.34 },
-  { id: '__band_core', label: 'Core', color: '#7c3aed', max: 0.67 },
-  { id: '__band_advanced', label: 'Advanced', color: '#db2777', max: Infinity },
+const PALETTE = [
+  '#2563eb', '#7c3aed', '#db2777', '#059669', '#d97706',
+  '#0891b2', '#dc2626', '#4f46e5', '#65a30d', '#c026d3',
 ];
 
-function bandFor(level?: number) {
-  const v = typeof level === 'number' ? level : 0.5;
-  return BANDS.find((b) => v < b.max) || BANDS[BANDS.length - 1];
-}
+interface Cluster { id: string; label: string; color: string; size: number }
+interface Clustering { clusterOf: Map<string, string>; clusters: Cluster[] }
 
 function humanize(t: string): string {
   return (t || 'related').toLowerCase().replace(/_/g, ' ');
 }
 
+// ── Clustering: topic communities via Louvain modularity on the relation graph ─
+// Densely-connected concepts form a "topic"; each community is named after its
+// most-connected member (the hub concept) and gets a distinct color.
+function computeClustering(concepts: GConcept[], edges: GEdge[]): Clustering {
+  const labels = concepts.map((c) => c.label).filter(Boolean);
+  const labelSet = new Set(labels);
+  const g = new Graph({ type: 'undirected' });
+  const degree = new Map<string, number>(labels.map((l) => [l, 0]));
+  for (const l of labels) if (!g.hasNode(l)) g.addNode(l);
+  for (const e of edges) {
+    if (labelSet.has(e.src) && labelSet.has(e.dst) && e.src !== e.dst && !g.hasEdge(e.src, e.dst)) {
+      g.addEdge(e.src, e.dst);
+      degree.set(e.src, (degree.get(e.src) || 0) + 1);
+      degree.set(e.dst, (degree.get(e.dst) || 0) + 1);
+    }
+  }
+
+  // No edges → community detection is meaningless; keep one "All concepts" group.
+  const comm: Record<string, number> =
+    g.size === 0 ? Object.fromEntries(labels.map((l) => [l, 0])) : louvain(g);
+
+  const groups = new Map<number, string[]>();
+  for (const l of labels) {
+    const c = comm[l] ?? 0;
+    (groups.get(c) ?? groups.set(c, []).get(c)!).push(l);
+  }
+
+  // Largest community first → stable, meaningful color assignment.
+  const ordered = [...groups.values()].sort((a, b) => b.length - a.length);
+  const clusterOf = new Map<string, string>();
+  const clusters: Cluster[] = ordered.map((members, i) => {
+    const hub = members.slice().sort((a, b) => (degree.get(b) || 0) - (degree.get(a) || 0))[0];
+    const name = g.size === 0 && ordered.length === 1 ? 'All concepts'
+      : (hub.length > 22 ? hub.slice(0, 21) + '…' : hub);
+    const id = `__c${i}`;
+    for (const m of members) clusterOf.set(m, id);
+    return { id, label: name, color: PALETTE[i % PALETTE.length], size: members.length };
+  });
+  return { clusterOf, clusters };
+}
+
 type Mode = 'clusters' | 'concepts';
 
 /** Build cytoscape elements for the detailed (concepts-in-clusters) view. */
-function detailedElements(concepts: GConcept[], edges: GEdge[]): ElementDefinition[] {
+function detailedElements(concepts: GConcept[], edges: GEdge[], cl: Clustering): ElementDefinition[] {
   const labels = new Set(concepts.map((c) => c.label).filter(Boolean));
-  const usedBands = new Set<string>();
+  const colorOf = new Map(cl.clusters.map((c) => [c.id, c.color]));
+  const used = new Set<string>();
   const nodes: ElementDefinition[] = [];
 
   for (const c of concepts) {
     if (!c.label) continue;
-    const b = bandFor(c.abstraction_level);
-    usedBands.add(b.id);
+    const cid = cl.clusterOf.get(c.label) || cl.clusters[0]?.id;
+    if (cid) used.add(cid);
     nodes.push({
-      data: { id: c.label, label: c.label, parent: b.id, kind: 'concept', def: c.definition || '' },
+      data: { id: c.label, label: c.label, parent: cid, kind: 'concept', def: c.definition || '', color: colorOf.get(cid || '') || '#3b82f6' },
     });
   }
-  // Parent (cluster) compound nodes — only those that actually contain concepts.
-  const parents: ElementDefinition[] = BANDS.filter((b) => usedBands.has(b.id)).map((b) => ({
-    data: { id: b.id, label: b.label, kind: 'cluster', color: b.color },
+  const parents: ElementDefinition[] = cl.clusters.filter((c) => used.has(c.id)).map((c) => ({
+    data: { id: c.id, label: c.label, kind: 'cluster', color: c.color },
   }));
 
   const rels: ElementDefinition[] = [];
@@ -76,25 +113,27 @@ function detailedElements(concepts: GConcept[], edges: GEdge[]): ElementDefiniti
   return [...parents, ...nodes, ...rels];
 }
 
-/** Build cytoscape elements for the top-level (one node per cluster) view. */
-function clusterElements(concepts: GConcept[], edges: GEdge[]): ElementDefinition[] {
-  const bandOfLabel = new Map<string, string>();
+/** Build cytoscape elements for the top-level (one node per community) view. */
+function clusterElements(concepts: GConcept[], edges: GEdge[], cl: Clustering): ElementDefinition[] {
+  const colorOf = new Map(cl.clusters.map((c) => [c.id, c.color]));
+  const nameOf = new Map(cl.clusters.map((c) => [c.id, c.label]));
   const counts = new Map<string, number>();
   for (const c of concepts) {
     if (!c.label) continue;
-    const b = bandFor(c.abstraction_level);
-    bandOfLabel.set(c.label, b.id);
-    counts.set(b.id, (counts.get(b.id) || 0) + 1);
+    const cid = cl.clusterOf.get(c.label);
+    if (cid) counts.set(cid, (counts.get(cid) || 0) + 1);
   }
-  const nodes: ElementDefinition[] = BANDS.filter((b) => counts.get(b.id)).map((b) => ({
-    data: { id: b.id, label: `${b.label}\n${counts.get(b.id)} concepts`, kind: 'clusterTop', color: b.color },
-  }));
+  const nodes: ElementDefinition[] = cl.clusters
+    .filter((c) => counts.get(c.id))
+    .map((c) => ({
+      data: { id: c.id, label: `${nameOf.get(c.id)}\n${counts.get(c.id)} concepts`, kind: 'clusterTop', color: colorOf.get(c.id) },
+    }));
 
-  // Aggregate concept edges into band→band edges with a count weight.
+  // Aggregate concept edges into community→community edges with a count weight.
   const agg = new Map<string, number>();
   for (const e of edges) {
-    const s = bandOfLabel.get(e.src);
-    const t = bandOfLabel.get(e.dst);
+    const s = cl.clusterOf.get(e.src);
+    const t = cl.clusterOf.get(e.dst);
     if (s && t && s !== t) agg.set(`${s}|${t}`, (agg.get(`${s}|${t}`) || 0) + 1);
   }
   const aggEdges: ElementDefinition[] = [...agg.entries()].map(([k, w], i) => {
@@ -129,7 +168,7 @@ const STYLE: cytoscape.StylesheetStyle[] = [
     style: {
       'background-color': '#ffffff',
       'border-width': 1.5,
-      'border-color': '#3b82f6',
+      'border-color': 'data(color)',
       shape: 'round-rectangle',
       label: 'data(label)',
       'font-size': 11,
@@ -206,9 +245,13 @@ export default function ConceptGraphCanvas({ concepts, edges }: { concepts: GCon
   const [mode, setMode] = useState<Mode>('clusters');
   const [selected, setSelected] = useState<{ label: string; def: string } | null>(null);
 
+  const clustering = useMemo(() => computeClustering(concepts, edges), [concepts, edges]);
+
   const elements = useMemo(
-    () => (mode === 'clusters' ? clusterElements(concepts, edges) : detailedElements(concepts, edges)),
-    [mode, concepts, edges],
+    () => (mode === 'clusters'
+      ? clusterElements(concepts, edges, clustering)
+      : detailedElements(concepts, edges, clustering)),
+    [mode, concepts, edges, clustering],
   );
 
   useEffect(() => {
@@ -294,18 +337,20 @@ export default function ConceptGraphCanvas({ concepts, edges }: { concepts: GCon
 
       <div ref={boxRef} className="border border-gray-100 rounded-lg bg-gray-50/50" style={{ height: 520 }} />
 
-      <div className="flex items-center justify-between text-xs text-gray-400">
-        <span>
+      <div className="flex items-start justify-between gap-4 text-xs text-gray-400">
+        <span className="flex-shrink-0">
           {mode === 'clusters'
-            ? 'Top-level clusters by abstraction. Switch to Detailed or zoom in to see concepts.'
+            ? 'Top-level topic clusters. Switch to Detailed or zoom in to see concepts.'
             : 'Scroll to zoom, drag to pan. Click a concept for its definition.'}
         </span>
-        <span className="flex items-center gap-3">
-          {BANDS.map((b) => (
-            <span key={b.id} className="inline-flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: b.color }} /> {b.label}
+        <span className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+          {clustering.clusters.slice(0, 8).map((c) => (
+            <span key={c.id} className="inline-flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: c.color }} />
+              <span className="truncate max-w-[120px]">{c.label}</span>
             </span>
           ))}
+          {clustering.clusters.length > 8 && <span>+{clustering.clusters.length - 8} more</span>}
         </span>
       </div>
 
