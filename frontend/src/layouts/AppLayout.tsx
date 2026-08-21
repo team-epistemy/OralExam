@@ -8,7 +8,6 @@ import {
   Users,
   CalendarPlus,
   FileText,
-  Network,
   ListChecks,
   BookOpen,
   Plus,
@@ -155,12 +154,11 @@ export default function AppLayout() {
         <NavLink to="/professor/dashboard" onClick={close} className={navItemClass}>
           <LayoutDashboard className="w-4 h-4" /> Dashboard
         </NavLink>
-        <NavLink to="/professor/assignments" end onClick={close} className={navItemClass}>
-          <ListChecks className="w-4 h-4" /> Active Assignments
-        </NavLink>
-        <NavLink to="/professor/graph" onClick={close} className={navItemClass}>
-          <Network className="w-4 h-4" /> Concept Graph
-        </NavLink>
+        {courses.length > 0 && (
+          <NavLink to="/professor/assignments" end onClick={close} className={navItemClass}>
+            <ListChecks className="w-4 h-4" /> Active Assignments
+          </NavLink>
+        )}
         <button onClick={() => { close(); setShowAddCourse(true); }} className={staticItemClass}>
           <Plus className="w-4 h-4" /> Add Course
         </button>
