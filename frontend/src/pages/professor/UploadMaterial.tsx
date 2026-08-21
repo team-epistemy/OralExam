@@ -83,8 +83,8 @@ export default function UploadMaterial() {
         <h1 className="text-2xl font-bold text-gray-900">{isSyllabus ? 'Upload Syllabus' : 'Upload Material'}</h1>
         <p className="text-sm text-gray-500 mt-1">
           {isSyllabus
-            ? 'Upload the course syllabus. It is stored as a viewable document (and can inform the concept graph).'
-            : 'Upload course materials to your S3 bucket. The pipeline will extract, chunk, and embed automatically.'}
+            ? 'Upload the course syllabus. We store it as a viewable document, and it helps shape the concept graph.'
+            : "Upload your course materials — slides, readings, or notes. We'll process them automatically so you can generate questions and exams."}
         </p>
       </div>
 
@@ -196,11 +196,10 @@ export default function UploadMaterial() {
       <div className="bg-blue-50 border border-blue-100 rounded-xl p-5">
         <h3 className="text-sm font-medium text-blue-900 mb-2">What happens after upload</h3>
         <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
-          <li>File lands in S3 at <code className="text-xs">org/course/materials/id/v1/filename</code></li>
-          <li>Worker picks up the job from SQS</li>
-          <li>Extracts text → structure-aware chunking</li>
-          <li>Embeds chunks via Bedrock Titan v2 → pgvector</li>
-          <li>Status flips to <span className="font-medium">ready</span></li>
+          <li>Your file is securely stored</li>
+          <li>We read and understand the material for you</li>
+          <li>The concept graph is built automatically</li>
+          <li>When it's <span className="font-medium">ready</span>, you can create exams</li>
         </ol>
       </div>
     </div>

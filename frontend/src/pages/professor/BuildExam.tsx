@@ -32,6 +32,7 @@ export default function BuildExam() {
   const [examLen, setExamLen] = useState(30);
   const [variants, setVariants] = useState<ExamVariant[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [assignTitle, setAssignTitle] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [assigning, setAssigning] = useState(false);
@@ -72,6 +73,7 @@ export default function BuildExam() {
       } else {
         setVariants(res.variants);
         setSelectedId(res.variants[0].id);
+        setAssignTitle(res.variants[0].title);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to build exam.');
@@ -82,8 +84,8 @@ export default function BuildExam() {
 
   const handleAssign = async () => {
     if (!selected || !courseId) return;
-    const title = window.prompt('Name this assignment:', `${selected.title}`);
-    if (!title) return;
+    const title = assignTitle.trim();
+    if (!title) { setAssignError('Give the assignment a name first.'); return; }
     setAssigning(true);
     setAssignError(null);
     try {
@@ -230,7 +232,7 @@ export default function BuildExam() {
           {variants.map((v) => (
             <button
               key={v.id}
-              onClick={() => setSelectedId(v.id)}
+              onClick={() => { setSelectedId(v.id); setAssignTitle(v.title); }}
               className={`text-left rounded-xl border p-4 transition-all ${
                 selectedId === v.id
                   ? 'border-indigo-500 ring-2 ring-indigo-500 bg-indigo-50/40'
@@ -271,16 +273,28 @@ export default function BuildExam() {
               </li>
             ))}
           </ol>
-          <div className="mt-4 pt-3 border-t border-gray-100 flex flex-wrap items-center gap-3">
+          <div className="mt-4 pt-3 border-t border-gray-100 space-y-3">
+            <label className="block max-w-md">
+              <span className="text-sm font-medium text-gray-700">Assignment name</span>
+              <input
+                type="text"
+                value={assignTitle}
+                onChange={(e) => setAssignTitle(e.target.value)}
+                placeholder="Name this assignment"
+                className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </label>
+            <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={handleAssign}
-              disabled={assigning}
+              disabled={assigning || !assignTitle.trim()}
               className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
             >
               {assigning ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
               Assign this exam to students →
             </button>
             {assignError && <span className="text-sm text-red-600">{assignError}</span>}
+            </div>
           </div>
         </div>
       )}
