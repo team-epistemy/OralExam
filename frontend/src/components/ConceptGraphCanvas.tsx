@@ -68,15 +68,25 @@ function computeClustering(concepts: GConcept[], edges: GEdge[]): Clustering {
 
   // Largest community first → stable, meaningful color assignment.
   const ordered = [...groups.values()].sort((a, b) => b.length - a.length);
+  const noEdges = g.size === 0;
+  const big = ordered.filter((m) => m.length >= 2);
+  const singles = ordered.filter((m) => m.length < 2).flat(); // one-concept communities
+
   const clusterOf = new Map<string, string>();
-  const clusters: Cluster[] = ordered.map((members, i) => {
+  const clusters: Cluster[] = [];
+  big.forEach((members, i) => {
     const hub = members.slice().sort((a, b) => (degree.get(b) || 0) - (degree.get(a) || 0))[0];
-    const name = g.size === 0 && ordered.length === 1 ? 'All concepts'
-      : (hub.length > 22 ? hub.slice(0, 21) + '…' : hub);
+    const name = noEdges ? 'All concepts' : (hub.length > 22 ? hub.slice(0, 21) + '…' : hub);
     const id = `__c${i}`;
     for (const m of members) clusterOf.set(m, id);
-    return { id, label: name, color: PALETTE[i % PALETTE.length], size: members.length };
+    clusters.push({ id, label: name, color: PALETTE[i % PALETTE.length], size: members.length });
   });
+  // Roll every singleton (a concept in no topic community) into one "Other" group.
+  if (singles.length) {
+    const id = '__other';
+    for (const m of singles) clusterOf.set(m, id);
+    clusters.push({ id, label: big.length ? 'Other' : 'All concepts', color: '#94a3b8', size: singles.length });
+  }
   return { clusterOf, clusters };
 }
 

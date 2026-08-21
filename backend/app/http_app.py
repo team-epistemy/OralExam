@@ -279,6 +279,15 @@ def create_app() -> FastAPI:
     """Build the FastAPI app with all module routes wired to real components."""
     app = FastAPI(title="Epistemy — Content Ingestion & Assessment Platform")
 
+    settings = load_settings()
+    deps = _lazy_deps(settings)
+    _install_auth_middleware(app, deps)
+
+    # CORS must be the OUTERMOST middleware: add_middleware prepends, so adding it
+    # LAST (after the auth middleware) wraps everything — including auth 401s that
+    # short-circuit before the route runs. Otherwise a cross-origin (Vercel) caller
+    # gets a headerless 401 the browser reports as an opaque "Load failed" instead
+    # of a handleable 401.
     # TODO(prod): Restrict allow_origins to the actual school domain(s) and remove
     # allow_credentials with wildcard origin (browsers block this combination anyway).
     app.add_middleware(
@@ -288,9 +297,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    settings = load_settings()
-    deps = _lazy_deps(settings)
-    _install_auth_middleware(app, deps)
     _register_routes(app, deps)
     _mount_demo(app)
     return app
