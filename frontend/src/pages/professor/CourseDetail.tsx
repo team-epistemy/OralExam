@@ -1,22 +1,19 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, HelpCircle, ClipboardList, Upload, Check, Pencil, X, Save, Trash2, AlertTriangle, Eye, Loader2, Users, Copy } from 'lucide-react';
-import { get, post, put, del } from '../../api/client';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy } from 'lucide-react';
+import { get, post, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch } from '../../api/students';
 import { listStudents } from '../../api/courses';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
-import type { Question } from '../../api/questions';
 
 // Cytoscape is heavy — load it only when a graph is actually rendered.
 const ConceptGraphCanvas = lazy(() => import('../../components/ConceptGraphCanvas'));
-import { listQuestions } from '../../api/questions';
 import type { Assignment } from '../../api/assignments';
 import { listAssignments } from '../../api/assignments';
 import StatusBadge from '../../components/StatusBadge';
-import ProgressSteps from '../../components/ProgressSteps';
 
 interface Course {
   id: string;
@@ -28,14 +25,14 @@ interface Course {
   join_code?: string;
 }
 
-type Tab = 'materials' | 'graph' | 'questions' | 'assignments' | 'students';
+type Tab = 'materials' | 'graph' | 'assignments' | 'students';
 
 export default function CourseDetail() {
   const { courseId } = useParams<{ courseId: string }>();
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const [activeTab, setActiveTab] = useState<Tab>(
-    (['materials', 'graph', 'questions', 'assignments', 'students'].includes(tabParam || '')
+    (['materials', 'graph', 'assignments', 'students'].includes(tabParam || '')
       ? (tabParam as Tab)
       : 'materials'),
   );
@@ -44,7 +41,7 @@ export default function CourseDetail() {
   // switches to the Students tab even when the course page is already mounted.
   useEffect(() => {
     const t = searchParams.get('tab');
-    if (t && ['materials', 'graph', 'questions', 'assignments', 'students'].includes(t)) {
+    if (t && ['materials', 'graph', 'assignments', 'students'].includes(t)) {
       setActiveTab(t as Tab);
     }
   }, [searchParams]);
@@ -62,12 +59,6 @@ export default function CourseDetail() {
     enabled: !!courseId,
   });
 
-  const { data: questions = [] } = useQuery({
-    queryKey: ['questions', courseId],
-    queryFn: () => listQuestions(courseId!),
-    enabled: !!courseId,
-  });
-
   const { data: assignments = [] } = useQuery({
     queryKey: ['assignments', courseId],
     queryFn: () => listAssignments(courseId!),
@@ -78,7 +69,6 @@ export default function CourseDetail() {
   const tabs = [
     { id: 'materials' as Tab, label: 'Materials', icon: FileText },
     { id: 'graph' as Tab, label: 'Concept Graph', icon: Network },
-    { id: 'questions' as Tab, label: 'Questions', icon: HelpCircle },
     { id: 'assignments' as Tab, label: 'Assignments', icon: ClipboardList },
     { id: 'students' as Tab, label: 'Students', icon: Users },
   ];
@@ -132,7 +122,6 @@ export default function CourseDetail() {
         <MaterialsTab materials={materials} courseId={courseId!} queryClient={queryClient} />
       )}
       {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
-      {activeTab === 'questions' && <QuestionsTab questions={questions} courseId={courseId!} materials={materials} queryClient={queryClient} />}
       {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
       {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
     </div>
@@ -389,357 +378,6 @@ function GraphTab({ courseId }: { courseId: string }) {
       <Link to="/professor/graph" className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
         Go to Concept Graph
       </Link>
-    </div>
-  );
-}
-
-function QuestionsTab({ questions, courseId, materials, queryClient }: { questions: Question[]; courseId: string; materials: any[]; queryClient: ReturnType<typeof useQueryClient> }) {
-  const [generating, setGenerating] = useState(false);
-  const [genCompleted, setGenCompleted] = useState(false);
-  const [genResult, setGenResult] = useState<string>('');
-  const [selectedMaterials, setSelectedMaterials] = useState<Set<string>>(new Set());
-  const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
-  const [count, setCount] = useState(5);
-  const [difficulty, setDifficulty] = useState('balanced');
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editText, setEditText] = useState('');
-  const [editPoints, setEditPoints] = useState(1);
-  const [saving, setSaving] = useState(false);
-
-  const startEditing = (q: any) => {
-    setEditingId(q.question_id || q.id);
-    setEditText(q.question || q.text);
-    setEditPoints(q.points || 1);
-  };
-
-  const cancelEditing = () => {
-    setEditingId(null);
-    setEditText('');
-    setEditPoints(1);
-  };
-
-  const saveEdit = async (questionId: string) => {
-    setSaving(true);
-    try {
-      await put(`/api/questions/${questionId}`, { text: editText, points: editPoints });
-      queryClient.invalidateQueries({ queryKey: ['questions', courseId] });
-      setEditingId(null);
-    } catch (err: any) {
-      alert('Failed to save: ' + (err?.message || 'Unknown error'));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleApprove = async (questionId: string) => {
-    try {
-      await post(`/api/questions/${questionId}/approve`, {});
-      queryClient.invalidateQueries({ queryKey: ['questions', courseId] });
-    } catch (err: any) {
-      alert('Failed to approve: ' + (err?.message || 'Unknown error'));
-    }
-  };
-
-  const handleReject = async (questionId: string) => {
-    try {
-      await post(`/api/questions/${questionId}/reject`, {});
-      queryClient.invalidateQueries({ queryKey: ['questions', courseId] });
-    } catch (err: any) {
-      alert('Failed to reject: ' + (err?.message || 'Unknown error'));
-    }
-  };
-
-  // Fetch concepts from the graph for topic selection
-  const { data: graphData } = useQuery({
-    queryKey: ['course-graph', courseId],
-    queryFn: () => get<any>(`/api/courses/${courseId}/graph`),
-    enabled: !!courseId,
-  });
-  const graphConcepts: { label: string }[] = graphData?.concepts || [];
-
-  const toggleTopic = (label: string) => {
-    setSelectedTopics(prev => {
-      const next = new Set(prev);
-      if (next.has(label)) next.delete(label);
-      else next.add(label);
-      return next;
-    });
-  };
-
-  const questionGenSteps = [
-    { label: 'Reading course material...', endPercent: 25 },
-    { label: 'Identifying concepts...', endPercent: 50 },
-    { label: 'Generating Socratic questions...', endPercent: 85 },
-    { label: 'Finalizing...', endPercent: 100 },
-  ];
-
-  const toggleMaterial = (id: string) => {
-    setSelectedMaterials(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const handleGenerate = async () => {
-    setGenerating(true);
-    setGenCompleted(false);
-    setGenResult('');
-    try {
-      const body: any = { count, difficulty, domain: 'general' };
-      if (selectedMaterials.size > 0) {
-        body.material_version_ids = Array.from(selectedMaterials);
-      }
-      if (selectedTopics.size > 0) {
-        body.concept_ids = Array.from(selectedTopics);
-      }
-      const data: any = await post(`/api/courses/${courseId}/questions/generate`, body);
-      setGenCompleted(true);
-      if (data.status === 'completed') {
-        setGenResult(`Generated ${data.generated_count} questions`);
-        queryClient.invalidateQueries({ queryKey: ['questions', courseId] });
-      } else {
-        setGenResult(data.detail || data.message || 'Generation failed');
-      }
-    } catch (err: any) {
-      const msg = err?.message || err?.toString() || 'Unknown error';
-      setGenResult(`Error: ${msg}`);
-    } finally {
-      // Small delay so user sees 100% before hiding
-      setTimeout(() => {
-        setGenerating(false);
-        setGenCompleted(false);
-      }, 800);
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      {/* Generation controls */}
-      <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
-        <h3 className="text-sm font-medium text-gray-700">Generate Questions</h3>
-
-        {/* Material selector */}
-        {materials.length > 0 && (
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-2">
-              Focus on specific materials (leave unchecked for all):
-            </label>
-            <div className="space-y-1.5">
-              {materials.map((m: any, i: number) => (
-                <label key={m.material_id || i} className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={selectedMaterials.has(m.material_id || m.material_version_id)}
-                    onChange={() => toggleMaterial(m.material_id || m.material_version_id)}
-                    className="h-4 w-4 text-blue-600 rounded border-gray-300"
-                  />
-                  <span className="text-gray-700">{m.display_name || m.file_name}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Topic selector from concept graph */}
-        {graphConcepts.length > 0 && (
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-2">
-              Focus on specific topics (leave unchecked for all):
-            </label>
-            <div className="flex flex-wrap gap-1.5">
-              {graphConcepts.map((c, i) => (
-                <button
-                  key={i}
-                  onClick={() => toggleTopic(c.label)}
-                  className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                    selectedTopics.has(c.label)
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                  }`}
-                >
-                  {selectedTopics.has(c.label) && '✓ '}{c.label}
-                </button>
-              ))}
-            </div>
-            {selectedTopics.size > 0 && (
-              <p className="text-xs text-blue-600 mt-1.5">{selectedTopics.size} topics selected</p>
-            )}
-          </div>
-        )}
-
-        {/* Count + Difficulty */}
-        <div className="space-y-4">
-          <div className="w-32">
-            <label className="block text-xs font-medium text-gray-500 mb-1">Questions</label>
-            <input
-              type="number" min={1} max={20} value={count}
-              onChange={(e) => setCount(+e.target.value)}
-              className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-2">Difficulty</label>
-            <div className="flex gap-2" role="radiogroup" aria-label="Difficulty level">
-              {([
-                { value: 'recall', label: 'Recall', subtitle: 'Definitions & formulas' },
-                { value: 'balanced', label: 'Balanced', subtitle: 'Mixed depth' },
-                { value: 'deep', label: 'Deep', subtitle: 'Causal chains' },
-              ] as const).map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={difficulty === opt.value}
-                  onClick={() => setDifficulty(opt.value)}
-                  className={`flex-1 py-2.5 px-4 rounded-lg text-sm font-semibold border-2 transition-all ${
-                    difficulty === opt.value
-                      ? 'bg-navy text-white border-navy'
-                      : 'bg-parchment-dark text-gray-600 border-border hover:border-gold hover:text-gray-800'
-                  }`}
-                >
-                  <span className="block">{opt.label}</span>
-                  <span className={`block text-xs mt-0.5 ${
-                    difficulty === opt.value ? 'text-white/70' : 'text-gray-400'
-                  }`}>
-                    {opt.subtitle}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <button
-          onClick={handleGenerate}
-          disabled={generating}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
-        >
-          <HelpCircle className="w-4 h-4" />
-          {generating ? 'Generating...' : 'Generate Questions'}
-        </button>
-
-        {generating && (
-          <ProgressSteps
-            steps={questionGenSteps}
-            active={generating}
-            completed={genCompleted}
-            duration={10000}
-          />
-        )}
-      </div>
-
-      {genResult && (
-        <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
-          {genResult}
-        </div>
-      )}
-      {questions.length === 0 ? (
-        <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-          <HelpCircle className="w-8 h-8 text-gray-300 mx-auto mb-3" />
-          <p className="text-sm text-gray-500">No questions yet. Click "Generate Questions" to create Socratic oral exam questions from your course material.</p>
-        </div>
-      ) : (
-        <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
-          {questions.map((q: any, i: number) => {
-            const qId = q.question_id || q.id;
-            const isEditing = editingId === qId;
-            return (
-              <div key={qId || i} className="px-5 py-3">
-                {isEditing ? (
-                  <div className="space-y-3">
-                    <textarea
-                      value={editText}
-                      onChange={(e) => setEditText(e.target.value)}
-                      rows={3}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y"
-                    />
-                    <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-2">
-                        <label className="text-xs font-medium text-gray-500">Points:</label>
-                        <input
-                          type="number"
-                          min={1}
-                          max={10}
-                          value={editPoints}
-                          onChange={(e) => setEditPoints(Math.max(1, Math.min(10, +e.target.value)))}
-                          className="w-16 px-2 py-1 border border-gray-300 rounded text-sm"
-                        />
-                      </div>
-                      <div className="flex items-center gap-2 ml-auto">
-                        <button
-                          onClick={() => saveEdit(qId)}
-                          disabled={saving || !editText.trim()}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                        >
-                          <Save className="w-3 h-3" />
-                          {saving ? 'Saving...' : 'Save'}
-                        </button>
-                        <button
-                          onClick={cancelEditing}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg text-xs font-medium hover:bg-gray-50 transition-colors"
-                        >
-                          <X className="w-3 h-3" />
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div className="flex items-start gap-3">
-                      <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded mt-0.5">{q.topic || (q.concept_ids && q.concept_ids[0]) || 'General'}</span>
-                      <p className="text-sm text-gray-900 flex-1">{q.question || q.text}</p>
-                      <span className="text-xs font-semibold text-gold bg-gold/10 px-2 py-0.5 rounded whitespace-nowrap">
-                        {q.points || 1} pt{(q.points || 1) !== 1 ? 's' : ''}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3 mt-2 ml-12">
-                      <span className="text-xs text-gray-400">{q.difficulty || 'balanced'}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded ${q.status === 'approved' ? 'bg-green-50 text-green-700' : q.status === 'rejected' ? 'bg-red-50 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
-                        {q.status || 'draft'}
-                      </span>
-                      <div className="ml-auto flex items-center gap-1.5">
-                        {q.status !== 'rejected' && (
-                          <button
-                            onClick={() => startEditing(q)}
-                            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
-                            title="Edit question"
-                          >
-                            <Pencil className="w-3 h-3" />
-                            Edit
-                          </button>
-                        )}
-                        {q.status === 'draft' && (
-                          <>
-                            <button
-                              onClick={() => handleApprove(qId)}
-                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-success hover:bg-green-50 rounded transition-colors"
-                              title="Approve question"
-                            >
-                              <Check className="w-3 h-3" />
-                              Approve
-                            </button>
-                            <button
-                              onClick={() => handleReject(qId)}
-                              className="inline-flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded transition-colors"
-                              title="Reject question"
-                            >
-                              <X className="w-3 h-3" />
-                              Reject
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }
