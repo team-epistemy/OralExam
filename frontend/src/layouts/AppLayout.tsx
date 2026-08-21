@@ -73,8 +73,13 @@ export default function AppLayout() {
     enabled: isProfessor,
   });
 
+  // Course-scoped sub-pages (Create Assignment, Upload, Build Exam) pass the
+  // course via ?courseId=/?course= — honour that so they keep the course's left
+  // nav instead of dropping to the global professor nav.
   const courseMatch = location.pathname.match(/\/professor\/courses\/([^/]+)/);
-  const activeCourseId = courseMatch?.[1];
+  const qs = new URLSearchParams(location.search);
+  const queryCourse = qs.get('courseId') || qs.get('course') || '';
+  const activeCourseId = courseMatch?.[1] || courses.find((c) => c.course_id === queryCourse)?.course_id;
   const activeCourse = courses.find((c) => c.course_id === activeCourseId);
 
   const handleLogout = () => { logout(); };
