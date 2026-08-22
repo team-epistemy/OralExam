@@ -34,6 +34,7 @@ from backend.graph.layout import build_node_ids, compute_layout
 from backend.graph.layout import neighbors as graph_neighbors
 from backend.questions.exam_builder import build_variants, assemble_questions
 from backend.app import factory, routes as R
+from backend.app.emails import parse_emails as _parse_emails
 from backend.db.postgres import PostgresRepository
 
 logger = logging.getLogger(__name__)
@@ -418,18 +419,6 @@ class SyllabusSetRequest(BaseModel):
     material_id: Optional[str] = None
     material_version_id: Optional[str] = None
     file_name: Optional[str] = None
-
-
-def _parse_emails(raws) -> list:
-    """Unique, lowercased emails from a list that may contain comma/semicolon/
-    whitespace-joined strings (so a pasted CSV works even if not pre-split)."""
-    out = []
-    for raw in raws or []:
-        for tok in re.findall(r"[^\s,;]+@[^\s,;]+", raw or ""):
-            e = tok.strip().lower().rstrip(".")
-            if e and e not in out:
-                out.append(e)
-    return out
 
 
 def _ensure_enrollment_table(repo) -> None:

@@ -1,5 +1,5 @@
 """Unit tests for course-ops helpers (email roster parsing)."""
-from backend.app.http_app import _parse_emails
+from backend.app.emails import parse_emails as _parse_emails
 
 
 def test_parse_single_email():
