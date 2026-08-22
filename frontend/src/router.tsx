@@ -12,6 +12,7 @@ import CreateAssignment from './pages/professor/CreateAssignment';
 import ProfessorAssignments from './pages/professor/Assignments';
 import GradeView from './pages/professor/GradeView';
 import StudentDashboard from './pages/student/Dashboard';
+import StudentCourse from './pages/student/StudentCourse';
 import TakeExam from './pages/student/TakeExam';
 import Results from './pages/student/Results';
 import AddProfessor from './pages/admin/AddProfessor';
@@ -113,6 +114,10 @@ export const router = createBrowserRouter([
       {
         path: '/student/dashboard',
         element: <RequireRole role="student"><StudentDashboard /></RequireRole>,
+      },
+      {
+        path: '/student/courses/:courseId',
+        element: <RequireRole role="student"><StudentCourse /></RequireRole>,
       },
       {
         path: '/student/exam/:assignmentId',

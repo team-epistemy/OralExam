@@ -1118,9 +1118,12 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
     _ensure_enrollment_table(repo)
     email = (student_email or "").strip().lower()
     with repo.conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM information_schema.columns
+                       WHERE table_name='assignment' AND column_name='assignment_type'""")
+        type_col = "a.assignment_type" if cur.fetchone() is not None else "'assignment'"
         cur.execute(
-            """SELECT a.assignment_id, a.title, a.status, a.config,
-                      a.created_at, c.course_name
+            f"""SELECT a.assignment_id, a.title, a.status, a.config,
+                      a.created_at, c.course_name, a.course_id, {type_col}
                FROM assignment a
                JOIN course c ON c.course_id = a.course_id
                WHERE a.org_id = %s AND a.status = 'active'
@@ -1139,6 +1142,8 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
             "config": r[3] if isinstance(r[3], dict) else {},
             "created_at": r[4].isoformat() if r[4] else None,
             "course_name": r[5],
+            "course_id": str(r[6]),
+            "assignment_type": r[7] or "assignment",
             "questions_count": (r[3] or {}).get("max_questions") if isinstance(r[3], dict) else None,
         }
         for r in rows
@@ -1553,6 +1558,7 @@ class AssignExamRequest(BaseModel):
     questions: List[ExamAssignQuestion]
     difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
     duration_minutes: Optional[int] = None
+    assignment_type: str = Field(default="assignment", pattern=r"^(practice|assignment|exam)$")
 
 
 def _register_questions(app: FastAPI, deps) -> None:
@@ -1899,6 +1905,13 @@ def _register_questions(app: FastAPI, deps) -> None:
                                    'active', %s)""",
                         (assignment_id, course_id, caller.org_id, req.title, qs_id, cfg, caller.user_id),
                     )
+                    # Practice / assignment / exam — set only if the column exists
+                    # (migration_008), so an un-migrated DB still assigns fine.
+                    cur.execute("""SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='assignment' AND column_name='assignment_type'""")
+                    if cur.fetchone() is not None:
+                        cur.execute("UPDATE assignment SET assignment_type = %s WHERE assignment_id = %s::uuid",
+                                    (req.assignment_type, assignment_id))
                 repo.conn.commit()
                 return {"status": "completed", "assignment_id": assignment_id,
                         "question_count": len(question_ids)}

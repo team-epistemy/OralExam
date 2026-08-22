@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft } from 'lucide-react';
 import { get } from '../../api/client';
-import { buildExam, assignExam, type ExamVariantQuestion } from '../../api/exam';
+import { buildExam, assignExam, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
 
 interface Course {
   course_id: string;
@@ -28,6 +28,7 @@ export default function CreateAssignment() {
   const [qCount, setQCount] = useState(8);
   const [duration, setDuration] = useState(30);
   const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
+  const [assignmentType, setAssignmentType] = useState<AssignmentType>('assignment');
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState(false);
   const [createdData, setCreatedData] = useState<{ assignment_id: string; question_count: number } | null>(null);
@@ -77,6 +78,7 @@ export default function CreateAssignment() {
         questions,
         difficulty,
         duration_minutes: duration,
+        assignment_type: assignmentType,
       });
       if (res.status !== 'completed' || !res.assignment_id) {
         throw new Error(res.message || 'Failed to create assignment.');
@@ -243,6 +245,30 @@ export default function CreateAssignment() {
             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             placeholder="e.g., Operations Midterm — Oral Exam"
           />
+        </div>
+
+        {/* Type — determines which section students see it under */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+          <div className="grid grid-cols-3 gap-2">
+            {([
+              ['practice', 'Practice Test', 'Ungraded, retryable'],
+              ['assignment', 'Assignment', 'Graded coursework'],
+              ['exam', 'Exam', 'Formal assessment'],
+            ] as const).map(([val, label, desc]) => (
+              <button
+                key={val}
+                type="button"
+                onClick={() => setAssignmentType(val)}
+                className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                  assignmentType === val ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500' : 'border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                <div className="text-sm font-semibold text-gray-900">{label}</div>
+                <div className="text-xs text-gray-500">{desc}</div>
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Number of questions + Duration + Difficulty */}

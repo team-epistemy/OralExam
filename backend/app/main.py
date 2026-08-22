@@ -82,6 +82,12 @@ def migrate() -> None:
             print(f"applying {migration_007.name} ...")
             cur.execute(migration_007.read_text())
 
+        # Always apply migration_008 (assignment type; idempotent)
+        migration_008 = db_dir / "migration_008_assignment_type.sql"
+        if migration_008.exists():
+            print(f"applying {migration_008.name} ...")
+            cur.execute(migration_008.read_text())
+
     conn.commit()
     print("all schemas applied")
 
