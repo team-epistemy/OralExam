@@ -66,6 +66,9 @@ export default function AppLayout() {
   const user = getUser();
   const isProfessor = user?.role === 'professor';
   const isAdmin = user?.role === 'platform_admin';
+  // Students have a single view (their dashboard) — no left nav; brand + sign-out
+  // move into the header so the student screen is uncluttered.
+  const hideSidebar = user?.role === 'student';
 
   const { data: courses = [] } = useQuery({
     queryKey: ['professor-courses'],
@@ -183,8 +186,9 @@ export default function AppLayout() {
 
   return (
     <div className="min-h-screen bg-parchment flex">
-      {sidebarOpen && <div className="fixed inset-0 bg-black/30 z-40 lg:hidden" onClick={close} />}
+      {sidebarOpen && !hideSidebar && <div className="fixed inset-0 bg-black/30 z-40 lg:hidden" onClick={close} />}
 
+      {!hideSidebar && (
       <aside
         className={`fixed inset-y-0 left-0 z-50 w-64 bg-white border-r border-border transform transition-transform lg:translate-x-0 lg:static lg:z-auto flex flex-col
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
@@ -218,17 +222,35 @@ export default function AppLayout() {
           </button>
         </div>
       </aside>
+      )}
 
       <div className="flex-1 flex flex-col min-w-0">
         <header className="sticky top-0 z-30 bg-navy border-b-2 border-gold px-4 lg:px-8 py-3 flex items-center gap-4">
-          <button className="lg:hidden p-1" onClick={() => setSidebarOpen(true)}><Menu className="w-5 h-5 text-parchment" /></button>
+          {hideSidebar ? (
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 bg-gold/20 rounded-lg flex items-center justify-center">
+                <GraduationCap className="w-4 h-4 text-gold" />
+              </div>
+              <span className="font-heading text-base text-parchment"><span className="text-gold">E</span>pistemy</span>
+            </div>
+          ) : (
+            <button className="lg:hidden p-1" onClick={() => setSidebarOpen(true)}><Menu className="w-5 h-5 text-parchment" /></button>
+          )}
           <div className="flex-1" />
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
               user?.role === 'student' ? 'bg-success-bg text-success' : 'bg-gold/20 text-gold-light'
             }`}>
               {ROLE_LABELS[user?.role || ''] || 'User'}
             </span>
+            {hideSidebar && (
+              <button
+                onClick={handleLogout}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-parchment border border-parchment/30 hover:bg-parchment/10 transition-colors"
+              >
+                <LogOut className="w-3.5 h-3.5" /> Sign out
+              </button>
+            )}
           </div>
         </header>
 
