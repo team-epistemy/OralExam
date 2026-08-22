@@ -76,6 +76,12 @@ def migrate() -> None:
             print(f"applying {migration_006.name} ...")
             cur.execute(migration_006.read_text())
 
+        # Always apply migration_007 (per-professor course ownership; idempotent)
+        migration_007 = db_dir / "migration_007_course_owner.sql"
+        if migration_007.exists():
+            print(f"applying {migration_007.name} ...")
+            cur.execute(migration_007.read_text())
+
     conn.commit()
     print("all schemas applied")
 

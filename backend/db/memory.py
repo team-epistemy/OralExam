@@ -45,11 +45,12 @@ class InMemoryRepository:
         self._orgs[org.org_id] = org
         return org
 
-    def get_or_create_course(self, org_id: str, course_name: str) -> Course:
+    def get_or_create_course(self, org_id: str, course_name: str,
+                             created_by: Optional[str] = None) -> Course:
         for c in self._courses.values():
             if c.org_id == org_id and c.course_name == course_name:
                 return c
-        course = Course(org_id=org_id, course_name=course_name)
+        course = Course(org_id=org_id, course_name=course_name, created_by=created_by)
         self._courses[course.course_id] = course
         return course
 

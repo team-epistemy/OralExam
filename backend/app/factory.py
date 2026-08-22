@@ -114,9 +114,12 @@ def build_identity_resolver(settings: Settings, pool):
 
 
 def build_api(settings: Settings, repo, storage, queue) -> MaterialsApi:
-    """Wire the presign/register API."""
-    # Authorize-all stub: real RBAC arrives with M1 auth module
-    return MaterialsApi(repo, storage, queue, lambda caller, course_id: True)
+    """Wire the presign/register API. A professor may only act on (upload to) a
+    course they own — intra-org isolation via course.created_by."""
+    def _owns_course(caller, course_id) -> bool:
+        c = repo.get_course(course_id)
+        return c is not None and c.created_by == caller.user_id
+    return MaterialsApi(repo, storage, queue, _owns_course)
 
 
 def build_worker(settings: Settings) -> IngestWorker:

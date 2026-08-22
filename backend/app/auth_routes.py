@@ -235,15 +235,20 @@ def register_auth_routes(app: FastAPI, deps) -> None:
                 cur.execute(
                     """INSERT INTO auth.invitation
                          (org_id, course_id, code_hash, capacity, expires_at)
-                       VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                       VALUES (%s, %s, %s, %s,
+                               COALESCE(%s, NOW() + INTERVAL '7 days'))
+                       RETURNING id, expires_at""",
                     (x_org_name, req.course_id, _hash_code(code),
                      req.capacity, req.expires_at))
-                inv_id = str(cur.fetchone()[0])
+                row = cur.fetchone()
+                inv_id, expires_at = str(row[0]), row[1]
                 _audit(cur, "create_invitation", inv_id, x_org_name, x_user_id)
             conn.commit()
         finally:
             factory.return_connection_to_pool(pool, conn)
-        return {"id": inv_id, "code": code, "capacity": req.capacity}
+        # expires_at defaults to 7 days out when the caller didn't specify one.
+        return {"id": inv_id, "code": code, "capacity": req.capacity,
+                "expires_at": expires_at.isoformat() if expires_at else None}
 
     @app.post("/api/auth/invitations/redeem")
     def redeem(req: RedeemRequest, authorization: str = Header(None)):

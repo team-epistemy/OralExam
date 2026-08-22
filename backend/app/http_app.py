@@ -511,7 +511,7 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             d = deps(); repo = _request_repo(d)
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
-                course = repo.get_or_create_course(caller.org_id, req.name.strip())
+                course = repo.get_or_create_course(caller.org_id, req.name.strip(), caller.user_id)
                 return {"course_id": str(course.course_id), "course_name": course.course_name}
             finally:
                 _release_repo(d, repo)
@@ -948,9 +948,9 @@ def _register_dashboard(app: FastAPI, deps) -> None:
                     raise AuthorizationError("professor role required")
                 repo.set_tenant(caller.org_id)
 
-                courses = _query_courses(repo, caller.org_id)
-                recent_uploads = _query_recent_uploads(repo, caller.org_id)
-                active_assignments = _query_active_assignments(repo, caller.org_id)
+                courses = _query_courses(repo, caller.org_id, caller.user_id)
+                recent_uploads = _query_recent_uploads(repo, caller.org_id, caller.user_id)
+                active_assignments = _query_active_assignments(repo, caller.org_id, caller.user_id)
 
                 return {
                     "courses": courses,
@@ -976,37 +976,42 @@ def _register_dashboard(app: FastAPI, deps) -> None:
                 if caller.role != Role.PROFESSOR:
                     raise AuthorizationError("professor role required")
                 repo.set_tenant(caller.org_id)
-                return _query_courses(repo, caller.org_id)
+                return _query_courses(repo, caller.org_id, caller.user_id)
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
 
-def _query_courses(repo, org_id: str) -> list:
-    """Get distinct courses from the course table for this org."""
+def _query_courses(repo, org_id: str, owner: Optional[str] = None) -> list:
+    """Courses for this org. When owner is set (a professor), scope to the ones
+    they own (course.created_by) — intra-org isolation on top of org RLS."""
+    sql = "SELECT course_id, course_name FROM course WHERE org_id = %s"
+    params = [org_id]
+    if owner is not None:
+        sql += " AND created_by = %s"
+        params.append(owner)
+    sql += " ORDER BY course_name"
     with repo.conn.cursor() as cur:
-        cur.execute(
-            "SELECT course_id, course_name FROM course WHERE org_id = %s ORDER BY course_name",
-            (org_id,),
-        )
+        cur.execute(sql, tuple(params))
         rows = cur.fetchall()
     return [{"course_id": str(r[0]), "course_name": r[1]} for r in rows]
 
 
-def _query_recent_uploads(repo, org_id: str) -> list:
-    """Get last 10 material_versions for this org."""
+def _query_recent_uploads(repo, org_id: str, owner: Optional[str] = None) -> list:
+    """Last 10 material_versions for this org; scoped to the owner's courses if set."""
+    sql = """SELECT mv.material_version_id, mv.file_name, mv.status,
+                    mv.created_at, m.display_name, c.course_name
+             FROM material_version mv
+             JOIN material m ON m.material_id = mv.material_id
+             JOIN course c ON c.course_id = mv.course_id
+             WHERE mv.org_id = %s"""
+    params = [org_id]
+    if owner is not None:
+        sql += " AND c.created_by = %s"
+        params.append(owner)
+    sql += " ORDER BY mv.created_at DESC LIMIT 10"
     with repo.conn.cursor() as cur:
-        cur.execute(
-            """SELECT mv.material_version_id, mv.file_name, mv.status,
-                      mv.created_at, m.display_name, c.course_name
-               FROM material_version mv
-               JOIN material m ON m.material_id = mv.material_id
-               JOIN course c ON c.course_id = mv.course_id
-               WHERE mv.org_id = %s
-               ORDER BY mv.created_at DESC
-               LIMIT 10""",
-            (org_id,),
-        )
+        cur.execute(sql, tuple(params))
         rows = cur.fetchall()
     return [
         {
@@ -1021,19 +1026,21 @@ def _query_recent_uploads(repo, org_id: str) -> list:
     ]
 
 
-def _query_active_assignments(repo, org_id: str) -> list:
-    """Get active assignments for this org."""
+def _query_active_assignments(repo, org_id: str, owner: Optional[str] = None) -> list:
+    """Active assignments for this org; scoped to the owner's courses if set."""
     import psycopg2
     try:
+        sql = """SELECT a.assignment_id, a.title, a.status, a.created_at, c.course_name
+                 FROM assignment a
+                 JOIN course c ON c.course_id = a.course_id
+                 WHERE a.org_id = %s AND a.status = 'active'"""
+        params = [org_id]
+        if owner is not None:
+            sql += " AND c.created_by = %s"
+            params.append(owner)
+        sql += " ORDER BY a.created_at DESC"
         with repo.conn.cursor() as cur:
-            cur.execute(
-                """SELECT a.assignment_id, a.title, a.status, a.created_at, c.course_name
-                   FROM assignment a
-                   JOIN course c ON c.course_id = a.course_id
-                   WHERE a.org_id = %s AND a.status = 'active'
-                   ORDER BY a.created_at DESC""",
-                (org_id,),
-            )
+            cur.execute(sql, tuple(params))
             rows = cur.fetchall()
         return [
             {
