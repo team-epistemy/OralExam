@@ -67,6 +67,8 @@ class Course(BaseModel):
     org_id: str
     course_name: str
     title: Optional[str] = None
+    # Owning professor's email (intra-org isolation); NULL for legacy/orphan courses.
+    created_by: Optional[str] = None
     created_at: datetime = Field(default_factory=_now)
 
 

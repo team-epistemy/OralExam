@@ -62,7 +62,8 @@ class MaterialsApi:
         can't redirect an upload into another tenant.
         """
         self.repo.set_tenant(org_id)  # RLS is FORCEd: bind tenant before course create
-        course = self.repo.get_or_create_course(org_id, req.course_name)
+        # user_id owns the course on first creation (existing courses keep their owner).
+        course = self.repo.get_or_create_course(org_id, req.course_name, user_id)
         caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         inner = PresignRequest(file_name=req.file_name, mime_type=req.mime_type,
                                bytes=req.bytes, material_id=req.material_id,
