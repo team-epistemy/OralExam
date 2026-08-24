@@ -47,3 +47,9 @@ export function createStudentsBatch(emails: string[], courseId?: string): Promis
 export function dropCourseStudent(courseId: string, email: string): Promise<{ status: string; email: string }> {
   return del(`/api/courses/${courseId}/students?email=${encodeURIComponent(email)}`);
 }
+
+// Reset & reveal: mint a fresh temp password for an already-enrolled student and
+// return it once (a lost temp can't be retrieved, only replaced).
+export function resetStudentPassword(email: string): Promise<{ email: string; password: string }> {
+  return post<{ email: string; password: string }>('/api/auth/students/reset-password', { email });
+}

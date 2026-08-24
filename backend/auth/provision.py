@@ -40,6 +40,16 @@ def cognito_admin_create(pool_id: str, email: str, region: str,
     return sub
 
 
+def cognito_reset_password(pool_id: str, email: str, region: str, password: str) -> None:
+    """Set a new permanent password for an EXISTING Cognito user (professor-driven
+    'reset & reveal' recovery — a lost temp password can't be retrieved, only
+    replaced). Raises UserNotFoundException if the user isn't in the pool.
+    """
+    idp = boto3.client("cognito-idp", region_name=region)
+    idp.admin_set_user_password(UserPoolId=pool_id, Username=email,
+                                Password=password, Permanent=True)
+
+
 def cognito_provision_student(pool_id: str, email: str, region: str,
                               password: str) -> tuple[str, bool]:
     """Create a student Cognito user; return (sub, created).

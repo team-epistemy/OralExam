@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
-import { createStudentsBatch, dropCourseStudent } from '../../api/students';
+import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
 import { listStudents } from '../../api/courses';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 
@@ -512,6 +512,7 @@ function StudentsTab({ courseId }: { courseId: string }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [csvNote, setCsvNote] = useState('');
   const [dropping, setDropping] = useState<string | null>(null);
+  const [resetting, setResetting] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const { data: enrolled = [] } = useQuery({
@@ -531,6 +532,22 @@ function StudentsTab({ courseId }: { courseId: string }) {
       setErrors((e) => [...e, `Could not remove ${email}. Please try again.`]);
     } finally {
       setDropping(null);
+    }
+  };
+
+  // Reset & reveal: mint a fresh temp password and surface it in the credentials
+  // panel (newest first, deduped by email) so a lost password is always recoverable.
+  const handleReset = async (email: string) => {
+    if (!confirm(`Reset the password for ${email}? Their old temporary password stops working; a new one will be shown to share.`)) return;
+    setResetting(email);
+    setErrors([]);
+    try {
+      const res = await resetStudentPassword(email);
+      setRoster((prev) => [{ email: res.email, password: res.password }, ...prev.filter((r) => r.email !== res.email)]);
+    } catch {
+      setErrors((e) => [...e, `Could not reset the password for ${email}.`]);
+    } finally {
+      setResetting(null);
     }
   };
 
@@ -664,6 +681,14 @@ function StudentsTab({ courseId }: { courseId: string }) {
               <div key={s.email} className="flex items-center gap-3 py-2">
                 <span className="flex-1 min-w-0 truncate text-sm text-gray-900">{s.email}</span>
                 <button
+                  onClick={() => handleReset(s.email)}
+                  disabled={resetting === s.email}
+                  className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors disabled:opacity-50"
+                  title="Reset & reveal a new temporary password"
+                >
+                  {resetting === s.email ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+                </button>
+                <button
                   onClick={() => handleDrop(s.email)}
                   disabled={dropping === s.email}
                   className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
@@ -679,19 +704,28 @@ function StudentsTab({ courseId }: { courseId: string }) {
 
       {roster.length > 0 && (
         <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-medium text-gray-700">Credentials to share</h3>
               <p className="text-xs text-amber-600 mt-0.5">
-                Shown once — copy them now. Students sign in at {loginUrl}
+                Copy and share these now. They stay here until you dismiss them — and you can always
+                Reset a student (key icon) to reveal a fresh password. Students sign in at {loginUrl}
               </p>
             </div>
-            <button
-              onClick={copyAll}
-              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <Copy className="w-3.5 h-3.5" /> Copy all
-            </button>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                onClick={copyAll}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                <Copy className="w-3.5 h-3.5" /> Copy all
+              </button>
+              <button
+                onClick={() => setRoster([])}
+                className="text-xs px-3 py-1.5 border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
           <div className="divide-y divide-gray-100">
             {roster.map((r, i) => (

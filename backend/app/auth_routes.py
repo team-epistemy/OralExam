@@ -18,7 +18,8 @@ from pydantic import BaseModel
 
 from backend.app import factory
 from backend.auth.provision import (
-    cognito_admin_create, cognito_provision_student, insert_app_user)
+    cognito_admin_create, cognito_provision_student, cognito_reset_password,
+    insert_app_user)
 from backend.models import Role
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -38,6 +39,10 @@ class StudentRequest(BaseModel):
 class StudentBatchRequest(BaseModel):
     emails: List[str]
     course_id: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str
 
 
 class InvitationRequest(BaseModel):
@@ -146,6 +151,38 @@ def register_auth_routes(app: FastAPI, deps) -> None:
         finally:
             factory.return_connection_to_pool(pool, conn)
         return {"id": uid, "email": req.email, "role": "student", "password": password}
+
+    @app.post("/api/auth/students/reset-password")
+    def reset_student_password(req: ResetPasswordRequest, x_org_name: str = Header(...),
+                               x_user_id: str = Header(...), x_role: str = Header(...)):
+        """professor/admin resets a student's password and returns the new temp once.
+
+        A lost temp password can't be retrieved (Cognito stores only a hash), so
+        recovery means minting a fresh one and revealing it here — the 'reset &
+        reveal' path that keeps credentials always recoverable.
+        """
+        _require(x_role, Role.PROFESSOR.value, Role.PLATFORM_ADMIN.value)
+        email = (req.email or "").strip().lower()
+        if not _EMAIL_RE.match(email):
+            raise HTTPException(status_code=400, detail="valid email required")
+        password = _temp_password()
+        d = deps()
+        cognito = factory.build_cognito_config(d["settings"])
+        try:
+            cognito_reset_password(cognito["user_pool_id"], email,
+                                   cognito["region"], password)
+        except Exception:
+            raise HTTPException(status_code=404, detail="no account found for that email")
+        pool = d["pool"]
+        conn = pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.org_id', %s, false)", (x_org_name,))
+                _audit(cur, "reset_student_password", email, x_org_name, x_user_id)
+            conn.commit()
+        finally:
+            factory.return_connection_to_pool(pool, conn)
+        return {"email": email, "password": password}
 
     @app.post("/api/auth/students/batch")
     def create_students_batch(req: StudentBatchRequest, x_org_name: str = Header(...),
