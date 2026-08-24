@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy } from 'lucide-react';
-import { get, post, del } from '../../api/client';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save } from 'lucide-react';
+import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent } from '../../api/students';
@@ -222,19 +222,33 @@ function GraphTab({ courseId }: { courseId: string }) {
   // Local state for curating concepts
   const [concepts, setConcepts] = useState<Array<{ id: string; label: string }>>([]);
   const [newConcept, setNewConcept] = useState('');
+  const [dirty, setDirty] = useState(false);
 
-  // Sync local state when graphData loads/changes
+  // Sync local state when graphData loads/changes (and clear the dirty flag —
+  // the server copy is now the source of truth).
   useEffect(() => {
     if (rawConcepts.length > 0) {
       setConcepts(rawConcepts.map((c: any, i: number) => ({
         id: c.id || c.concept_id || `concept-${i}`,
         label: c.label,
       })));
+      setDirty(false);
     }
   }, [rawConcepts]);
 
+  // Persist the curated set so exam generation honors it (removed concepts stop
+  // being quizzed; added ones get questions generated per assignment).
+  const saveConcepts = useMutation({
+    mutationFn: () => put(`/api/courses/${courseId}/graph/concepts`, { concepts }),
+    onSuccess: () => {
+      setDirty(false);
+      queryClient.invalidateQueries({ queryKey: ['course-graph', courseId] });
+    },
+  });
+
   const removeConcept = (id: string) => {
     setConcepts(prev => prev.filter(c => c.id !== id));
+    setDirty(true);
   };
 
   const addConcept = () => {
@@ -242,6 +256,7 @@ function GraphTab({ courseId }: { courseId: string }) {
     if (!trimmed) return;
     setConcepts(prev => [...prev, { id: `custom-${Date.now()}`, label: trimmed }]);
     setNewConcept('');
+    setDirty(true);
   };
 
   if (isLoading) {
@@ -299,7 +314,7 @@ function GraphTab({ courseId }: { courseId: string }) {
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <h3 className="text-sm font-medium text-gray-700 mb-1">Concept Graph — Review & Curate</h3>
           <p className="text-xs text-gray-500 mb-4 leading-relaxed">
-            These concepts were extracted from your materials. Remove anything you don't cover, or add a concept the extractor missed. Selected concepts will be used for question generation.
+            These concepts were extracted from your materials. Remove anything you don't cover, or add a concept the extractor missed, then <span className="font-medium">Save changes</span> — the saved set is what questions are generated from.
           </p>
 
           {/* Chip grid */}
@@ -343,9 +358,26 @@ function GraphTab({ courseId }: { courseId: string }) {
             </button>
           </div>
 
-          {/* Count footer */}
-          <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between">
-            <p className="text-xs text-gray-500">{concepts.length} concepts selected</p>
+          {/* Count footer + Save */}
+          <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between gap-3">
+            <p className="text-xs text-gray-500">{concepts.length} concept{concepts.length === 1 ? '' : 's'} selected</p>
+            <div className="flex items-center gap-3">
+              {saveConcepts.isError && (
+                <span className="text-xs text-red-600">Couldn't save — try again.</span>
+              )}
+              {!dirty && saveConcepts.isSuccess && (
+                <span className="inline-flex items-center gap-1 text-xs text-green-600"><Check className="w-3.5 h-3.5" /> Saved</span>
+              )}
+              {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
+              <button
+                onClick={() => saveConcepts.mutate()}
+                disabled={!dirty || saveConcepts.isPending || concepts.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {saveConcepts.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                {saveConcepts.isPending ? 'Saving…' : 'Save changes'}
+              </button>
+            </div>
           </div>
         </div>
 

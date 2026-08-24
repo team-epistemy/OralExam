@@ -40,6 +40,7 @@ from backend.app.exam_questions import (
     merge_generated_banks,
     DIFFICULTY_FOCUS,
 )
+from backend.app.graph_curation import apply_curation
 from backend.db.postgres import PostgresRepository
 
 logger = logging.getLogger(__name__)
@@ -1278,6 +1279,17 @@ class GraphRebuildRequest(BaseModel):
     rebuild: bool = False
 
 
+class CuratedConcept(BaseModel):
+    """One entry in a curated concept set."""
+    id: Optional[str] = None
+    label: str = Field(..., min_length=1, max_length=200)
+
+
+class GraphConceptsRequest(BaseModel):
+    """PUT body: the professor's curated concept set for a course graph."""
+    concepts: List[CuratedConcept] = Field(default_factory=list)
+
+
 def _register_graph(app: FastAPI, deps) -> None:
     """Graph endpoints — lightweight queries against graph_version + chunks."""
 
@@ -1298,6 +1310,59 @@ def _register_graph(app: FastAPI, deps) -> None:
 
                 graph_info = _query_graph_version(repo, caller.org_id, course_id)
                 return graph_info
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.put(R.GRAPH_CONCEPTS)
+    def save_graph_concepts(
+        course_id: str,
+        req: GraphConceptsRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Persist the professor's curated concept set onto the active graph.
+
+        Rewrites the stored graph JSON so downstream question generation (which
+        reads the graph) honors it: kept concepts retain their full data, added
+        ones become stubs, and relations touching a removed concept are pruned.
+        """
+        import json as _json
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                graph = _query_graph_version(repo, caller.org_id, course_id)
+                if graph.get("status") != "ready":
+                    return {"status": "error",
+                            "message": "No concept graph to curate. Build the graph first."}
+
+                kept = [{"id": c.id, "label": c.label} for c in req.concepts]
+                if not kept:
+                    return {"status": "error", "message": "Keep at least one concept."}
+
+                new_concepts, new_relations = apply_curation(
+                    graph.get("concepts", []), graph.get("relations", []), kept)
+                graph_json = _json.dumps({"concepts": new_concepts, "relations": new_relations})
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE graph_version
+                           SET s3_key = %s, node_count = %s, edge_count = %s
+                           WHERE org_id = %s::uuid AND course_id = %s::uuid AND is_active = true""",
+                        (graph_json, len(new_concepts), len(new_relations),
+                         caller.org_id, course_id),
+                    )
+                repo.conn.commit()
+                return {"status": "saved",
+                        "node_count": len(new_concepts), "edge_count": len(new_relations)}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

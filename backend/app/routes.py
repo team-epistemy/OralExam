@@ -34,6 +34,7 @@ STUDENT_ASSIGNMENTS = "/api/student/assignments"
 # ── M4 Graph routes ──────────────────────────────────────────────────────────
 GRAPH_GET = "/api/courses/{course_id}/graph"
 GRAPH_REBUILD = "/api/courses/{course_id}/graph/rebuild"
+GRAPH_CONCEPTS = "/api/courses/{course_id}/graph/concepts"  # PUT: persist curated concept set
 GRAPH_NEIGHBORS = "/api/graph/{concept_id}/neighbors"
 
 # ── M5 Question routes ───────────────────────────────────────────────────────
