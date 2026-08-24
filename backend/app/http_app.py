@@ -35,6 +35,11 @@ from backend.graph.layout import neighbors as graph_neighbors
 from backend.questions.exam_builder import build_variants, assemble_questions
 from backend.app import factory, routes as R
 from backend.app.emails import parse_emails as _parse_emails
+from backend.app.exam_questions import (
+    stored_concept_banks as _concept_banks,
+    merge_generated_banks,
+    DIFFICULTY_FOCUS,
+)
 from backend.db.postgres import PostgresRepository
 
 logger = logging.getLogger(__name__)
@@ -1476,27 +1481,6 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
     }
 
 
-def _concept_banks(concepts: list) -> dict:
-    """Map each concept's id AND label to its extracted question bank."""
-    banks = {}
-    for c in concepts:
-        qs = [q for q in (c.get("questions") or []) if isinstance(q, str)]
-        if c.get("id"):
-            banks[c["id"]] = qs
-        if c.get("label"):
-            banks.setdefault(c["label"], qs)
-    return banks
-
-
-# Difficulty → what the generated questions should emphasise. Mirrors the demo's
-# difficulty presets but framed as an instruction to the generator.
-_DIFFICULTY_FOCUS = {
-    "recall": "definitional recall — precise definitions, formulas, and key facts",
-    "balanced": "a balance of definitional recall and causal reasoning",
-    "deep": "deep causal reasoning — mechanisms, prerequisite chains, and multi-step 'why' questions",
-}
-
-
 def _generate_concept_banks(settings, concepts: list, relations: list, difficulty: str) -> dict:
     """Generate a FRESH per-concept oral-exam question bank with the LLM at
     assignment-creation time, grounded in the course's concept graph.
@@ -1511,7 +1495,7 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
     if not labels:
         return _concept_banks(concepts)
 
-    focus = _DIFFICULTY_FOCUS.get(difficulty, _DIFFICULTY_FOCUS["balanced"])
+    focus = DIFFICULTY_FOCUS.get(difficulty, DIFFICULTY_FOCUS["balanced"])
     concept_lines = "\n".join(
         f"- {c.get('label')}: {c.get('definition', '')}"
         for c in concepts if c.get("label"))
@@ -1540,27 +1524,8 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
         logger.warning("per-assignment question generation failed: %s", exc)
         return _concept_banks(concepts)
 
-    by_label = {}
-    for b in (data.get("banks") or []):
-        lbl = (b.get("label") or "").strip().lower()
-        qs = [q.strip() for q in (b.get("questions") or [])
-              if isinstance(q, str) and q.strip()]
-        if lbl and qs:
-            by_label[lbl] = qs
-
-    banks, any_generated = {}, False
-    for c in concepts:
-        label, cid = c.get("label", ""), c.get("id")
-        qs = by_label.get(label.strip().lower())
-        if qs:
-            any_generated = True
-        else:  # generator skipped this concept — fall back to its stored bank
-            qs = [q for q in (c.get("questions") or []) if isinstance(q, str)]
-        if cid:
-            banks[cid] = qs
-        if label:
-            banks.setdefault(label, qs)
-    return banks if any_generated else _concept_banks(concepts)
+    # Deterministic parse/merge lives in exam_questions (web-free + unit-tested).
+    return merge_generated_banks(concepts, data)
 
 
 def _generate_expected_paths(settings, questions: list, concepts: list, relations: list) -> dict:
