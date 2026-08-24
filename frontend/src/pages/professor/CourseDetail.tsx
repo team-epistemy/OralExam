@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
-import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
-import { listStudents } from '../../api/courses';
+import { listStudents, deleteCourse } from '../../api/courses';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 
 // Cytoscape is heavy — load it only when a graph is actually rendered.
@@ -66,6 +66,18 @@ export default function CourseDetail() {
   });
 
 
+  const navigate = useNavigate();
+  const handleRemoveCourse = async () => {
+    if (!confirm(`Remove course "${course?.name || 'this course'}"? This deletes its materials, questions, exams, and results. This cannot be undone.`)) return;
+    try {
+      await deleteCourse(courseId!);
+      queryClient.invalidateQueries({ queryKey: ['professor-courses'] });
+      navigate('/professor/dashboard');
+    } catch {
+      alert('Could not remove the course. Please try again.');
+    }
+  };
+
   const tabs = [
     { id: 'materials' as Tab, label: 'Materials', icon: FileText },
     { id: 'graph' as Tab, label: 'Concept Graph', icon: Network },
@@ -75,6 +87,20 @@ export default function CourseDetail() {
 
   return (
     <div className="space-y-6">
+      {/* Back to dashboard + course-level danger action (these lived in the old
+          left nav; they now live on the course page itself). */}
+      <div className="flex items-center justify-between">
+        <Link to="/professor/dashboard" className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 transition-colors">
+          <ChevronLeft className="w-4 h-4" /> All courses
+        </Link>
+        <button
+          onClick={handleRemoveCourse}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition-colors"
+        >
+          <Trash2 className="w-4 h-4" /> Remove course
+        </button>
+      </div>
+
       {/* Course header */}
       <div className="bg-white rounded-xl border border-gray-200 p-6">
         <div className="flex items-start justify-between">
