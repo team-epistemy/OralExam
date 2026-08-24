@@ -403,13 +403,19 @@ function GraphTab({ courseId }: { courseId: string }) {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
       <Network className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-      <h3 className="text-lg font-medium text-gray-900 mb-2">Concept Graph</h3>
+      <h3 className="text-lg font-medium text-gray-900 mb-2">No concept graph yet</h3>
       <p className="text-sm text-gray-500 max-w-md mx-auto">
-        The concept graph builds automatically after material upload. If it hasn't built yet, go to the Concept Graph page to trigger it.
+        The concept graph builds automatically after you upload materials. If you've already added materials, you can build it now.
       </p>
-      <Link to="/professor/graph" className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
-        Go to Concept Graph
-      </Link>
+      <button
+        onClick={() => rebuildMutation.mutate()}
+        disabled={rebuildMutation.isPending}
+        className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+      >
+        {rebuildMutation.isPending
+          ? <><Loader2 className="w-4 h-4 animate-spin" /> Building…</>
+          : <><Network className="w-4 h-4" /> Build concept graph</>}
+      </button>
     </div>
   );
 }
