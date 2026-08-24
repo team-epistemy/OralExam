@@ -435,6 +435,11 @@ export default function TakeExam() {
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [ttsOn, setTtsOn] = useState(true);
+  // Honest audio/mic states: whether spoken questions are actually available,
+  // and a non-destructive inline notice for mic problems (never the full error
+  // screen — a mic hiccup must not blow away an in-progress exam).
+  const [ttsAvailable, setTtsAvailable] = useState(true);
+  const [micNotice, setMicNotice] = useState<string | null>(null);
 
   // Case context: the source document(s) this exam is drawn from, kept viewable
   // throughout so the student can always re-read the case while answering.
@@ -459,7 +464,13 @@ export default function TakeExam() {
         headers: { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ text }),
       });
-      if (!resp.ok) return; // 503 = TTS not configured -> stay silent
+      if (!resp.ok) {
+        // 503 = TTS not configured server-side. Make it honest instead of silent:
+        // flag audio as unavailable so the UI stops implying questions are spoken.
+        if (resp.status === 503) setTtsAvailable(false);
+        return;
+      }
+      setTtsAvailable(true);
       const url = URL.createObjectURL(await resp.blob());
       audioRef.current?.pause();
       const audio = new Audio(url);
@@ -481,7 +492,7 @@ export default function TakeExam() {
   const toggleMic = () => {
     const SR = (window as unknown as { SpeechRecognition?: new () => any; webkitSpeechRecognition?: new () => any });
     const Ctor = SR.SpeechRecognition || SR.webkitSpeechRecognition;
-    if (!Ctor) { setError('Speech recognition is not supported here — try Chrome, Edge, or Safari.'); return; }
+    if (!Ctor) { setMicNotice("Voice input isn't supported in this browser — try Chrome, Edge, or Safari. You can type your answer instead."); return; }
     if (listening) { stopMic(); return; }
     const rec: any = new Ctor();
     rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
@@ -500,10 +511,26 @@ export default function TakeExam() {
     rec.onspeechstart = () => setSpeaking(true);
     rec.onspeechend = () => setSpeaking(false);
     rec.onend = () => { setListening(false); setSpeaking(false); };
-    rec.onerror = () => { setListening(false); setSpeaking(false); };
+    rec.onerror = (e: any) => {
+      setListening(false); setSpeaking(false);
+      const code = e?.error;
+      const msg =
+        code === 'not-allowed' || code === 'service-not-allowed'
+          ? 'Microphone access is blocked. Allow it in your browser settings, or type your answer.'
+          : code === 'audio-capture' ? 'No microphone was found. You can type your answer instead.'
+          : code === 'network' ? 'Voice input hit a network problem. You can type your answer instead.'
+          : code === 'no-speech' ? "Didn't catch any speech — try again, or type your answer."
+          : null;
+      if (msg) setMicNotice(msg);
+    };
     recognitionRef.current = rec;
-    rec.start();
-    setListening(true);
+    try {
+      rec.start();
+      setMicNotice(null);
+      setListening(true);
+    } catch {
+      setMicNotice('Could not start the microphone. You can type your answer instead.');
+    }
   };
 
   // Prevent two-tab desync via BroadcastChannel
@@ -1471,6 +1498,19 @@ export default function TakeExam() {
                   )}
                 </button>
               </div>
+              {micNotice && (
+                <div className="mt-2 flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  <Mic className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <span className="flex-1">{micNotice}</span>
+                  <button onClick={() => setMicNotice(null)} className="text-amber-500 hover:text-amber-700" title="Dismiss">&times;</button>
+                </div>
+              )}
+              {!ttsAvailable && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+                  <VolumeX className="w-3.5 h-3.5 flex-shrink-0" />
+                  Audio narration is unavailable right now — questions are shown on screen.
+                </div>
+              )}
             </div>
           )}
 
