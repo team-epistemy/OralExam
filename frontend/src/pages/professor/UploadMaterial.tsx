@@ -19,7 +19,7 @@ export default function UploadMaterial() {
   const [uploading, setUploading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState('');
-  const [uploadResult, setUploadResult] = useState<{ material_id: string; version_no: number } | null>(null);
+  const [uploadResult, setUploadResult] = useState<{ material_id: string; version_no: number; course_id?: string } | null>(null);
   const [versions, setVersions] = useState<MaterialVersion[]>([]);
   const [pollInterval, setPollInterval] = useState<ReturnType<typeof setInterval> | null>(null);
 
@@ -208,12 +208,20 @@ export default function UploadMaterial() {
         {/* Next steps */}
         {success && (
           <div className="flex flex-wrap gap-3">
-            <Link
-              to={syllabusCourseId ? `/professor/courses/${syllabusCourseId}?tab=graph` : '/professor/dashboard'}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-            >
-              <Network className="w-4 h-4" /> View Concept Graph →
-            </Link>
+            {(() => {
+              // Prefer the course id resolved by the upload itself (covers standalone
+              // uploads where the URL only carried the course name); fall back to the
+              // URL's courseId, then the dashboard.
+              const gid = uploadResult?.course_id || syllabusCourseId;
+              return (
+                <Link
+                  to={gid ? `/professor/courses/${gid}?tab=graph` : '/professor/dashboard'}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                >
+                  <Network className="w-4 h-4" /> View Concept Graph →
+                </Link>
+              );
+            })()}
             <button
               onClick={() => {
                 setSuccess(false);

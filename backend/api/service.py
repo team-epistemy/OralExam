@@ -107,7 +107,8 @@ class MaterialsApi:
         return PresignResponse(
             material_id=material.material_id,
             material_version_id=version.material_version_id,
-            version_no=version.version_no, s3_key=version.s3_key, upload_url=url)
+            version_no=version.version_no, s3_key=version.s3_key, upload_url=url,
+            course_id=str(material.course_id or ""))
 
     def register(self, caller: Caller, version_id: str) -> AsyncJob:
         """Confirm the object exists, flip to uploaded, enqueue an ingest job."""

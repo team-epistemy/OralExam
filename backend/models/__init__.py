@@ -186,6 +186,7 @@ class PresignResponse(BaseModel):
     version_no: int
     s3_key: str
     upload_url: str
+    course_id: str = ""
     fields: Dict[str, Any] = Field(default_factory=dict)
 
 

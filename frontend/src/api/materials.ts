@@ -6,6 +6,7 @@ export interface PresignResponse {
   version_no: number;
   s3_key: string;
   upload_url: string;
+  course_id?: string;
 }
 
 export interface MaterialVersion {
