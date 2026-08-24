@@ -88,6 +88,12 @@ def migrate() -> None:
             print(f"applying {migration_008.name} ...")
             cur.execute(migration_008.read_text())
 
+        # Always apply migration_009 (grant DELETE on auth.enrollment for drops; idempotent)
+        migration_009 = db_dir / "migration_009_enrollment_drop.sql"
+        if migration_009.exists():
+            print(f"applying {migration_009.name} ...")
+            cur.execute(migration_009.read_text())
+
     conn.commit()
     print("all schemas applied")
 

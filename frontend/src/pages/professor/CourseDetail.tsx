@@ -5,7 +5,7 @@ import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, L
 import { get, post, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
-import { createStudentsBatch } from '../../api/students';
+import { createStudentsBatch, dropCourseStudent } from '../../api/students';
 import { listStudents } from '../../api/courses';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 
@@ -473,6 +473,7 @@ function StudentsTab({ courseId }: { courseId: string }) {
   const [errors, setErrors] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const [csvNote, setCsvNote] = useState('');
+  const [dropping, setDropping] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const { data: enrolled = [] } = useQuery({
@@ -480,6 +481,20 @@ function StudentsTab({ courseId }: { courseId: string }) {
     queryFn: () => listStudents(courseId),
     enabled: !!courseId,
   });
+
+  const handleDrop = async (email: string) => {
+    if (!confirm(`Remove ${email} from this course? They'll lose access to its assignments.`)) return;
+    setDropping(email);
+    setErrors([]);
+    try {
+      await dropCourseStudent(courseId, email);
+      queryClient.invalidateQueries({ queryKey: ['course-roster', courseId] });
+    } catch {
+      setErrors((e) => [...e, `Could not remove ${email}. Please try again.`]);
+    } finally {
+      setDropping(null);
+    }
+  };
 
   // Pull every email-looking token out of a CSV/text file, regardless of column
   // layout or header row, and merge them (deduped) into the textarea for review.
@@ -608,7 +623,17 @@ function StudentsTab({ courseId }: { courseId: string }) {
           <h3 className="text-sm font-medium text-gray-700 mb-3">Enrolled students ({enrolled.length})</h3>
           <div className="divide-y divide-gray-100 max-h-72 overflow-auto">
             {enrolled.map((s) => (
-              <div key={s.email} className="py-2 text-sm text-gray-900 truncate">{s.email}</div>
+              <div key={s.email} className="flex items-center gap-3 py-2">
+                <span className="flex-1 min-w-0 truncate text-sm text-gray-900">{s.email}</span>
+                <button
+                  onClick={() => handleDrop(s.email)}
+                  disabled={dropping === s.email}
+                  className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+                  title="Remove this student from the course"
+                >
+                  {dropping === s.email ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                </button>
+              </div>
             ))}
           </div>
         </div>

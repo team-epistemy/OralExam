@@ -582,9 +582,26 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             try:
                 _pro(x_user_id, x_role, x_org_name, repo, d)
                 _ensure_enrollment_table(repo)
+                e = email.strip().lower()
                 with repo.conn.cursor() as cur:
                     cur.execute("DELETE FROM enrollment WHERE course_id = %s::uuid AND student_email = %s",
-                                (course_id, email.strip().lower()))
+                                (course_id, e))
+                    # Also clear the authoritative auth-side enrollment, else a later
+                    # public-mirror rebuild would resurrect the dropped student. The
+                    # DELETE grant ships in migration_009; the savepoint lets this
+                    # degrade cleanly on an un-migrated DB without losing the public delete.
+                    cur.execute("SAVEPOINT drop_auth_enrollment")
+                    try:
+                        cur.execute(
+                            """DELETE FROM auth.enrollment ae
+                                 USING auth.app_user au
+                                WHERE ae.app_user_id = au.id
+                                  AND ae.course_id = %s::uuid
+                                  AND lower(au.email) = %s""",
+                            (course_id, e))
+                        cur.execute("RELEASE SAVEPOINT drop_auth_enrollment")
+                    except Exception:  # noqa: BLE001 - missing grant on un-migrated DB
+                        cur.execute("ROLLBACK TO SAVEPOINT drop_auth_enrollment")
                 repo.conn.commit()
                 return {"status": "removed", "email": email}
             finally:

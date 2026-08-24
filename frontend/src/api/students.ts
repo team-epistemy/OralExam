@@ -1,4 +1,4 @@
-import { post } from './client';
+import { post, del } from './client';
 
 export interface Student {
   id: string;
@@ -40,4 +40,10 @@ export function createStudentsBatch(emails: string[], courseId?: string): Promis
     emails,
     course_id: courseId || null,
   });
+}
+
+// Drop a student from a course by email. The server removes both the public
+// roster row and the authoritative auth-side enrollment, so the drop sticks.
+export function dropCourseStudent(courseId: string, email: string): Promise<{ status: string; email: string }> {
+  return del(`/api/courses/${courseId}/students?email=${encodeURIComponent(email)}`);
 }
