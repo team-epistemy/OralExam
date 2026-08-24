@@ -26,7 +26,7 @@ interface QuestionState {
   edsComponents: EDSComponents | null;
 }
 
-type Phase = 'loading' | 'taking' | 'review' | 'done';
+type Phase = 'loading' | 'ready' | 'taking' | 'review' | 'done';
 
 const MAX_TURNS = 5;
 const TIMER_WARNING_SECONDS = 5 * 60;
@@ -84,11 +84,15 @@ function clearExamState(assignmentId: string): void {
 
 interface AssignmentMeta {
   duration_minutes: number | null;
+  question_count: number | null;
 }
 
 async function fetchAssignmentMeta(assignmentId: string): Promise<AssignmentMeta> {
-  const data = await get<{ config?: { time_limit_minutes?: number } }>(`/api/assignments/${assignmentId}`);
-  return { duration_minutes: data.config?.time_limit_minutes ?? null };
+  const data = await get<{ config?: { time_limit_minutes?: number; max_questions?: number } }>(`/api/assignments/${assignmentId}`);
+  return {
+    duration_minutes: data.config?.time_limit_minutes ?? null,
+    question_count: data.config?.max_questions ?? null,
+  };
 }
 
 // ── Concept Graph SVG ────────────────────────────────────────────────────────
@@ -409,6 +413,12 @@ export default function TakeExam() {
   const [showTranscript, setShowTranscript] = useState(false);
   const [error, setError] = useState('');
 
+  // Readiness screen: metadata + pre-flight checks. The exam session and the
+  // clock do not start until the student clicks Start Exam (see beginExam).
+  const [meta, setMeta] = useState<AssignmentMeta | null>(null);
+  const [micStatus, setMicStatus] = useState<'idle' | 'checking' | 'ok' | 'denied' | 'unsupported'>('idle');
+  const [starting, setStarting] = useState(false);
+
   // Timer state
   const [startTime, setStartTime] = useState<number | null>(null);
   const [durationMinutes, setDurationMinutes] = useState<number | null>(null);
@@ -562,38 +572,14 @@ export default function TakeExam() {
           }
         }
 
-        // Fresh start: fetch assignment metadata and start session in parallel
-        const [res, meta] = await Promise.all([
-          startExamSession(assignmentId),
-          fetchAssignmentMeta(assignmentId),
-        ]);
+        // Fresh start: fetch only metadata and show the readiness screen. The
+        // exam session (and the countdown) start when the student clicks Start
+        // Exam — see beginExam — so nobody is dropped into a live clock cold.
+        const meta = await fetchAssignmentMeta(assignmentId);
         if (cancelled) return;
-
-        const now = Date.now();
-        setSessionId(res.session_id);
-        setQuestions(res.questions);
-        const initialQData = res.questions.map((q, i) => ({
-          turns: [{ role: 'evaluator' as const, text: `Question ${i + 1}. ${q.text}` }],
-          attempts: 0,
-          attempted: false,
-          done: false,
-          score: 0,
-          edsComponents: null,
-        }));
-        setQData(initialQData);
-        setStartTime(now);
+        setMeta(meta);
         setDurationMinutes(meta.duration_minutes);
-        setPhase('taking');
-
-        saveExamState(assignmentId, {
-          version: EXAM_STATE_VERSION,
-          sessionId: res.session_id,
-          questions: res.questions,
-          qData: initialQData,
-          current: 0,
-          startTime: now,
-          durationMinutes: meta.duration_minutes,
-        });
+        setPhase('ready');
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : 'Failed to start exam');
@@ -602,6 +588,61 @@ export default function TakeExam() {
 
     return () => { cancelled = true; };
   }, [assignmentId]);
+
+  // Start the exam for real: create the session, seed questions, and start the
+  // clock (startTime = now). Only called from the readiness screen's Start button.
+  const beginExam = useCallback(async () => {
+    if (!assignmentId || starting) return;
+    setStarting(true);
+    setError('');
+    try {
+      const res = await startExamSession(assignmentId);
+      const now = Date.now();
+      const dur = meta?.duration_minutes ?? durationMinutes;
+      const initialQData = res.questions.map((q, i) => ({
+        turns: [{ role: 'evaluator' as const, text: `Question ${i + 1}. ${q.text}` }],
+        attempts: 0,
+        attempted: false,
+        done: false,
+        score: 0,
+        edsComponents: null,
+      }));
+      setSessionId(res.session_id);
+      setQuestions(res.questions);
+      setQData(initialQData);
+      setStartTime(now);
+      setDurationMinutes(dur);
+      setPhase('taking');
+      saveExamState(assignmentId, {
+        version: EXAM_STATE_VERSION,
+        sessionId: res.session_id,
+        questions: res.questions,
+        qData: initialQData,
+        current: 0,
+        startTime: now,
+        durationMinutes: dur,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start exam');
+    } finally {
+      setStarting(false);
+    }
+  }, [assignmentId, starting, meta, durationMinutes]);
+
+  // Pre-flight mic permission check on the readiness screen. Requests audio, then
+  // immediately releases the stream — we only want to surface permission state so
+  // a blocked mic is visible up front instead of failing silently mid-exam.
+  const checkMic = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) { setMicStatus('unsupported'); return; }
+    setMicStatus('checking');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+      setMicStatus('ok');
+    } catch {
+      setMicStatus('denied');
+    }
+  }, []);
 
   // ── Persist state on meaningful changes ─────────────────────────────────────
 
@@ -813,6 +854,128 @@ export default function TakeExam() {
           <h2 className="text-lg font-semibold text-gray-900 mb-1">Preparing your exam...</h2>
           <p className="text-sm text-gray-500">Your questions will appear shortly</p>
         </div>
+      </div>
+    );
+  }
+
+  // ── Readiness screen (gates the timer — nothing is timed until Start Exam) ──
+
+  if (phase === 'ready') {
+    const qCount = meta?.question_count ?? (questions.length || null);
+    const mins = meta?.duration_minutes ?? durationMinutes;
+    return (
+      <div className="min-h-[80vh] max-w-2xl mx-auto py-8 px-4">
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-100 rounded-full mb-3">
+            <BookOpen className="w-7 h-7 text-blue-600" />
+          </div>
+          <h1 className="text-2xl font-bold text-gray-900">Before you begin</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            The timer starts only when you press <span className="font-medium text-gray-700">Start Exam</span>.
+          </p>
+        </div>
+
+        {/* At a glance */}
+        <div className="grid grid-cols-2 gap-3 mb-5">
+          <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center gap-3">
+            <CheckCircle className="w-5 h-5 text-blue-600 flex-shrink-0" />
+            <div>
+              <p className="text-lg font-bold text-gray-900">{qCount ?? '—'}</p>
+              <p className="text-xs text-gray-500">Question{qCount === 1 ? '' : 's'}</p>
+            </div>
+          </div>
+          <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center gap-3">
+            <Clock className="w-5 h-5 text-blue-600 flex-shrink-0" />
+            <div>
+              <p className="text-lg font-bold text-gray-900">{mins ? `${mins} min` : 'Untimed'}</p>
+              <p className="text-xs text-gray-500">Time limit</p>
+            </div>
+          </div>
+        </div>
+
+        {/* How it works */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5 mb-5">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">How this works</h2>
+          <ul className="space-y-2 text-sm text-gray-700">
+            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" /> It's an oral exam — each question is read aloud, and the examiner may ask follow-up probes before moving on.</li>
+            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" /> Answer by voice (microphone) or by typing — your choice, and you can switch anytime.</li>
+            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" /> Your progress auto-saves; if you refresh, you'll resume where you left off.</li>
+            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" /> Keep the exam open in a single browser tab.</li>
+          </ul>
+        </div>
+
+        {/* The case */}
+        {caseMaterials.length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 p-5 mb-5">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">The case — review before you start</h2>
+            <div className="space-y-2">
+              {caseMaterials.map((m, i) => (
+                <button
+                  key={m.version_id}
+                  onClick={() => setCaseViewIdx(i)}
+                  className="w-full flex items-center gap-3 px-3 py-2 border border-gray-200 rounded-lg text-left hover:bg-gray-50 transition-colors"
+                >
+                  <BookOpen className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                  <span className="text-sm text-gray-800 flex-1 min-w-0 truncate">{m.file_name}</span>
+                  <span className="text-xs text-blue-600 flex-shrink-0">View</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Audio check */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5 mb-5">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Audio check</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={checkMic}
+              disabled={micStatus === 'checking'}
+              className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+            >
+              {micStatus === 'checking' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
+              Check microphone
+            </button>
+            {micStatus === 'ok' && (
+              <span className="text-sm text-green-600 inline-flex items-center gap-1"><CheckCircle className="w-4 h-4" /> Microphone ready</span>
+            )}
+            {micStatus === 'denied' && (
+              <span className="text-sm text-amber-600">Mic blocked — you can still answer by typing.</span>
+            )}
+            {micStatus === 'unsupported' && (
+              <span className="text-sm text-amber-600">Mic isn't available here — you can type your answers.</span>
+            )}
+          </div>
+          <p className="text-xs text-gray-400 mt-2 inline-flex items-center gap-1">
+            <Volume2 className="w-3.5 h-3.5 flex-shrink-0" /> Questions are read aloud when audio is available; you can always read them on screen too.
+          </p>
+        </div>
+
+        {error && (
+          <div className="p-3 mb-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
+        )}
+
+        <button
+          onClick={beginExam}
+          disabled={starting}
+          className="w-full flex items-center justify-center gap-2 py-3 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors"
+        >
+          {starting ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</> : 'Start Exam →'}
+        </button>
+        <button
+          onClick={() => navigate('/student/dashboard')}
+          className="w-full mt-2 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
+        >
+          Back to dashboard
+        </button>
+
+        {caseViewIdx !== null && caseMaterials[caseViewIdx] && (
+          <DocumentViewerModal
+            materialId={caseMaterials[caseViewIdx].version_id}
+            fallbackName={caseMaterials[caseViewIdx].file_name}
+            onClose={() => setCaseViewIdx(null)}
+          />
+        )}
       </div>
     );
   }
