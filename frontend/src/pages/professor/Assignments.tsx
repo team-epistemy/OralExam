@@ -49,8 +49,8 @@ export default function ProfessorAssignments() {
           <div className="p-10 text-center">
             <ClipboardList className="w-8 h-8 text-muted mx-auto mb-3" />
             <p className="text-sm text-muted">No active assignments yet.</p>
-            <Link to="/professor/exam-builder" className="text-sm text-gold hover:text-gold-light font-medium mt-2 inline-block">
-              Build an exam to get started
+            <Link to="/professor/assignments/new" className="text-sm text-gold hover:text-gold-light font-medium mt-2 inline-block">
+              Create an assignment to get started
             </Link>
           </div>
         ) : (

@@ -7,7 +7,6 @@ import ProfessorDashboard from './pages/professor/Dashboard';
 import CourseDetail from './pages/professor/CourseDetail';
 import UploadMaterial from './pages/professor/UploadMaterial';
 import ConceptGraph from './pages/professor/ConceptGraph';
-import BuildExam from './pages/professor/BuildExam';
 import CreateAssignment from './pages/professor/CreateAssignment';
 import ProfessorAssignments from './pages/professor/Assignments';
 import GradeView from './pages/professor/GradeView';
@@ -95,8 +94,10 @@ export const router = createBrowserRouter([
         element: <RequireRole role="professor"><ConceptGraph /></RequireRole>,
       },
       {
+        // Retired: the standalone exam builder is folded into Create Assignment.
+        // Redirect any old links/bookmarks to the canonical flow.
         path: '/professor/exam-builder',
-        element: <RequireRole role="professor"><BuildExam /></RequireRole>,
+        element: <Navigate to="/professor/assignments/new" replace />,
       },
       {
         path: '/professor/assignments',

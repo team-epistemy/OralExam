@@ -144,8 +144,8 @@ export default function AppLayout() {
             <span className="flex items-center gap-3"><CalendarPlus className="w-4 h-4" /> Add Session</span>
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-parchment-dark text-muted">soon</span>
           </button>
-          <NavLink to={`/professor/exam-builder?course=${cid}`} onClick={close} className={staticItemClass}>
-            <FileText className="w-4 h-4" /> Create Exam
+          <NavLink to={`/professor/assignments/new?course=${cid}`} onClick={close} className={staticItemClass}>
+            <FileText className="w-4 h-4" /> Create Assignment
           </NavLink>
           <div className="pt-2 mt-2 border-t border-border">
             <button onClick={handleRemoveCourse} className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition-colors w-full text-left">

@@ -168,10 +168,7 @@ export default function ConceptGraph() {
 
             {/* Next steps */}
             <div className="flex flex-wrap gap-3 pt-2 border-t border-gray-100">
-              <Link to="/professor/exam-builder" className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
-                Build Exam →
-              </Link>
-              <Link to={`/professor/assignments/new${courseId ? `?course=${courseId}` : ''}`} className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors">
+              <Link to={`/professor/assignments/new${courseId ? `?course=${courseId}` : ''}`} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
                 Create Assignment →
               </Link>
             </div>
