@@ -1230,7 +1230,7 @@ def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
     with repo.conn.cursor() as cur:
         cur.execute(
             """SELECT st.question_id, q.text, st.student_answer,
-                      COALESCE(e.eds_score, 0), e.raw_llm_output
+                      COALESCE(e.eds_score, 0), e.raw_llm_output, e.eds_components
                FROM session_turn st
                JOIN question q ON q.question_id = st.question_id
                LEFT JOIN evaluation e ON e.turn_id = st.turn_id
@@ -1239,17 +1239,28 @@ def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
         )
         rows = cur.fetchall()
     q_results, answered, score_sum = [], 0, 0.0
+    # Carry the same EDS component breakdown the in-exam gauge shows, so Results
+    # speaks one vocabulary: per-question components + an averaged aggregate.
+    comp_keys = ("node_score", "edge_score", "r_gate", "gen_score")
+    comp_sums = {k: 0.0 for k in comp_keys}
+    comp_n = 0
     for r in rows:
         if r[2]:
             answered += 1
         eds = float(r[3] or 0)
         score_sum += eds
+        comp = r[5] if isinstance(r[5], dict) else None
+        if comp:
+            comp_n += 1
+            for k in comp_keys:
+                comp_sums[k] += float(comp.get(k) or 0)
         q_results.append({"question_id": str(r[0]), "question_text": r[1],
                           "answer": r[2] or "", "score": round(eds * 100),
-                          "feedback": _extract_feedback(r[4])})
+                          "feedback": _extract_feedback(r[4]), "components": comp})
     total = len(rows)
     overall = round(score_sum / total * 100) if total else 0
-    feedback = f"Answered {answered} of {total} questions · epistemic-depth score {overall}%."
+    components = {k: comp_sums[k] / comp_n for k in comp_keys} if comp_n else None
+    feedback = f"Answered {answered} of {total} questions · Epistemic Depth Score {overall}/100."
 
     # A released grade is authoritative: show the professor's final score and
     # overall comment instead of the raw auto EDS.
@@ -1270,6 +1281,7 @@ def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
         "session_id": session_id, "assignment_id": assignment_id, "status": srow[1],
         "score": overall, "total_questions": total, "questions_answered": answered,
         "feedback": feedback,
+        "components": components,
         "question_results": q_results,
         "completed_at": srow[2].isoformat() if srow[2] else None,
     }

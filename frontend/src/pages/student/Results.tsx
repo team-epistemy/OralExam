@@ -1,7 +1,8 @@
 import { useParams, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, ArrowLeft, Award, AlertCircle } from 'lucide-react';
+import { Loader2, ArrowLeft, AlertCircle } from 'lucide-react';
 import { getExamResults } from '../../api/exam';
+import { EDSGauge, EDSBreakdown, EDSExplainer } from '../../components/Eds';
 
 export default function Results() {
   const { assignmentId = '' } = useParams();
@@ -32,17 +33,23 @@ export default function Results() {
         </div>
       ) : (
         <>
-          {/* Score summary */}
-          <div className="bg-white border border-gray-200 rounded-xl p-6 flex items-center gap-6">
-            <div className="flex items-center justify-center w-20 h-20 rounded-full bg-blue-50">
-              <Award className="w-9 h-9 text-blue-600" />
+          {/* EDS score summary — same gauge, bands, and breakdown as in-exam */}
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
+            <div className="flex flex-col sm:flex-row items-center gap-6">
+              <EDSGauge score={data.score} />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-gray-900">Epistemic Depth Score (EDS)</p>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  {data.questions_answered} of {data.total_questions} questions answered
+                </p>
+                <EDSExplainer className="mt-2" />
+              </div>
             </div>
-            <div>
-              <p className="text-4xl font-bold text-gray-900">{Math.round(data.score)}<span className="text-lg text-gray-400">/100</span></p>
-              <p className="text-sm text-gray-500 mt-1">
-                {data.questions_answered} of {data.total_questions} questions answered
-              </p>
-            </div>
+            {data.components && (
+              <div className="mt-4 pt-4 border-t border-gray-100 max-w-sm">
+                <EDSBreakdown components={data.components} />
+              </div>
+            )}
           </div>
 
           {data.feedback && (
@@ -57,7 +64,7 @@ export default function Results() {
                 <li key={q.question_id || i} className="border-b border-gray-100 last:border-0 pb-3 last:pb-0">
                   <div className="flex items-start justify-between gap-3">
                     <p className="text-sm font-medium text-gray-900">{i + 1}. {q.question_text}</p>
-                    <span className="text-xs font-semibold text-blue-600 whitespace-nowrap">{Math.round(q.score)}/100</span>
+                    <span className="text-xs font-semibold text-blue-600 whitespace-nowrap">EDS {Math.round(q.score)}/100</span>
                   </div>
                   {q.answer && <p className="mt-1 text-sm text-gray-600"><span className="text-gray-400">Your answer:</span> {q.answer}</p>}
                   {q.feedback && <p className="mt-1 text-xs text-gray-500 italic">{q.feedback}</p>}

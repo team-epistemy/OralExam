@@ -85,12 +85,14 @@ export interface ExamResult {
   total_questions: number;
   questions_answered: number;
   feedback: string;
+  components?: EDSComponents | null;
   question_results: {
     question_id: string;
     question_text: string;
     answer: string;
     score: number;
     feedback: string;
+    components?: EDSComponents | null;
   }[];
   completed_at: string;
 }
