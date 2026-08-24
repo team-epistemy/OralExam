@@ -1135,7 +1135,10 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
         type_col = "a.assignment_type" if cur.fetchone() is not None else "'assignment'"
         cur.execute(
             f"""SELECT a.assignment_id, a.title, a.status, a.config,
-                      a.created_at, c.course_name, a.course_id, {type_col}
+                      a.created_at, c.course_name, a.course_id, {type_col},
+                      EXISTS (SELECT 1 FROM exam_session es
+                              WHERE es.assignment_id = a.assignment_id
+                                AND es.student_id = %s AND es.status = 'completed') AS completed
                FROM assignment a
                JOIN course c ON c.course_id = a.course_id
                WHERE a.org_id = %s AND a.status = 'active'
@@ -1143,7 +1146,7 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
                       OR EXISTS (SELECT 1 FROM enrollment e
                                  WHERE e.course_id = a.course_id AND e.student_email = %s))
                ORDER BY a.created_at DESC""",
-            (org_id, email),
+            (email, org_id, email),
         )
         rows = cur.fetchall()
     return [
@@ -1157,6 +1160,7 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
             "course_id": str(r[6]),
             "assignment_type": r[7] or "assignment",
             "questions_count": (r[3] or {}).get("max_questions") if isinstance(r[3], dict) else None,
+            "completed": bool(r[8]),
         }
         for r in rows
     ]
@@ -2490,9 +2494,12 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 repo.set_tenant(caller.org_id)
 
                 with repo.conn.cursor() as cur:
+                    cur.execute("""SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='assignment' AND column_name='assignment_type'""")
+                    type_col = "assignment_type" if cur.fetchone() is not None else "'assignment'"
                     cur.execute(
-                        """SELECT assignment_id, course_id, title, question_set_id,
-                                  config, status, created_by, created_at
+                        f"""SELECT assignment_id, course_id, title, question_set_id,
+                                  config, status, created_by, created_at, {type_col}
                            FROM assignment WHERE assignment_id = %s::uuid""",
                         (assignment_id,),
                     )
@@ -2519,6 +2526,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     "status": row[5],
                     "created_by": row[6],
                     "created_at": row[7].isoformat() if row[7] else None,
+                    "assignment_type": row[8] or "assignment",
                 }
             finally:
                 _release_repo(d, repo)

@@ -17,6 +17,7 @@ export interface StudentAssignment {
   assignment_type: 'practice' | 'assignment' | 'exam';
   config: { difficulty?: string; duration_minutes?: number; max_questions?: number };
   questions_count?: number;
+  completed?: boolean;
   created_at: string;
 }
 

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
-import { PlayCircle, ChevronLeft, Dumbbell, ClipboardList, GraduationCap } from 'lucide-react';
+import { PlayCircle, ChevronLeft, Dumbbell, ClipboardList, GraduationCap, Check } from 'lucide-react';
 import { get } from '../../api/client';
 import type { StudentAssignment } from './Dashboard';
 
@@ -60,31 +60,43 @@ export default function StudentCourse() {
               <p className="text-sm text-gray-400">{desc} Nothing here yet.</p>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {items.map((a) => (
-                  <div key={a.id} className="bg-white rounded-xl border-2 border-gray-200 p-5 hover:border-blue-300 transition-colors">
-                    <p className="font-semibold text-gray-900">{a.title}</p>
-                    <div className="flex gap-3 mt-1 text-xs text-gray-400">
-                      {a.config?.duration_minutes && <span>{a.config.duration_minutes} min</span>}
-                      {a.config?.difficulty && <span className="capitalize">{a.config.difficulty}</span>}
-                      {a.questions_count && <span>{a.questions_count} questions</span>}
+                {items.map((a) => {
+                  const startLabel = a.completed && type === 'practice'
+                    ? 'Retake'
+                    : type === 'practice' ? 'Start Practice' : type === 'exam' ? 'Start Exam' : 'Start';
+                  return (
+                    <div key={a.id} className="bg-white rounded-xl border-2 border-gray-200 p-5 hover:border-blue-300 transition-colors">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="font-semibold text-gray-900">{a.title}</p>
+                        {a.completed && (
+                          <span className="flex-shrink-0 inline-flex items-center gap-1 text-[11px] font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+                            <Check className="w-3 h-3" /> Completed
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex gap-3 mt-1 text-xs text-gray-400">
+                        {a.config?.duration_minutes && <span>{a.config.duration_minutes} min</span>}
+                        {a.config?.difficulty && <span className="capitalize">{a.config.difficulty}</span>}
+                        {a.questions_count && <span>{a.questions_count} questions</span>}
+                      </div>
+                      <div className="mt-4 flex gap-2">
+                        <Link
+                          to={`/student/exam/${a.id}`}
+                          className="flex items-center justify-center gap-2 flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                        >
+                          <PlayCircle className="w-4 h-4" />
+                          {startLabel}
+                        </Link>
+                        <Link
+                          to={`/student/results/${a.id}`}
+                          className="flex items-center justify-center px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+                        >
+                          Results
+                        </Link>
+                      </div>
                     </div>
-                    <div className="mt-4 flex gap-2">
-                      <Link
-                        to={`/student/exam/${a.id}`}
-                        className="flex items-center justify-center gap-2 flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-                      >
-                        <PlayCircle className="w-4 h-4" />
-                        {type === 'practice' ? 'Start Practice' : type === 'exam' ? 'Start Exam' : 'Start'}
-                      </Link>
-                      <Link
-                        to={`/student/results/${a.id}`}
-                        className="flex items-center justify-center px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
-                      >
-                        Results
-                      </Link>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>

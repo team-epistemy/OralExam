@@ -85,13 +85,15 @@ function clearExamState(assignmentId: string): void {
 interface AssignmentMeta {
   duration_minutes: number | null;
   question_count: number | null;
+  assignment_type: string;
 }
 
 async function fetchAssignmentMeta(assignmentId: string): Promise<AssignmentMeta> {
-  const data = await get<{ config?: { time_limit_minutes?: number; max_questions?: number } }>(`/api/assignments/${assignmentId}`);
+  const data = await get<{ config?: { time_limit_minutes?: number; max_questions?: number }; assignment_type?: string }>(`/api/assignments/${assignmentId}`);
   return {
     duration_minutes: data.config?.time_limit_minutes ?? null,
     question_count: data.config?.max_questions ?? null,
+    assignment_type: data.assignment_type ?? 'assignment',
   };
 }
 
@@ -547,6 +549,7 @@ export default function TakeExam() {
   // Derived
   const N = questions.length;
   const cur = qData[current];
+  const isPractice = (meta?.assignment_type || 'assignment') === 'practice';
 
   // Auto-speak the latest examiner line (question or probe) as it appears.
   useEffect(() => {
@@ -573,6 +576,12 @@ export default function TakeExam() {
     let cancelled = false;
     (async () => {
       try {
+        // Load metadata up front (both resume and fresh paths need it — e.g. to
+        // know whether this is a practice test, which changes the copy + retake).
+        const meta = await fetchAssignmentMeta(assignmentId);
+        if (cancelled) return;
+        setMeta(meta);
+
         // Check for saved state first
         const saved = loadExamState(assignmentId);
         if (saved) {
@@ -599,12 +608,10 @@ export default function TakeExam() {
           }
         }
 
-        // Fresh start: fetch only metadata and show the readiness screen. The
-        // exam session (and the countdown) start when the student clicks Start
-        // Exam — see beginExam — so nobody is dropped into a live clock cold.
-        const meta = await fetchAssignmentMeta(assignmentId);
+        // Fresh start: show the readiness screen. The exam session (and the
+        // countdown) start when the student clicks Start Exam — see beginExam —
+        // so nobody is dropped into a live clock cold.
         if (cancelled) return;
-        setMeta(meta);
         setDurationMinutes(meta.duration_minutes);
         setPhase('ready');
       } catch (err) {
@@ -670,6 +677,24 @@ export default function TakeExam() {
       setMicStatus('denied');
     }
   }, []);
+
+  // Practice tests are ungraded and retryable — reset back to the readiness
+  // screen so Start Exam spins up a brand-new session. The old completed session
+  // no longer blocks it (the active-session unique guard is partial).
+  const retake = useCallback(() => {
+    if (assignmentId) clearExamState(assignmentId);
+    setSessionId(null);
+    setQuestions([]);
+    setQData([]);
+    setCurrent(0);
+    setDraft('');
+    setStartTime(null);
+    setSecondsRemaining(null);
+    setError('');
+    setMicNotice(null);
+    spokenRef.current = '';
+    setPhase('ready');
+  }, [assignmentId]);
 
   // ── Persist state on meaningful changes ─────────────────────────────────────
 
@@ -1047,8 +1072,10 @@ export default function TakeExam() {
           </div>
           {statusList}
 
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 max-w-lg mx-auto mb-6 text-sm text-gray-700">
-            Once you submit, your responses cannot be changed.
+          <div className={`rounded-lg p-3 max-w-lg mx-auto mb-6 text-sm ${isPractice ? 'bg-blue-50 border border-blue-200 text-blue-800' : 'bg-amber-50 border border-amber-200 text-gray-700'}`}>
+            {isPractice
+              ? 'This is a practice test — ungraded, and you can retake it as many times as you like.'
+              : 'Once you submit, your responses cannot be changed.'}
           </div>
 
           <div className="flex gap-3 justify-center flex-wrap">
@@ -1283,13 +1310,23 @@ export default function TakeExam() {
             </div>
           )}
 
-          <button
-            onClick={() => navigate('/student/dashboard')}
-            className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
-          >
-            <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
-            Back to Dashboard
-          </button>
+          <div className="flex gap-3 justify-center flex-wrap">
+            {isPractice && (
+              <button
+                onClick={retake}
+                className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+              >
+                Retake practice test
+              </button>
+            )}
+            <button
+              onClick={() => navigate('/student/dashboard')}
+              className={`px-5 py-2 rounded-lg text-sm font-medium ${isPractice ? 'border border-gray-300 text-gray-700 hover:bg-gray-50' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+            >
+              <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
+              Back to Dashboard
+            </button>
+          </div>
         </div>
       </div>
     );
