@@ -420,6 +420,8 @@ export default function TakeExam() {
   const [meta, setMeta] = useState<AssignmentMeta | null>(null);
   const [micStatus, setMicStatus] = useState<'idle' | 'checking' | 'ok' | 'denied' | 'unsupported'>('idle');
   const [starting, setStarting] = useState(false);
+  // Practice tests are untimed by default; the student can opt into the timer.
+  const [practiceTimed, setPracticeTimed] = useState(false);
 
   // Timer state
   const [startTime, setStartTime] = useState<number | null>(null);
@@ -632,7 +634,9 @@ export default function TakeExam() {
     try {
       const res = await startExamSession(assignmentId);
       const now = Date.now();
-      const dur = meta?.duration_minutes ?? durationMinutes;
+      // Practice with the timer opted out → untimed (null disables the countdown,
+      // auto-submit, and all timer-expiry gates). Graded work stays timed.
+      const dur = isPractice && !practiceTimed ? null : (meta?.duration_minutes ?? durationMinutes);
       const initialQData = res.questions.map((q, i) => ({
         turns: [{ role: 'evaluator' as const, text: `Question ${i + 1}. ${q.text}` }],
         attempts: 0,
@@ -661,7 +665,7 @@ export default function TakeExam() {
     } finally {
       setStarting(false);
     }
-  }, [assignmentId, starting, meta, durationMinutes]);
+  }, [assignmentId, starting, meta, durationMinutes, isPractice, practiceTimed]);
 
   // Pre-flight mic permission check on the readiness screen. Requests audio, then
   // immediately releases the stream — we only want to surface permission state so
@@ -914,7 +918,10 @@ export default function TakeExam() {
 
   if (phase === 'ready') {
     const qCount = meta?.question_count ?? (questions.length || null);
-    const mins = meta?.duration_minutes ?? durationMinutes;
+    const configuredMins = meta?.duration_minutes ?? durationMinutes;
+    // Practice: timer is opt-in. Everything else uses the configured limit.
+    const effectiveTimed = isPractice ? practiceTimed : configuredMins != null;
+    const mins = effectiveTimed ? configuredMins : null;
     return (
       <div className="min-h-[80vh] max-w-2xl mx-auto py-8 px-4">
         <div className="text-center mb-6">
@@ -944,6 +951,30 @@ export default function TakeExam() {
             </div>
           </div>
         </div>
+
+        {/* Timer is optional on practice tests */}
+        {isPractice && (
+          <div className="bg-white rounded-xl border border-gray-200 p-4 mb-5 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-gray-900">Use a timer</p>
+              <p className="text-xs text-gray-500">
+                {configuredMins
+                  ? `Optional for practice — count down from ${configuredMins} min. Off by default.`
+                  : 'No time limit is set for this practice test.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={practiceTimed}
+              disabled={!configuredMins}
+              onClick={() => setPracticeTimed((v) => !v)}
+              className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors disabled:opacity-40 ${practiceTimed ? 'bg-blue-600' : 'bg-gray-300'}`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${practiceTimed ? 'translate-x-6' : 'translate-x-1'}`} />
+            </button>
+          </div>
+        )}
 
         {/* How it works */}
         <div className="bg-white rounded-xl border border-gray-200 p-5 mb-5">
@@ -1626,17 +1657,20 @@ export default function TakeExam() {
             </div>
           </div>
 
-          {/* Concept Graph */}
-          <div className="border border-gray-200 rounded-xl mt-3 p-3">
-            <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 text-center">
-              Concept Map
-            </p>
-            <ConceptGraphSVG
-              questions={questions}
-              qData={qData}
-              currentIndex={current}
-            />
-          </div>
+          {/* Concept Map — practice only; hidden during graded assignments/exams
+              so it can't be used as a scaffold on the real assessment. */}
+          {isPractice && (
+            <div className="border border-gray-200 rounded-xl mt-3 p-3">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 text-center">
+                Concept Map
+              </p>
+              <ConceptGraphSVG
+                questions={questions}
+                qData={qData}
+                currentIndex={current}
+              />
+            </div>
+          )}
         </div>
       </div>
     </div>
