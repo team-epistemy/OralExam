@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
-import { BookOpen, Upload, ClipboardList, FileText, ArrowRight, Eye } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link, useNavigate } from 'react-router-dom';
+import { BookOpen, Upload, ClipboardList, FileText, ArrowRight, Eye, Plus } from 'lucide-react';
 import { get } from '../../api/client';
 import StatusBadge from '../../components/StatusBadge';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
+import AddCourseModal from '../../components/AddCourseModal';
 
 interface Course {
   course_id: string;
@@ -42,6 +43,9 @@ export default function ProfessorDashboard() {
   });
 
   const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
+  const [showAddCourse, setShowAddCourse] = useState(false);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const courses = data?.courses || [];
   const recentUploads = data?.recent_uploads || [];
@@ -108,11 +112,21 @@ export default function ProfessorDashboard() {
       <div className="bg-white rounded-xl border border-border">
         <div className="px-5 py-4 border-b border-border flex items-center justify-between">
           <h2 className="font-heading text-lg text-navy">Your Courses</h2>
+          <button
+            onClick={() => setShowAddCourse(true)}
+            className="inline-flex items-center gap-1 text-sm text-gold hover:text-gold-light font-medium"
+          >
+            <Plus className="w-4 h-4" /> Create Course
+          </button>
         </div>
         <div className="divide-y divide-border">
           {courses.length === 0 ? (
             <div className="p-8 text-center text-sm text-muted">
-              No courses yet. Upload materials to auto-create a course.
+              No courses yet.{' '}
+              <button onClick={() => setShowAddCourse(true)} className="text-gold hover:text-gold-light font-medium">
+                Create your first course
+              </button>{' '}
+              to get started — or upload materials to auto-create one.
             </div>
           ) : (
             courses.map((course) => (
@@ -212,6 +226,17 @@ export default function ProfessorDashboard() {
           materialId={viewing.id}
           fallbackName={viewing.name}
           onClose={() => setViewing(null)}
+        />
+      )}
+
+      {showAddCourse && (
+        <AddCourseModal
+          onClose={() => setShowAddCourse(false)}
+          onCreated={(id) => {
+            setShowAddCourse(false);
+            queryClient.invalidateQueries({ queryKey: ['professor-dashboard'] });
+            navigate(`/professor/courses/${id}`);
+          }}
         />
       )}
     </div>
