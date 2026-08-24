@@ -1471,6 +1471,81 @@ def _concept_banks(concepts: list) -> dict:
     return banks
 
 
+# Difficulty → what the generated questions should emphasise. Mirrors the demo's
+# difficulty presets but framed as an instruction to the generator.
+_DIFFICULTY_FOCUS = {
+    "recall": "definitional recall — precise definitions, formulas, and key facts",
+    "balanced": "a balance of definitional recall and causal reasoning",
+    "deep": "deep causal reasoning — mechanisms, prerequisite chains, and multi-step 'why' questions",
+}
+
+
+def _generate_concept_banks(settings, concepts: list, relations: list, difficulty: str) -> dict:
+    """Generate a FRESH per-concept oral-exam question bank with the LLM at
+    assignment-creation time, grounded in the course's concept graph.
+
+    Returns the same {concept_id/label: [questions]} shape as `_concept_banks`,
+    so `build_variants`/`assemble_questions` are unchanged. Temperature is non-zero
+    so each assignment gets different questions. Falls back to each concept's
+    stored/extracted bank (and ultimately the generic templates) only when
+    generation fails or omits a concept — never silently returns nothing.
+    """
+    labels = [c.get("label", "") for c in concepts if c.get("label")]
+    if not labels:
+        return _concept_banks(concepts)
+
+    focus = _DIFFICULTY_FOCUS.get(difficulty, _DIFFICULTY_FOCUS["balanced"])
+    concept_lines = "\n".join(
+        f"- {c.get('label')}: {c.get('definition', '')}"
+        for c in concepts if c.get("label"))
+    rel_lines = "\n".join(
+        f"- {r.get('src')} {r.get('edge_type') or r.get('link_type') or 'RELATED_TO'} {r.get('dst')}"
+        for r in (relations or []) if r.get("src") and r.get("dst"))
+    system_prompt = (
+        "You are writing questions for a university ORAL exam, grounded ONLY in the "
+        "provided concept graph. For EACH concept listed, write 4 distinct oral-exam "
+        f"questions that probe genuine understanding of that concept, emphasising {focus}. "
+        "Requirements: each question is open-ended (never yes/no), specific to the named "
+        "concept, answerable from the course concepts and their relationships, and phrased "
+        "the way an examiner would speak it aloud. Use the relationships to write "
+        "causal / 'why' / 'how does X affect Y' questions where appropriate. Do NOT invent "
+        "facts beyond the graph, and do NOT use a generic template. "
+        "Return ONLY valid JSON, no prose, no markdown fences: "
+        '{"banks": [{"label": "<exact concept label>", "questions": ["q1","q2","q3","q4"]}]}'
+    )
+    user = (f"Difficulty focus: {focus}\n\n"
+            f"Concepts:\n{concept_lines}\n\n"
+            f"Relationships:\n{rel_lines or '(none provided)'}")
+    try:
+        data = call_bedrock(settings, system_prompt, user,
+                            max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.6)
+    except Exception as exc:  # noqa: BLE001 - degrade to stored bank, assignment still works
+        logger.warning("per-assignment question generation failed: %s", exc)
+        return _concept_banks(concepts)
+
+    by_label = {}
+    for b in (data.get("banks") or []):
+        lbl = (b.get("label") or "").strip().lower()
+        qs = [q.strip() for q in (b.get("questions") or [])
+              if isinstance(q, str) and q.strip()]
+        if lbl and qs:
+            by_label[lbl] = qs
+
+    banks, any_generated = {}, False
+    for c in concepts:
+        label, cid = c.get("label", ""), c.get("id")
+        qs = by_label.get(label.strip().lower())
+        if qs:
+            any_generated = True
+        else:  # generator skipped this concept — fall back to its stored bank
+            qs = [q for q in (c.get("questions") or []) if isinstance(q, str)]
+        if cid:
+            banks[cid] = qs
+        if label:
+            banks.setdefault(label, qs)
+    return banks if any_generated else _concept_banks(concepts)
+
+
 def _generate_expected_paths(settings, questions: list, concepts: list, relations: list) -> dict:
     """Claude-generate an expected reasoning path per question (for EDS scoring).
 
@@ -1795,11 +1870,16 @@ def _register_questions(app: FastAPI, deps) -> None:
 
                 simple = [{"id": c.get("id") or c.get("label", ""), "label": c.get("label", "")}
                           for c in concepts]
-                banks = _concept_banks(concepts)
-                variants = build_variants(simple, req.q_count, req.difficulty, req.exam_len)
-                for v in variants:
-                    v["questions"] = assemble_questions(v["distribution"], banks)
-                return {"status": "completed", "concept_count": len(simple), "variants": variants}
+                relations = graph.get("relations") or graph.get("edges") or []
+                # Generate questions fresh per assignment, grounded in the graph —
+                # not assembled from a static bank (see _generate_concept_banks).
+                banks = _generate_concept_banks(d["settings"], concepts, relations, req.difficulty)
+                # One streamlined variant (even coverage) — no competing angles to pick between.
+                variant = build_variants(simple, req.q_count, req.difficulty, req.exam_len)[0]
+                variant["title"] = variant["title"].split(" · ")[0]
+                variant["angle_label"] = None
+                variant["questions"] = assemble_questions(variant["distribution"], banks)
+                return {"status": "completed", "concept_count": len(simple), "variants": [variant]}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
