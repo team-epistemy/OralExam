@@ -1098,6 +1098,26 @@ def _query_courses(repo, org_id: str, owner: Optional[str] = None) -> list:
     return [{"course_id": str(r[0]), "course_name": r[1]} for r in rows]
 
 
+def _query_student_courses(repo, org_id: str, student_email: str) -> list:
+    """Courses a student can access: those with no roster (open) OR where the
+    student is enrolled — the same gate as assignment visibility, so the course
+    list and the assignments the student sees stay consistent."""
+    _ensure_enrollment_table(repo)
+    email = (student_email or "").strip().lower()
+    with repo.conn.cursor() as cur:
+        cur.execute(
+            """SELECT course_id, course_name FROM course c
+               WHERE c.org_id = %s
+                 AND (NOT EXISTS (SELECT 1 FROM enrollment e WHERE e.course_id = c.course_id)
+                      OR EXISTS (SELECT 1 FROM enrollment e
+                                 WHERE e.course_id = c.course_id AND e.student_email = %s))
+               ORDER BY course_name""",
+            (org_id, email),
+        )
+        rows = cur.fetchall()
+    return [{"course_id": str(r[0]), "course_name": r[1]} for r in rows]
+
+
 def _query_recent_uploads(repo, org_id: str, owner: Optional[str] = None) -> list:
     """Last 10 material_versions for this org; scoped to the owner's courses if set."""
     sql = """SELECT mv.material_version_id, mv.file_name, mv.status,
@@ -1180,7 +1200,9 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
                 caller = api.caller_for_org(x_user_id, x_role, x_org_name)
                 repo.set_tenant(caller.org_id)
 
-                courses = _query_courses(repo, caller.org_id)
+                # Roster-scoped: only courses the student is enrolled in (or open,
+                # rosterless courses) — not every course in the org.
+                courses = _query_student_courses(repo, caller.org_id, caller.user_id)
                 # Pass the student's email so the roster gate matches — without it
                 # student_email defaults to "", which matches no roster entry, so
                 # every course that HAS a roster has its assignments hidden.
