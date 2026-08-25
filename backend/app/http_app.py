@@ -1424,11 +1424,15 @@ def _register_graph(app: FastAPI, deps) -> None:
                     "Treat broad or introductory material sparsely, as a few high-level concepts; "
                     "for specific, quantitative, or formula-driven material capture concepts more "
                     "granularly. For EACH concept also write 4 oral-exam questions grounded strictly "
-                    "in the material that probe understanding of that concept, and identify the "
-                    "prerequisite relationships between concepts. "
+                    "in the material: THREE that probe understanding of that concept, and ONE "
+                    "CASE-BASED question that opens with a brief 1-2 sentence mini-case (a realistic "
+                    "scenario from the material's domain) and then asks the student to APPLY the "
+                    "concept to that case. Also identify the prerequisite relationships between "
+                    "concepts. "
                     "Return ONLY valid JSON, no prose, no markdown fences: "
                     '{"concepts": [{"label": "2-5 word noun phrase", "definition": "1 sentence", '
-                    '"abstraction_level": 0.5, "questions": ["...", "...", "...", "..."]}], '
+                    '"abstraction_level": 0.5, "questions": ["probe 1", "probe 2", "probe 3", '
+                    '"Mini-case: <1-2 sentence scenario>. <question applying the concept>"]}], '
                     '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
                     "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
                     "src is a prerequisite of dst. Labels are short noun phrases, no numbering."
@@ -1436,7 +1440,9 @@ def _register_graph(app: FastAPI, deps) -> None:
                 data = call_bedrock(
                     settings, system_prompt,
                     f"Domain: {req.domain}\n\n{combined}",
-                    max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.1,
+                    # Case-based questions are longer; give headroom so the JSON never
+                    # truncates. This runs at graph build (async), not on exam creation.
+                    max_tokens=8000, temperature=0.2,
                 )
                 concepts = data.get("concepts", [])
                 relations = data.get("relations", [])
@@ -1585,17 +1591,17 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
         for r in (relations or []) if r.get("src") and r.get("dst"))
     system_prompt = (
         "You are writing questions for a university ORAL exam, grounded ONLY in the "
-        "provided concept graph. For EACH concept listed, write exactly 2 distinct "
-        f"oral-exam questions that probe genuine understanding of that concept, emphasising {focus}. "
-        "Keep each question to a SINGLE short sentence (max ~20 words) — no preamble, "
-        "scenario, or restating the concept name. "
-        "Requirements: each question is open-ended (never yes/no), specific to the named "
-        "concept, answerable from the course concepts and their relationships, and phrased "
-        "the way an examiner would speak it aloud. Use the relationships to write "
-        "causal / 'why' / 'how does X affect Y' questions where appropriate. Do NOT invent "
-        "facts beyond the graph, and do NOT use a generic template. "
+        f"provided concept graph. For EACH concept listed, write exactly 2 questions emphasising {focus}: "
+        "the FIRST a single short sentence (max ~20 words) that probes understanding, with no "
+        "preamble or restating the concept name; the SECOND a CASE-BASED question that opens "
+        "with a brief one-sentence mini-case (a realistic scenario) and then asks the student "
+        "to apply the concept to it. "
+        "Both are open-ended (never yes/no), specific to the named concept, answerable from the "
+        "course concepts and their relationships, and phrased the way an examiner would speak "
+        "them aloud. Do NOT invent facts beyond the graph, and do NOT use a generic template. "
         "Return ONLY valid JSON, no prose, no markdown fences: "
-        '{"banks": [{"label": "<exact concept label>", "questions": ["q1","q2"]}]}'
+        '{"banks": [{"label": "<exact concept label>", '
+        '"questions": ["<short probe>", "Mini-case: <one-sentence scenario>. <question applying the concept>"]}]}'
     )
     user = (f"Difficulty focus: {focus}\n\n"
             f"Concepts:\n{concept_lines}\n\n"
