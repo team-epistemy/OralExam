@@ -138,8 +138,11 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
     import json as _json
     system_prompt = (
         "You are building the expected reasoning path for an oral exam question. "
-        "Given the question and related concepts, produce the causal chain "
-        "a strong student should demonstrate to receive full marks.\n\n"
+        "Given the question and related concepts, produce the CORE causal chain a "
+        "strong student should demonstrate. Keep it TIGHT — at most 5 nodes and at "
+        "most 5 edges, only the concepts and links this specific question needs "
+        "(a single oral answer can't cover more). Keep definitions and explanations "
+        "to one short sentence each.\n\n"
         "Return ONLY valid JSON, no prose:\n"
         '{"nodes": [{"label": "...", "definition": "1-sentence def"}], '
         '"edges": [{"src": "concept_A", "dst": "concept_B", "link_type": "CAUSES|ENABLES|PREVENTS|INCREASES|DECREASES", "explanation": "the mechanism"}], '
@@ -148,10 +151,12 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
     user_msg = (
         f"Question: {question_text}\n"
         f"Related concepts: {', '.join(concept_labels)}\n\n"
-        "Produce the expected reasoning path."
+        "Produce the expected reasoning path (at most 5 nodes and 5 edges)."
     )
     try:
-        return call_bedrock(settings, system_prompt, user_msg, max_tokens=2000, temperature=0.1)
+        # Bounded path + token headroom so this single call finishes fast and never
+        # truncates → no 3x retry, so the first answer to a question can't time out.
+        return call_bedrock(settings, system_prompt, user_msg, max_tokens=3000, temperature=0.1)
     except Exception:
         return {"nodes": [], "edges": [], "extensions": []}
 
