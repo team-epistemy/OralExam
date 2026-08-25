@@ -1944,23 +1944,24 @@ def _register_questions(app: FastAPI, deps) -> None:
 
                 simple = [{"id": c.get("id") or c.get("label", ""), "label": c.get("label", "")}
                           for c in concepts]
-                relations = graph.get("relations") or graph.get("edges") or []
-                # Jumpstart from the default question bank authored at graph-build
-                # time: instant, no LLM, so exam creation can't time out. Only spend
-                # a bounded LLM call to enrich when that stored bank is too sparse to
-                # build a good exam (e.g. an older graph built before question
-                # authoring, or a curated concept with no stored questions).
+                # Assemble from the default question bank authored at graph-build
+                # time. NO LLM call in the request path — instant, so exam creation
+                # can never hit a gateway timeout ("Load failed"). If a concept's
+                # stored bank is empty (an older graph, or a curated stub),
+                # assemble_questions falls back to a generic template for it; the
+                # `needs_rebuild` flag tells the professor to rebuild the concept
+                # graph, which authors real, case-based questions asynchronously.
                 banks = _concept_banks(concepts)
                 populated = sum(1 for c in concepts
                                 if (banks.get(c.get("id")) or banks.get(c.get("label"))))
-                if populated < max(1, (len(concepts) + 1) // 2):
-                    banks = _generate_concept_banks(d["settings"], concepts, relations, req.difficulty)
+                needs_rebuild = populated < max(1, (len(concepts) + 1) // 2)
                 # One streamlined variant (even coverage) — no competing angles to pick between.
                 variant = build_variants(simple, req.q_count, req.difficulty, req.exam_len)[0]
                 variant["title"] = variant["title"].split(" · ")[0]
                 variant["angle_label"] = None
                 variant["questions"] = assemble_questions(variant["distribution"], banks)
-                return {"status": "completed", "concept_count": len(simple), "variants": [variant]}
+                return {"status": "completed", "concept_count": len(simple),
+                        "variants": [variant], "needs_rebuild": needs_rebuild}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
