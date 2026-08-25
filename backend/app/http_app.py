@@ -1585,22 +1585,26 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
         for r in (relations or []) if r.get("src") and r.get("dst"))
     system_prompt = (
         "You are writing questions for a university ORAL exam, grounded ONLY in the "
-        "provided concept graph. For EACH concept listed, write 4 distinct oral-exam "
+        "provided concept graph. For EACH concept listed, write 3 distinct oral-exam "
         f"questions that probe genuine understanding of that concept, emphasising {focus}. "
+        "Keep each question to a SINGLE concise sentence — no preamble or scenario. "
         "Requirements: each question is open-ended (never yes/no), specific to the named "
         "concept, answerable from the course concepts and their relationships, and phrased "
         "the way an examiner would speak it aloud. Use the relationships to write "
         "causal / 'why' / 'how does X affect Y' questions where appropriate. Do NOT invent "
         "facts beyond the graph, and do NOT use a generic template. "
         "Return ONLY valid JSON, no prose, no markdown fences: "
-        '{"banks": [{"label": "<exact concept label>", "questions": ["q1","q2","q3","q4"]}]}'
+        '{"banks": [{"label": "<exact concept label>", "questions": ["q1","q2","q3"]}]}'
     )
     user = (f"Difficulty focus: {focus}\n\n"
             f"Concepts:\n{concept_lines}\n\n"
             f"Relationships:\n{rel_lines or '(none provided)'}")
     try:
+        # Generous token ceiling so the whole JSON returns in ONE call — truncation
+        # here yields invalid JSON, which call_bedrock retries 3x, and three large
+        # LLM calls blow past the 60s ALB idle timeout (surfaces as "Load failed").
         data = call_bedrock(settings, system_prompt, user,
-                            max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.6)
+                            max_tokens=8000, temperature=0.6)
     except Exception as exc:  # noqa: BLE001 - degrade to stored bank, assignment still works
         logger.warning("per-assignment question generation failed: %s", exc)
         return _concept_banks(concepts)
