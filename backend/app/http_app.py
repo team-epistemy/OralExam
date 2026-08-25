@@ -1585,16 +1585,17 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
         for r in (relations or []) if r.get("src") and r.get("dst"))
     system_prompt = (
         "You are writing questions for a university ORAL exam, grounded ONLY in the "
-        "provided concept graph. For EACH concept listed, write 3 distinct oral-exam "
-        f"questions that probe genuine understanding of that concept, emphasising {focus}. "
-        "Keep each question to a SINGLE concise sentence — no preamble or scenario. "
+        "provided concept graph. For EACH concept listed, write exactly 2 distinct "
+        f"oral-exam questions that probe genuine understanding of that concept, emphasising {focus}. "
+        "Keep each question to a SINGLE short sentence (max ~20 words) — no preamble, "
+        "scenario, or restating the concept name. "
         "Requirements: each question is open-ended (never yes/no), specific to the named "
         "concept, answerable from the course concepts and their relationships, and phrased "
         "the way an examiner would speak it aloud. Use the relationships to write "
         "causal / 'why' / 'how does X affect Y' questions where appropriate. Do NOT invent "
         "facts beyond the graph, and do NOT use a generic template. "
         "Return ONLY valid JSON, no prose, no markdown fences: "
-        '{"banks": [{"label": "<exact concept label>", "questions": ["q1","q2","q3"]}]}'
+        '{"banks": [{"label": "<exact concept label>", "questions": ["q1","q2"]}]}'
     )
     user = (f"Difficulty focus: {focus}\n\n"
             f"Concepts:\n{concept_lines}\n\n"
