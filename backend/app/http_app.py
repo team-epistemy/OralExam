@@ -1181,7 +1181,10 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
                 repo.set_tenant(caller.org_id)
 
                 courses = _query_courses(repo, caller.org_id)
-                assignments = _query_student_assignments(repo, caller.org_id)
+                # Pass the student's email so the roster gate matches — without it
+                # student_email defaults to "", which matches no roster entry, so
+                # every course that HAS a roster has its assignments hidden.
+                assignments = _query_student_assignments(repo, caller.org_id, caller.user_id)
 
                 return {
                     "courses": courses,
