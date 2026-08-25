@@ -1939,9 +1939,16 @@ def _register_questions(app: FastAPI, deps) -> None:
                 simple = [{"id": c.get("id") or c.get("label", ""), "label": c.get("label", "")}
                           for c in concepts]
                 relations = graph.get("relations") or graph.get("edges") or []
-                # Generate questions fresh per assignment, grounded in the graph —
-                # not assembled from a static bank (see _generate_concept_banks).
-                banks = _generate_concept_banks(d["settings"], concepts, relations, req.difficulty)
+                # Jumpstart from the default question bank authored at graph-build
+                # time: instant, no LLM, so exam creation can't time out. Only spend
+                # a bounded LLM call to enrich when that stored bank is too sparse to
+                # build a good exam (e.g. an older graph built before question
+                # authoring, or a curated concept with no stored questions).
+                banks = _concept_banks(concepts)
+                populated = sum(1 for c in concepts
+                                if (banks.get(c.get("id")) or banks.get(c.get("label"))))
+                if populated < max(1, (len(concepts) + 1) // 2):
+                    banks = _generate_concept_banks(d["settings"], concepts, relations, req.difficulty)
                 # One streamlined variant (even coverage) — no competing angles to pick between.
                 variant = build_variants(simple, req.q_count, req.difficulty, req.exam_len)[0]
                 variant["title"] = variant["title"].split(" · ")[0]
