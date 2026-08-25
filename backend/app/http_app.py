@@ -234,6 +234,95 @@ def _rebuild_graph_async(settings, org_id: str, course_id: str) -> None:
     threading.Thread(target=_work, daemon=True).start()
 
 
+# Shared extraction prompt: concepts + relationships + a per-concept question bank
+# (3 conceptual probes + 1 case-based question). Used by the async graph builder.
+_GRAPH_EXTRACTION_PROMPT = (
+    "You are building the concept map for an oral exam. From THIS course "
+    "material only, extract the core concepts a student would be examined on "
+    "(8 to 14). Do not introduce concepts that are not present in the material. "
+    "Treat broad or introductory material sparsely, as a few high-level concepts; "
+    "for specific, quantitative, or formula-driven material capture concepts more "
+    "granularly. For EACH concept also write 4 oral-exam questions grounded strictly "
+    "in the material: THREE that probe understanding of that concept, and ONE "
+    "CASE-BASED question that opens with a brief 1-2 sentence mini-case (a realistic "
+    "scenario from the material's domain) and then asks the student to APPLY the "
+    "concept to that case. Also identify the prerequisite relationships between "
+    "concepts. "
+    "Return ONLY valid JSON, no prose, no markdown fences: "
+    '{"concepts": [{"label": "2-5 word noun phrase", "definition": "1 sentence", '
+    '"abstraction_level": 0.5, "questions": ["probe 1", "probe 2", "probe 3", '
+    '"Mini-case: <1-2 sentence scenario>. <question applying the concept>"]}], '
+    '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
+    "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
+    "src is a prerequisite of dst. Labels are short noun phrases, no numbering."
+)
+
+
+def _build_graph_async(settings, org_id: str, course_id: str, domain: str = "general") -> None:
+    """(Re)build a course's concept graph WITH an authored question bank in a
+    background thread. The extraction LLM call is large and slow, so it must never
+    run on a web request (that is what caused the "Load failed" gateway timeouts).
+    Persists a fresh active graph version and clears is_stale when done.
+    """
+    import json as _json, threading, uuid as _uuid
+
+    def _work() -> None:
+        conn = None
+        try:
+            conn = factory.db_connection(settings)
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
+                conn.commit()
+                cur.execute("SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
+                            (course_id,))
+                chunks = [r[0] for r in cur.fetchall()]
+            if not chunks:
+                return
+            combined = "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH])
+            data = call_bedrock(settings, _GRAPH_EXTRACTION_PROMPT,
+                                f"Domain: {domain}\n\n{combined}",
+                                max_tokens=8000, temperature=0.2)
+            concepts = data.get("concepts", [])
+            relations = data.get("relations", [])
+            label_ids = build_node_ids(concepts)
+            for c in concepts:
+                c["id"] = label_ids.get(c.get("label", ""), "")
+                c["questions"] = [q for q in (c.get("questions") or []) if isinstance(q, str)][:4]
+            with conn.cursor() as cur:
+                cur.execute("UPDATE graph_version SET is_active = false "
+                            "WHERE org_id = %s AND course_id = %s", (org_id, course_id))
+                cur.execute(
+                    """INSERT INTO graph_version
+                       (version_id, org_id, course_id, graph_version, node_count, edge_count,
+                        validation_score, is_active, s3_key)
+                       VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
+                    (str(_uuid.uuid4()), org_id, course_id, len(concepts), len(relations),
+                     0.8, _json.dumps({"concepts": concepts, "relations": relations})),
+                )
+            conn.commit()
+            logger.info("Async graph build done for course %s: %d concepts (with question bank)",
+                        course_id[:8], len(concepts))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Async graph build failed for course %s: %s",
+                           course_id[:8], exc, exc_info=True)
+            # Clear the stale flag so the UI stops polling a build that won't finish.
+            if conn is not None:
+                try:
+                    conn.rollback()
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE graph_version SET is_stale = false "
+                                    "WHERE org_id = %s AND course_id = %s AND is_active = true",
+                                    (org_id, course_id))
+                    conn.commit()
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            if conn is not None:
+                conn.close()
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
 def _is_public(path: str) -> bool:
     """True when a route may be reached without a verified token."""
     return path == "/" or path.startswith(_PUBLIC_PATH_PREFIXES)
@@ -1391,9 +1480,14 @@ def _register_graph(app: FastAPI, deps) -> None:
         x_user_id: str = Header("operator"),
         x_role: str = Header("professor"),
     ):
-        """Synchronous graph build — calls Bedrock and stores result directly."""
-        import json as _json, uuid as _uuid
+        """Kick off an async graph (re)build with a freshly authored question bank.
 
+        Returns immediately: the extraction LLM call is large and slow, so it runs
+        in a background thread (see _build_graph_async) — this endpoint can never
+        hit the gateway timeout. The current graph is marked stale so the UI keeps
+        polling until the new version (with conceptual + case-based questions)
+        becomes active.
+        """
         def _do():
             d = deps()
             repo = _request_repo(d)
@@ -1402,82 +1496,25 @@ def _register_graph(app: FastAPI, deps) -> None:
                 caller = api.caller_for_org(x_user_id, x_role, x_org_name)
                 if caller.role != Role.PROFESSOR:
                     raise AuthorizationError("professor role required")
-
                 repo.set_tenant(caller.org_id)
-                settings = d["settings"]
 
                 with repo.conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM chunk WHERE course_id = %s", (course_id,))
+                    if not cur.fetchone()[0]:
+                        return {"status": "error",
+                                "message": "No material found. Upload materials first."}
+                    # Mark the current graph stale so the frontend keeps polling
+                    # until the freshly-built version replaces it.
                     cur.execute(
-                        "SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
-                        (course_id,),
-                    )
-                    chunks = [row[0] for row in cur.fetchall()]
-
-                if not chunks:
-                    return {"status": "error", "message": "No chunks found for course. Upload material first."}
-
-                combined = "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH])
-                system_prompt = (
-                    "You are building the concept map for an oral exam. From THIS course "
-                    "material only, extract the core concepts a student would be examined on "
-                    "(8 to 14). Do not introduce concepts that are not present in the material. "
-                    "Treat broad or introductory material sparsely, as a few high-level concepts; "
-                    "for specific, quantitative, or formula-driven material capture concepts more "
-                    "granularly. For EACH concept also write 4 oral-exam questions grounded strictly "
-                    "in the material: THREE that probe understanding of that concept, and ONE "
-                    "CASE-BASED question that opens with a brief 1-2 sentence mini-case (a realistic "
-                    "scenario from the material's domain) and then asks the student to APPLY the "
-                    "concept to that case. Also identify the prerequisite relationships between "
-                    "concepts. "
-                    "Return ONLY valid JSON, no prose, no markdown fences: "
-                    '{"concepts": [{"label": "2-5 word noun phrase", "definition": "1 sentence", '
-                    '"abstraction_level": 0.5, "questions": ["probe 1", "probe 2", "probe 3", '
-                    '"Mini-case: <1-2 sentence scenario>. <question applying the concept>"]}], '
-                    '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
-                    "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
-                    "src is a prerequisite of dst. Labels are short noun phrases, no numbering."
-                )
-                data = call_bedrock(
-                    settings, system_prompt,
-                    f"Domain: {req.domain}\n\n{combined}",
-                    # Case-based questions are longer; give headroom so the JSON never
-                    # truncates. This runs at graph build (async), not on exam creation.
-                    max_tokens=8000, temperature=0.2,
-                )
-                concepts = data.get("concepts", [])
-                relations = data.get("relations", [])
-
-                # Stamp stable slug ids and cap each concept's question bank at 4 (demo contract).
-                label_ids = build_node_ids(concepts)
-                for c in concepts:
-                    c["id"] = label_ids.get(c.get("label", ""), "")
-                    c["questions"] = [q for q in (c.get("questions") or []) if isinstance(q, str)][:4]
-
-                version_id = str(_uuid.uuid4())
-                # s3_key column repurposed to store graph JSON inline (no S3 for MVP)
-                graph_json = _json.dumps({"concepts": concepts, "relations": relations})
-                with repo.conn.cursor() as cur:
-                    # Deactivate old versions so only one graph is active per course
-                    cur.execute(
-                        "UPDATE graph_version SET is_active = false WHERE org_id = %s AND course_id = %s",
+                        "UPDATE graph_version SET is_stale = true "
+                        "WHERE org_id = %s AND course_id = %s AND is_active = true",
                         (caller.org_id, course_id),
-                    )
-                    cur.execute(
-                        """INSERT INTO graph_version
-                           (version_id, org_id, course_id, graph_version, node_count, edge_count,
-                            validation_score, is_active, s3_key)
-                           VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
-                        (version_id, caller.org_id, course_id, len(concepts), len(relations),
-                         0.8, graph_json),
                     )
                 repo.conn.commit()
 
-                return {
-                    "status": "completed",
-                    "node_count": len(concepts),
-                    "edge_count": len(relations),
-                    "concepts": concepts,
-                }
+                _build_graph_async(d["settings"], caller.org_id, course_id, req.domain)
+                return {"status": "building",
+                        "message": "Rebuilding the concept graph and question bank — this takes a moment."}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
