@@ -417,6 +417,9 @@ export default function TakeExam() {
     const Ctor = SR.SpeechRecognition || SR.webkitSpeechRecognition;
     if (!Ctor) { setMicNotice("Voice input isn't supported in this browser — try Chrome, Edge, or Safari. You can type your answer instead."); return; }
     if (listening) { stopMic(); return; }
+    // Student is taking the floor: cancel any question audio outright (not paused —
+    // it won't resume), so the examiner's voice doesn't talk over the answer.
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
     const rec: any = new Ctor();
     rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
     // Anchor dictation to whatever is in the box *now*; a fresh recognizer per
