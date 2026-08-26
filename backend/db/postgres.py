@@ -72,12 +72,15 @@ class PostgresRepository:
         return course
 
     def get_course(self, course_id: str) -> Optional[Course]:
-        """Look up a course by its UUID (for UUID→name display)."""
-        row = self._one("SELECT course_id, org_id, course_name FROM course"
+        """Look up a course by its UUID. Includes created_by — the ownership check
+        (_owns_course) compares it to the caller, so omitting it made every upload
+        fail with "professor role on this course required" even for the owner."""
+        row = self._one("SELECT course_id, org_id, course_name, created_by FROM course"
                         " WHERE course_id=%s", (course_id,))
         if not row:
             return None
-        return Course(course_id=str(row[0]), org_id=str(row[1]), course_name=row[2])
+        return Course(course_id=str(row[0]), org_id=str(row[1]), course_name=row[2],
+                      created_by=row[3])
 
     # ── material ──────────────────────────────────────────────────────────────
 
