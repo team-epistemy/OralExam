@@ -320,6 +320,44 @@ function ConceptGraphSVG({
 
 // ── Main Component ───────────────────────────────────────────────────────────
 
+// Make text speakable before sending it to TTS: convert math/greek symbols to
+// their spoken words, and strip formatting punctuation (markdown, brackets,
+// slashes) the voice would otherwise read aloud or garble. Sentence punctuation
+// (. , ; : ? !) and apostrophes are kept so pacing and contractions survive.
+const GREEK: Record<string, string> = {
+  'α': 'alpha', 'β': 'beta', 'γ': 'gamma', 'δ': 'delta', 'Δ': 'delta',
+  'ε': 'epsilon', 'θ': 'theta', 'κ': 'kappa', 'λ': 'lambda', 'μ': 'mu',
+  'ν': 'nu', 'ξ': 'xi', 'π': 'pi', 'ρ': 'rho', 'σ': 'sigma', 'τ': 'tau',
+  'φ': 'phi', 'χ': 'chi', 'ψ': 'psi', 'ω': 'omega', 'Ω': 'omega',
+  'Σ': 'sum of', 'Π': 'product of',
+};
+const OPS: Array<[RegExp, string]> = [
+  [/²/g, ' squared '], [/³/g, ' cubed '],
+  [/½/g, ' one half '], [/¼/g, ' one quarter '], [/¾/g, ' three quarters '],
+  [/≤/g, ' less than or equal to '], [/≥/g, ' greater than or equal to '],
+  [/≠/g, ' not equal to '], [/≈/g, ' approximately '], [/≡/g, ' equivalent to '],
+  [/±/g, ' plus or minus '], [/×/g, ' times '], [/÷/g, ' divided by '],
+  [/√/g, ' square root of '], [/∞/g, ' infinity '], [/∑/g, ' sum of '],
+  [/∏/g, ' product of '], [/∫/g, ' integral of '], [/∂/g, ' partial '],
+  [/∇/g, ' gradient '], [/∈/g, ' in '], [/∉/g, ' not in '],
+  [/∀/g, ' for all '], [/∃/g, ' there exists '], [/∝/g, ' proportional to '],
+  [/⇒/g, ' implies '], [/↔/g, ' if and only if '], [/→/g, ' to '],
+  [/[·∙•]/g, ' times '], [/°/g, ' degrees '], [/%/g, ' percent '],
+  [/&/g, ' and '], [/=/g, ' equals '], [/\^/g, ' to the power of '],
+  [/</g, ' less than '], [/>/g, ' greater than '],
+];
+function speechFriendly(raw: string): string {
+  if (!raw) return '';
+  let t = raw;
+  for (const [sym, word] of Object.entries(GREEK)) t = t.split(sym).join(` ${word} `);
+  for (const [re, word] of OPS) t = t.replace(re, word);
+  // Strip formatting punctuation the voice would read: markdown, brackets, slashes.
+  t = t.replace(/[*_`~#|{}()[\]\\/"]/g, ' ');
+  // Tidy spaces around kept sentence punctuation, then collapse whitespace.
+  t = t.replace(/\s+([,.;:?!])/g, '$1').replace(/\s+/g, ' ').trim();
+  return t;
+}
+
 export default function TakeExam() {
   const { assignmentId } = useParams<{ assignmentId: string }>();
   const navigate = useNavigate();
@@ -379,13 +417,14 @@ export default function TakeExam() {
   }, [assignmentId]);
 
   const speak = useCallback(async (text: string) => {
-    if (!ttsOn || !text) return;
+    const spoken = speechFriendly(text);
+    if (!ttsOn || !spoken) return;
     try {
       const token = localStorage.getItem('token');
       const resp = await fetch(`${API_BASE_URL}/api/tts`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text: spoken }),
       });
       if (!resp.ok) {
         // 503 = TTS not configured server-side. Make it honest instead of silent:
