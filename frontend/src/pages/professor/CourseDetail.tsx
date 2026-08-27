@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, BarChart3 } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
 import { listStudents, deleteCourse } from '../../api/courses';
+import { getCoursePerformance } from '../../api/performance';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 
 // Cytoscape is heavy — load it only when a graph is actually rendered.
@@ -25,14 +26,14 @@ interface Course {
   join_code?: string;
 }
 
-type Tab = 'materials' | 'graph' | 'assignments' | 'students';
+type Tab = 'materials' | 'graph' | 'assignments' | 'students' | 'performance';
 
 export default function CourseDetail() {
   const { courseId } = useParams<{ courseId: string }>();
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const [activeTab, setActiveTab] = useState<Tab>(
-    (['materials', 'graph', 'assignments', 'students'].includes(tabParam || '')
+    (['materials', 'graph', 'assignments', 'students', 'performance'].includes(tabParam || '')
       ? (tabParam as Tab)
       : 'materials'),
   );
@@ -41,7 +42,7 @@ export default function CourseDetail() {
   // switches to the Students tab even when the course page is already mounted.
   useEffect(() => {
     const t = searchParams.get('tab');
-    if (t && ['materials', 'graph', 'assignments', 'students'].includes(t)) {
+    if (t && ['materials', 'graph', 'assignments', 'students', 'performance'].includes(t)) {
       setActiveTab(t as Tab);
     }
   }, [searchParams]);
@@ -83,6 +84,7 @@ export default function CourseDetail() {
     { id: 'graph' as Tab, label: 'Concept Graph', icon: Network },
     { id: 'assignments' as Tab, label: 'Assignments', icon: ClipboardList },
     { id: 'students' as Tab, label: 'Students', icon: Users },
+    { id: 'performance' as Tab, label: 'Performance', icon: BarChart3 },
   ];
 
   return (
@@ -150,6 +152,7 @@ export default function CourseDetail() {
       {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
       {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
       {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
+      {activeTab === 'performance' && <PerformanceTab courseId={courseId!} />}
     </div>
   );
 }
@@ -770,6 +773,96 @@ function StudentsTab({ courseId }: { courseId: string }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Performance tab: anonymized class practice analytics ─────────────────────
+const _pct = (x: number) => `${Math.round((x || 0) * 100)}%`;
+const ASPECT_COLOR: Record<string, string> = {
+  recall: 'bg-blue-500', application: 'bg-purple-500', depth: 'bg-amber-500', authenticity: 'bg-green-500',
+};
+
+function PerformanceTab({ courseId }: { courseId: string }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['course-performance', courseId],
+    queryFn: () => getCoursePerformance(courseId),
+    enabled: !!courseId,
+  });
+
+  if (isLoading) {
+    return <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-sm text-gray-500">Loading performance…</div>;
+  }
+
+  const n = data?.practice_takers ?? 0;
+  if (!data || n === 0) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
+        <BarChart3 className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+        <h3 className="text-lg font-medium text-gray-900 mb-2">No practice attempts yet</h3>
+        <p className="text-sm text-gray-500 max-w-md mx-auto">
+          Once students complete a <span className="font-medium">practice test</span>, this shows anonymized class
+          performance — topic coverage and how many students reach recall, application, and in-depth understanding.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-900">Class practice performance</h3>
+        <span className="text-xs text-gray-500">Anonymized · n = {n} student{n === 1 ? '' : 's'}</span>
+      </div>
+
+      {/* Cognitive aspects */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <h4 className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-1">Cognitive aspects</h4>
+        <p className="text-xs text-gray-500 mb-4">Bar = share of students reaching the aspect; number is the class average.</p>
+        <div className="space-y-4">
+          {data.aspects.map((a) => (
+            <div key={a.key}>
+              <div className="flex items-center justify-between text-sm">
+                <span className="font-medium text-gray-800">{a.label}</span>
+                <span className="text-xs text-gray-500">{_pct(a.pct_students)} of students · avg {_pct(a.avg_score)}</span>
+              </div>
+              <p className="text-xs text-gray-400 mb-1">{a.description}</p>
+              <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full ${ASPECT_COLOR[a.key] ?? 'bg-blue-500'}`} style={{ width: _pct(a.pct_students) }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Topic coverage */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <h4 className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-1">Topic coverage</h4>
+        <p className="text-xs text-gray-500 mb-4">% of students who demonstrated each topic on the practice test.</p>
+        {data.topics.length === 0 ? (
+          <p className="text-sm text-gray-400">No graded topics yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {data.topics.map((t) => (
+              <div key={t.label} className="flex items-center gap-3">
+                <span className="text-sm text-gray-700 w-44 flex-shrink-0 truncate" title={t.label}>{t.label}</span>
+                <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full bg-blue-500" style={{ width: _pct(t.pct_students) }} />
+                </div>
+                <span className="text-xs font-mono text-gray-500 w-10 text-right">{_pct(t.pct_students)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p className="text-xs text-gray-400 leading-relaxed">
+        Aspects reflect the reasoning captured per answer: <span className="font-medium">Recall</span> = concepts named,
+        <span className="font-medium"> Application</span> = causal links / case scenarios,
+        <span className="font-medium"> In-depth</span> = novel insight,
+        <span className="font-medium"> Authenticity</span> = genuine reasoning. Mastery bar = {_pct(data.bar)}. All figures
+        are aggregated across students — no individual results are shown.
+      </p>
     </div>
   );
 }
