@@ -26,6 +26,7 @@ class InMemoryRepository:
         self._versions: Dict[str, MaterialVersion] = {}
         self._chunks: Dict[str, Chunk] = {}
         self._jobs: Dict[str, AsyncJob] = {}
+        self._sessions: Dict[str, dict] = {}
         self._org: Optional[str] = None
 
     def set_tenant(self, org_id: str) -> None:
@@ -56,6 +57,21 @@ class InMemoryRepository:
 
     def get_course(self, course_id: str) -> Optional[Course]:
         return self._courses.get(course_id)
+
+    def get_or_create_session(self, org_id: str, course_id: str,
+                              session_id: Optional[str] = None,
+                              session_date=None, created_by: Optional[str] = None) -> str:
+        """Reuse a session that belongs to the course, else create a new one."""
+        import uuid as _uuid
+        if session_id:
+            s = self._sessions.get(session_id)
+            if s and s["course_id"] == course_id and s["org_id"] == org_id:
+                return session_id
+        new_id = str(_uuid.uuid4())
+        self._sessions[new_id] = {"session_id": new_id, "course_id": course_id,
+                                  "org_id": org_id, "session_date": session_date,
+                                  "created_by": created_by}
+        return new_id
 
     def _guard(self, org_id: str) -> None:
         """Emulate RLS: refuse cross-org access when a tenant is set."""

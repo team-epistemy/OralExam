@@ -100,6 +100,12 @@ def migrate() -> None:
             print(f"applying {migration_010.name} ...")
             cur.execute(migration_010.read_text())
 
+        # Always apply migration_011 (material.session_id; idempotent)
+        migration_011 = db_dir / "migration_011_material_session.sql"
+        if migration_011.exists():
+            print(f"applying {migration_011.name} ...")
+            cur.execute(migration_011.read_text())
+
     conn.commit()
     print("all schemas applied")
 

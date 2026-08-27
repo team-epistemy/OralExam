@@ -684,11 +684,22 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                            ORDER BY session_date DESC NULLS LAST, created_at DESC""",
                         (course_id, caller.org_id))
                     rows = cur.fetchall()
+                    # Files attached to each session (a material maps to a session).
+                    cur.execute(
+                        """SELECT session_id, material_id, display_name FROM material
+                           WHERE course_id = %s::uuid AND org_id = %s::uuid
+                                 AND session_id IS NOT NULL""",
+                        (course_id, caller.org_id))
+                    mats: dict = {}
+                    for sid, mid, name in cur.fetchall():
+                        mats.setdefault(str(sid), []).append(
+                            {"material_id": str(mid), "display_name": name})
                 return {"sessions": [
                     {"session_id": str(r[0]),
                      "session_date": r[1].isoformat() if r[1] else None,
                      "session_document": r[2],
-                     "created_at": r[3].isoformat() if r[3] else None}
+                     "created_at": r[3].isoformat() if r[3] else None,
+                     "materials": mats.get(str(r[0]), [])}
                     for r in rows]}
             finally:
                 _release_repo(d, repo)

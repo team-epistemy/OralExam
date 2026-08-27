@@ -64,10 +64,14 @@ class MaterialsApi:
         self.repo.set_tenant(org_id)  # RLS is FORCEd: bind tenant before course create
         # user_id owns the course on first creation (existing courses keep their owner).
         course = self.repo.get_or_create_course(org_id, req.course_name, user_id)
+        # A material is always mapped to a class session — reuse the chosen one, or
+        # instantiate one now if none was given (or it doesn't belong to the course).
+        session_id = self.repo.get_or_create_session(
+            org_id, course.course_id, req.session_id, req.session_date, user_id)
         caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         inner = PresignRequest(file_name=req.file_name, mime_type=req.mime_type,
                                bytes=req.bytes, material_id=req.material_id,
-                               display_name=req.display_name)
+                               display_name=req.display_name, session_id=session_id)
         return self.presign(caller, course.course_id, inner)
 
     def _require_professor(self, caller: Caller, course_id: str) -> None:
@@ -81,7 +85,8 @@ class MaterialsApi:
             return self._existing_material(caller, course_id, req.material_id)
         material = Material(course_id=course_id, org_id=caller.org_id,
                             created_by=caller.user_id,
-                            display_name=(req.display_name or "").strip() or req.file_name)
+                            display_name=(req.display_name or "").strip() or req.file_name,
+                            session_id=getattr(req, "session_id", None))
         return self.repo.create_material(material)
 
     def _existing_material(self, caller, course_id, material_id) -> Material:
@@ -108,7 +113,8 @@ class MaterialsApi:
             material_id=material.material_id,
             material_version_id=version.material_version_id,
             version_no=version.version_no, s3_key=version.s3_key, upload_url=url,
-            course_id=str(material.course_id or ""))
+            course_id=str(material.course_id or ""),
+            session_id=str(material.session_id or ""))
 
     def register(self, caller: Caller, version_id: str) -> AsyncJob:
         """Confirm the object exists, flip to uploaded, enqueue an ingest job."""

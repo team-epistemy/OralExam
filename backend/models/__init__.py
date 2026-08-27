@@ -92,6 +92,8 @@ class Material(BaseModel):
     org_id: str
     created_by: str
     display_name: str
+    # Every material is mapped to a class session (created on upload if absent).
+    session_id: Optional[str] = None
     current_version_id: Optional[str] = None
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
@@ -177,6 +179,8 @@ class PresignRequest(BaseModel):
     material_id: Optional[str] = None
     # Optional human label (e.g. topic / class session); falls back to file_name.
     display_name: Optional[str] = None
+    # Class session this material belongs to (resolved/created before presign).
+    session_id: Optional[str] = None
 
 
 class IngestRequest(BaseModel):
@@ -190,6 +194,10 @@ class IngestRequest(BaseModel):
     material_id: Optional[str] = None
     # Optional topic / class-session label shown as the material's display name.
     display_name: Optional[str] = None
+    # The class session to attach the material to. If omitted (or not found), a
+    # new session is created — a material is always mapped to a session.
+    session_id: Optional[str] = None
+    session_date: Optional[date] = None
 
 
 class PresignResponse(BaseModel):
@@ -199,6 +207,7 @@ class PresignResponse(BaseModel):
     s3_key: str
     upload_url: str
     course_id: str = ""
+    session_id: str = ""
     fields: Dict[str, Any] = Field(default_factory=dict)
 
 

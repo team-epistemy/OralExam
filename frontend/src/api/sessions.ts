@@ -1,10 +1,16 @@
 import { get, post, put, del } from './client';
 
+export interface SessionMaterial {
+  material_id: string;
+  display_name: string;
+}
+
 export interface ClassSession {
   session_id: string;
   session_date: string | null;      // ISO date (YYYY-MM-DD) or null
   session_document: string | null;
   created_at?: string | null;
+  materials?: SessionMaterial[];     // files attached to this session
 }
 
 export interface SessionBody {

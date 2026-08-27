@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { CheckCircle, AlertCircle, Loader2, Network } from 'lucide-react';
 import { uploadMaterial, listVersions } from '../../api/materials';
 import type { MaterialVersion } from '../../api/materials';
 import { setSyllabus } from '../../api/courses';
+import { listSessions } from '../../api/sessions';
 import FileUpload from '../../components/FileUpload';
 import { DEFAULT_ORG } from '../../config';
 
@@ -15,6 +17,18 @@ export default function UploadMaterial() {
   const coursePrefilled = !!params.get('course');
   const [courseName, setCourseName] = useState(params.get('course') || '');
   const [topic, setTopic] = useState('');
+  // A material is always mapped to a class session. When the course is known we
+  // let the professor pick an existing session or create one; otherwise the
+  // backend instantiates a session automatically.
+  const preselectedSession = params.get('sessionId') || '';
+  const [sessionChoice, setSessionChoice] = useState(preselectedSession || 'new');
+  const [newSessionDate, setNewSessionDate] = useState('');
+  const { data: sessionsData } = useQuery({
+    queryKey: ['course-sessions', syllabusCourseId],
+    queryFn: () => listSessions(syllabusCourseId),
+    enabled: !!syllabusCourseId,
+  });
+  const sessions = sessionsData?.sessions ?? [];
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -32,7 +46,9 @@ export default function UploadMaterial() {
     setVersions([]);
 
     try {
-      const result = await uploadMaterial(orgName, courseName, files[0], setProgress, topic);
+      const sessionId = sessionChoice !== 'new' ? sessionChoice : undefined;
+      const sessionDate = sessionChoice === 'new' ? (newSessionDate || undefined) : undefined;
+      const result = await uploadMaterial(orgName, courseName, files[0], setProgress, topic, sessionId, sessionDate);
       setUploadResult(result);
       setSuccess(true);
 
@@ -142,6 +158,37 @@ export default function UploadMaterial() {
           />
           <p className="text-xs text-gray-400 mt-1">Optional label for this material. Defaults to the file name if left blank.</p>
         </div>
+
+        {/* Class session — a material is always attached to a session */}
+        {syllabusCourseId && (
+          <div>
+            <label htmlFor="session" className="block text-sm font-medium text-gray-700 mb-1">Class Session</label>
+            <select
+              id="session"
+              value={sessionChoice}
+              onChange={(e) => setSessionChoice(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="new">+ New session</option>
+              {sessions.map((s) => (
+                <option key={s.session_id} value={s.session_id}>
+                  {s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'Undated session'}
+                  {s.session_document ? ` — ${s.session_document.slice(0, 40)}` : ''}
+                </option>
+              ))}
+            </select>
+            {sessionChoice === 'new' && (
+              <input
+                type="date"
+                value={newSessionDate}
+                onChange={(e) => setNewSessionDate(e.target.value)}
+                className="mt-2 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                aria-label="New session date (optional)"
+              />
+            )}
+            <p className="text-xs text-gray-400 mt-1">This material is attached to a class session — pick an existing one or create a new session (optional date).</p>
+          </div>
+        )}
 
         {/* File upload */}
         <div>

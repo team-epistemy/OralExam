@@ -154,7 +154,7 @@ export default function CourseDetail() {
       {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
       {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
       {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
-      {activeTab === 'sessions' && <SessionsTab courseId={courseId!} />}
+      {activeTab === 'sessions' && <SessionsTab courseId={courseId!} courseName={course?.name || ''} />}
       {activeTab === 'performance' && <PerformanceTab courseId={courseId!} />}
     </div>
   );
@@ -871,7 +871,7 @@ function PerformanceTab({ courseId }: { courseId: string }) {
 }
 
 // ── Sessions tab: a course maps to N class sessions ──────────────────────────
-function SessionsTab({ courseId }: { courseId: string }) {
+function SessionsTab({ courseId, courseName }: { courseId: string; courseName: string }) {
   const queryClient = useQueryClient();
   const [date, setDate] = useState('');
   const [doc, setDoc] = useState('');
@@ -955,11 +955,26 @@ function SessionsTab({ courseId }: { courseId: string }) {
                     {s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'No date'}
                   </p>
                   {s.session_document && (
-                    <p className="text-sm text-gray-600 mt-0.5 whitespace-pre-wrap break-words line-clamp-4">{s.session_document}</p>
+                    <p className="text-sm text-gray-600 mt-0.5 whitespace-pre-wrap break-words line-clamp-3">{s.session_document}</p>
                   )}
+                  {(s.materials?.length ?? 0) > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {s.materials!.map((m) => (
+                        <span key={m.material_id} className="inline-flex items-center gap-1 text-xs bg-gray-100 text-gray-700 rounded px-2 py-0.5">
+                          <FileText className="w-3 h-3 flex-shrink-0" /> <span className="truncate max-w-[180px]">{m.display_name}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <Link
+                    to={`/professor/upload?course=${encodeURIComponent(courseName)}&courseId=${courseId}&sessionId=${s.session_id}`}
+                    className="mt-2 inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    <Upload className="w-3.5 h-3.5" /> Upload file to this session
+                  </Link>
                 </div>
                 <button
-                  onClick={() => { if (confirm('Delete this session?')) removeMutation.mutate(s.session_id); }}
+                  onClick={() => { if (confirm('Delete this session? Its attached files are detached, not deleted.')) removeMutation.mutate(s.session_id); }}
                   disabled={removeMutation.isPending}
                   className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
                   title="Delete session"

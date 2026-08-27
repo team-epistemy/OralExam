@@ -84,27 +84,50 @@ class PostgresRepository:
 
     # ── material ──────────────────────────────────────────────────────────────
 
+    def get_or_create_session(self, org_id: str, course_id: str,
+                              session_id: Optional[str] = None,
+                              session_date=None, created_by: Optional[str] = None) -> str:
+        """Return a class session for the course — reuse the given one if it
+        exists, else create a new one. A material always maps to a session."""
+        import uuid as _uuid
+        if session_id:
+            row = self._one(
+                "SELECT session_id FROM class_session"
+                " WHERE session_id=%s AND course_id=%s AND org_id=%s",
+                (session_id, course_id, org_id))
+            if row:
+                return str(row[0])
+        new_id = str(_uuid.uuid4())
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO class_session (session_id, course_id, org_id, session_date, created_by)"
+                " VALUES (%s,%s,%s,%s,%s)",
+                (new_id, course_id, org_id, session_date, created_by))
+        self.conn.commit()
+        return new_id
+
     def create_material(self, material: Material) -> Material:
         with self.conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO material (material_id, course_id, org_id, created_by,"
-                " display_name) VALUES (%s,%s,%s,%s,%s)",
+                " display_name, session_id) VALUES (%s,%s,%s,%s,%s,%s)",
                 (material.material_id, material.course_id, material.org_id,
-                 material.created_by, material.display_name))
+                 material.created_by, material.display_name, material.session_id))
         self.conn.commit()
         return material
 
     def get_material(self, material_id: str) -> Optional[Material]:
         row = self._one(
             "SELECT material_id, course_id, org_id, created_by, display_name,"
-            " current_version_id FROM material WHERE material_id=%s", (material_id,))
+            " current_version_id, session_id FROM material WHERE material_id=%s", (material_id,))
         return self._material_from_row(row) if row else None
 
     def _material_from_row(self, row) -> Material:
         return Material(material_id=str(row[0]), course_id=str(row[1]),
                         org_id=str(row[2]), created_by=str(row[3]),
                         display_name=row[4],
-                        current_version_id=str(row[5]) if row[5] else None)
+                        current_version_id=str(row[5]) if row[5] else None,
+                        session_id=str(row[6]) if len(row) > 6 and row[6] else None)
 
     def list_materials(self, course_id: str) -> List[Material]:
         rows = self._all(
