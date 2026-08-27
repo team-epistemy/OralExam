@@ -1,7 +1,7 @@
 """M3 Pydantic schemas: enums, domain rows, and tool I/O models."""
 from __future__ import annotations
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from enum import Enum
 from typing import Optional, List, Dict, Any
 
@@ -68,6 +68,18 @@ class Course(BaseModel):
     course_name: str
     title: Optional[str] = None
     # Owning professor's email (intra-org isolation); NULL for legacy/orphan courses.
+    created_by: Optional[str] = None
+    created_at: datetime = Field(default_factory=_now)
+
+
+class ClassSession(BaseModel):
+    """A class session belonging to a course (a course maps to N sessions)."""
+
+    session_id: str = Field(default_factory=_uuid)
+    course_id: str
+    org_id: str
+    session_date: Optional[date] = None       # optional
+    session_document: Optional[str] = None     # the session's document (content or reference)
     created_by: Optional[str] = None
     created_at: datetime = Field(default_factory=_now)
 

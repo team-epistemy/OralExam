@@ -41,6 +41,7 @@ from backend.app.exam_questions import (
     DIFFICULTY_FOCUS,
 )
 from backend.app.graph_curation import apply_curation
+from backend.app.performance import aggregate_performance
 from backend.db.postgres import PostgresRepository
 
 logger = logging.getLogger(__name__)
@@ -1354,10 +1355,6 @@ def _query_course_performance(repo, org_id: str, course_id: str) -> dict:
         class average.
       - topics: for each concept examined, the % of students who demonstrated it.
     """
-    import json as _json
-    from collections import defaultdict
-    BAR = 0.5
-
     # Pretty topic names: map stored concept id/label -> the graph's label.
     graph = _query_graph_version(repo, org_id, course_id)
     label_of: dict = {}
@@ -1384,59 +1381,8 @@ def _query_course_performance(repo, org_id: str, course_id: str) -> dict:
         )
         rows = cur.fetchall()
 
-    per_aspect: dict = defaultdict(lambda: {"recall": [], "application": [], "depth": [], "authenticity": []})
-    per_topic: dict = defaultdict(lambda: defaultdict(list))
-    for student_id, concept_ids, comp in rows:
-        if not isinstance(comp, dict):
-            continue
-        node = float(comp.get("node_score") or 0)
-        per_aspect[student_id]["recall"].append(node)
-        per_aspect[student_id]["application"].append(float(comp.get("edge_score") or 0))
-        per_aspect[student_id]["depth"].append(float(comp.get("gen_score") or 0))
-        per_aspect[student_id]["authenticity"].append(float(comp.get("r_gate") or 0))
-        topics = concept_ids if isinstance(concept_ids, list) else (_json.loads(concept_ids) if concept_ids else [])
-        for t in topics:
-            per_topic[student_id][str(t)].append(node)
-
-    students = list(per_aspect.keys())
-    n = len(students)
-
-    def _avg(xs):
-        return sum(xs) / len(xs) if xs else 0.0
-
-    aspects_meta = [
-        ("recall", "Recall", "Named and defined the right concepts"),
-        ("application", "Application", "Connected and applied concepts (incl. case scenarios)"),
-        ("depth", "In-depth Understanding", "Went beyond the basics with novel insight"),
-        ("authenticity", "Authenticity", "Reasoning was genuine, not guessed"),
-    ]
-    aspects = []
-    for key, label, desc in aspects_meta:
-        per_student_avg = [_avg(per_aspect[s][key]) for s in students]
-        pct = (sum(1 for a in per_student_avg if a >= BAR) / n) if n else 0.0
-        aspects.append({"key": key, "label": label, "description": desc,
-                        "pct_students": round(pct, 3), "avg_score": round(_avg(per_student_avg), 3)})
-
-    all_topics: set = set()
-    for s in students:
-        all_topics.update(per_topic[s].keys())
-    topics = []
-    for t in all_topics:
-        scores, demoed = [], 0
-        for s in students:
-            ts = per_topic[s].get(t)
-            if ts:
-                a = _avg(ts)
-                scores.append(a)
-                if a >= BAR:
-                    demoed += 1
-        topics.append({"label": label_of.get(t, t),
-                       "pct_students": round((demoed / n), 3) if n else 0.0,
-                       "avg_score": round(_avg(scores), 3),
-                       "n_attempted": len(scores)})
-    topics.sort(key=lambda x: (-x["pct_students"], x["label"]))
-
-    return {"practice_takers": n, "bar": BAR, "aspects": aspects, "topics": topics}
+    # Deterministic aggregation lives in the web-free performance module (tested).
+    return aggregate_performance(rows, label_of, bar=0.5)
 
 
 def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
