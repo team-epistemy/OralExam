@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
@@ -515,6 +515,12 @@ class EnrollRequest(BaseModel):
     emails: List[str] = Field(default_factory=list)
 
 
+class SessionRequest(BaseModel):
+    """Body to create or update a class session; both fields optional."""
+    session_date: Optional[date] = None
+    session_document: Optional[str] = Field(default=None, max_length=100000)
+
+
 class SyllabusSetRequest(BaseModel):
     """POST body marking an already-uploaded material as the course syllabus."""
     material_id: Optional[str] = None
@@ -657,6 +663,101 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 return _query_course_performance(repo, caller.org_id, course_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── Class sessions (a course maps to N sessions) ──────────────────────────
+    @app.get(R.COURSE_SESSIONS)
+    def list_sessions(course_id: str, x_org_name: str = Header(...),
+                      x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        """List a course's class sessions (most recent first)."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT session_id, session_date, session_document, created_at
+                           FROM class_session
+                           WHERE course_id = %s::uuid AND org_id = %s::uuid
+                           ORDER BY session_date DESC NULLS LAST, created_at DESC""",
+                        (course_id, caller.org_id))
+                    rows = cur.fetchall()
+                return {"sessions": [
+                    {"session_id": str(r[0]),
+                     "session_date": r[1].isoformat() if r[1] else None,
+                     "session_document": r[2],
+                     "created_at": r[3].isoformat() if r[3] else None}
+                    for r in rows]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.COURSE_SESSIONS)
+    def create_session(course_id: str, req: SessionRequest, x_org_name: str = Header(...),
+                       x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        """Create a class session on the course."""
+        import uuid as _uuid
+
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                sid = str(_uuid.uuid4())
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO class_session
+                           (session_id, course_id, org_id, session_date, session_document, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s)""",
+                        (sid, course_id, caller.org_id, req.session_date,
+                         req.session_document, caller.user_id))
+                repo.conn.commit()
+                return {"session_id": sid,
+                        "session_date": req.session_date.isoformat() if req.session_date else None,
+                        "session_document": req.session_document}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.put(R.COURSE_SESSION)
+    def update_session(course_id: str, session_id: str, req: SessionRequest,
+                       x_org_name: str = Header(...), x_user_id: str = Header("operator"),
+                       x_role: str = Header("professor")):
+        """Update a class session's date and/or document."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE class_session SET session_date = %s, session_document = %s
+                           WHERE session_id = %s::uuid AND course_id = %s::uuid AND org_id = %s::uuid""",
+                        (req.session_date, req.session_document, session_id, course_id, caller.org_id))
+                    updated = cur.rowcount
+                repo.conn.commit()
+                if not updated:
+                    return {"status": "error", "message": "session not found"}
+                return {"status": "updated", "session_id": session_id}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.delete(R.COURSE_SESSION)
+    def delete_session(course_id: str, session_id: str, x_org_name: str = Header(...),
+                       x_user_id: str = Header("operator"), x_role: str = Header("professor")):
+        """Delete a class session."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """DELETE FROM class_session
+                           WHERE session_id = %s::uuid AND course_id = %s::uuid AND org_id = %s::uuid""",
+                        (session_id, course_id, caller.org_id))
+                repo.conn.commit()
+                return {"status": "deleted", "session_id": session_id}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

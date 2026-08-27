@@ -1,0 +1,29 @@
+import { get, post, put, del } from './client';
+
+export interface ClassSession {
+  session_id: string;
+  session_date: string | null;      // ISO date (YYYY-MM-DD) or null
+  session_document: string | null;
+  created_at?: string | null;
+}
+
+export interface SessionBody {
+  session_date: string | null;
+  session_document: string | null;
+}
+
+export function listSessions(courseId: string): Promise<{ sessions: ClassSession[] }> {
+  return get<{ sessions: ClassSession[] }>(`/api/courses/${courseId}/sessions`);
+}
+
+export function createSession(courseId: string, body: SessionBody): Promise<ClassSession> {
+  return post<ClassSession>(`/api/courses/${courseId}/sessions`, body);
+}
+
+export function updateSession(courseId: string, sessionId: string, body: SessionBody): Promise<{ status: string }> {
+  return put<{ status: string }>(`/api/courses/${courseId}/sessions/${sessionId}`, body);
+}
+
+export function deleteSession(courseId: string, sessionId: string): Promise<{ status: string }> {
+  return del<{ status: string }>(`/api/courses/${courseId}/sessions/${sessionId}`);
+}

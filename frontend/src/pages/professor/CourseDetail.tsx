@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, BarChart3 } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, BarChart3, Calendar, Plus } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
 import { listStudents, deleteCourse } from '../../api/courses';
 import { getCoursePerformance } from '../../api/performance';
+import { listSessions, createSession, deleteSession, type ClassSession } from '../../api/sessions';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 
 // Cytoscape is heavy — load it only when a graph is actually rendered.
@@ -26,14 +27,14 @@ interface Course {
   join_code?: string;
 }
 
-type Tab = 'materials' | 'graph' | 'assignments' | 'students' | 'performance';
+type Tab = 'materials' | 'graph' | 'assignments' | 'students' | 'sessions' | 'performance';
 
 export default function CourseDetail() {
   const { courseId } = useParams<{ courseId: string }>();
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const [activeTab, setActiveTab] = useState<Tab>(
-    (['materials', 'graph', 'assignments', 'students', 'performance'].includes(tabParam || '')
+    (['materials', 'graph', 'assignments', 'students', 'sessions', 'performance'].includes(tabParam || '')
       ? (tabParam as Tab)
       : 'materials'),
   );
@@ -42,7 +43,7 @@ export default function CourseDetail() {
   // switches to the Students tab even when the course page is already mounted.
   useEffect(() => {
     const t = searchParams.get('tab');
-    if (t && ['materials', 'graph', 'assignments', 'students', 'performance'].includes(t)) {
+    if (t && ['materials', 'graph', 'assignments', 'students', 'sessions', 'performance'].includes(t)) {
       setActiveTab(t as Tab);
     }
   }, [searchParams]);
@@ -84,6 +85,7 @@ export default function CourseDetail() {
     { id: 'graph' as Tab, label: 'Concept Graph', icon: Network },
     { id: 'assignments' as Tab, label: 'Assignments', icon: ClipboardList },
     { id: 'students' as Tab, label: 'Students', icon: Users },
+    { id: 'sessions' as Tab, label: 'Sessions', icon: Calendar },
     { id: 'performance' as Tab, label: 'Performance', icon: BarChart3 },
   ];
 
@@ -152,6 +154,7 @@ export default function CourseDetail() {
       {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
       {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
       {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
+      {activeTab === 'sessions' && <SessionsTab courseId={courseId!} />}
       {activeTab === 'performance' && <PerformanceTab courseId={courseId!} />}
     </div>
   );
@@ -863,6 +866,111 @@ function PerformanceTab({ courseId }: { courseId: string }) {
         <span className="font-medium"> Authenticity</span> = genuine reasoning. Mastery bar = {_pct(data.bar)}. All figures
         are aggregated across students — no individual results are shown.
       </p>
+    </div>
+  );
+}
+
+// ── Sessions tab: a course maps to N class sessions ──────────────────────────
+function SessionsTab({ courseId }: { courseId: string }) {
+  const queryClient = useQueryClient();
+  const [date, setDate] = useState('');
+  const [doc, setDoc] = useState('');
+  const [error, setError] = useState('');
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['course-sessions', courseId],
+    queryFn: () => listSessions(courseId),
+    enabled: !!courseId,
+  });
+  const sessions: ClassSession[] = data?.sessions ?? [];
+
+  const addMutation = useMutation({
+    mutationFn: () => createSession(courseId, { session_date: date || null, session_document: doc.trim() || null }),
+    onSuccess: () => {
+      setDate(''); setDoc(''); setError('');
+      queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] });
+    },
+    onError: () => setError('Could not add the session. Please try again.'),
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (sessionId: string) => deleteSession(courseId, sessionId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] }),
+  });
+
+  return (
+    <div className="space-y-4">
+      {/* Add a session */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <h3 className="text-sm font-medium text-gray-700 mb-1">Add a class session</h3>
+        <p className="text-xs text-gray-500 mb-4">A session has an optional date and a document (paste notes, an outline, or a link).</p>
+        <div className="grid grid-cols-1 sm:grid-cols-[160px_1fr] gap-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Date (optional)</label>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Session document</label>
+            <textarea
+              value={doc}
+              onChange={(e) => setDoc(e.target.value)}
+              rows={3}
+              placeholder="Session notes, outline, or a link…"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+        {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+        <div className="mt-3">
+          <button
+            onClick={() => addMutation.mutate()}
+            disabled={addMutation.isPending || (!date && !doc.trim())}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          >
+            {addMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            Add session
+          </button>
+        </div>
+      </div>
+
+      {/* Existing sessions */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <h3 className="text-sm font-medium text-gray-700 mb-3">Sessions ({sessions.length})</h3>
+        {isLoading ? (
+          <p className="text-sm text-gray-400">Loading…</p>
+        ) : sessions.length === 0 ? (
+          <p className="text-sm text-gray-400">No sessions yet.</p>
+        ) : (
+          <div className="divide-y divide-gray-100">
+            {sessions.map((s) => (
+              <div key={s.session_id} className="flex items-start gap-3 py-3">
+                <Calendar className="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900">
+                    {s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'No date'}
+                  </p>
+                  {s.session_document && (
+                    <p className="text-sm text-gray-600 mt-0.5 whitespace-pre-wrap break-words line-clamp-4">{s.session_document}</p>
+                  )}
+                </div>
+                <button
+                  onClick={() => { if (confirm('Delete this session?')) removeMutation.mutate(s.session_id); }}
+                  disabled={removeMutation.isPending}
+                  className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+                  title="Delete session"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
