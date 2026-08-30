@@ -8,6 +8,7 @@ from backend.models import (
     PresignRequest, PresignResponse, IngestRequest, SourceType,
     VersionStatus, JobStatus,
 )
+from backend.constants import MAX_UPLOAD_BYTES
 from backend.db.repository import Repository
 from backend.storage import build_s3_key
 from backend.storage.s3_client import S3Storage
@@ -48,6 +49,14 @@ class MaterialsApi:
                 req: PresignRequest) -> PresignResponse:
         """Authorize, mint/resolve material, create a pending version + URL."""
         self._require_professor(caller, course_id)
+        # Reject oversized uploads up front with a stated limit — a huge file
+        # would otherwise upload and then hang/time out the ingest pipeline.
+        if req.bytes and req.bytes > MAX_UPLOAD_BYTES:
+            got_mb = req.bytes // (1024 * 1024)
+            lim_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+            raise ValueError(
+                f'"{req.file_name}" is {got_mb} MB, over the {lim_mb} MB per-file limit. '
+                'Please split it into smaller files.')
         self.repo.set_tenant(caller.org_id)
         material = self._resolve_material(caller, course_id, req)
         version = self._new_version(caller, course_id, material, req)

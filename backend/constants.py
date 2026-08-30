@@ -48,6 +48,16 @@ EDS_BETA = 0.6
 # Generativity bonus weight for novel extensions beyond expected path.
 EDS_GAMMA = 0.15
 
+# -- Upload / Ingestion Limits -------------------------------------------------
+
+# Largest single file accepted for upload. Above this, presign rejects with a
+# stated limit instead of letting a huge upload hang the ingest pipeline.
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
+# Largest PDF (in pages) the text extractor will process. Above this, ingestion
+# fails with a stated limit rather than timing out with no message.
+MAX_PDF_PAGES = 300
+
 # -- Organization Defaults -----------------------------------------------------
 
 # Default organization name used when no explicit org header is provided.

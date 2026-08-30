@@ -21,6 +21,14 @@ from backend.bedrock_helper import call_bedrock
 logger = logging.getLogger(__name__)
 
 
+class IngestError(Exception):
+    """A user-actionable ingestion failure (bad/empty/oversized file).
+
+    The worker records the message on the material_version so the professor
+    sees exactly which file failed and why, instead of a silent partial ingest.
+    """
+
+
 class IngestPipeline:
     """Runs one material version through every ingestion step."""
 
@@ -47,7 +55,21 @@ class IngestPipeline:
         """Download bytes, extract structural units, build tenant-stamped chunks."""
         self._step(msg, VersionStatus.EXTRACTING, "extracting", 20)
         data = self.storage.get_bytes(msg.s3_key)
-        units = get_extractor(msg.source_type).extract(data)
+        name = version.file_name if version else msg.s3_key
+        try:
+            units = get_extractor(msg.source_type).extract(data)
+        except IngestError:
+            raise
+        except Exception as exc:
+            # Name the file so the failure is actionable (e.g. over the page limit).
+            raise IngestError(f'Could not read "{name}": {exc}') from exc
+        # No extractable text = silent-partial-ingest territory. Fail loudly with a
+        # reason instead of marking an empty document "ready" (issue P-S-1.3).
+        if not units:
+            raise IngestError(
+                f'No readable text found in "{name}". It looks like a scanned or '
+                'image-only PDF, and OCR is not enabled. Please upload a text-based '
+                'PDF or DOCX, or paste the text directly.')
         self._step(msg, VersionStatus.CHUNKING, "chunking", 45)
         return stamp_tenant(self.chunker.chunk(units), version)
 

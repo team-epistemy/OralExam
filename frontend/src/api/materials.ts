@@ -17,6 +17,7 @@ export interface MaterialVersion {
   file_name: string;
   source_type: string;
   created_at: string;
+  error?: { type?: string; message?: string } | null;
 }
 
 export interface Material {

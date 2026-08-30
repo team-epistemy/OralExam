@@ -38,7 +38,14 @@ async function handleResponse<T>(response: Response): Promise<T> {
       }
     }
     const errorBody = await response.text();
-    throw new ApiError(errorBody || response.statusText, response.status);
+    // FastAPI returns {"detail": "..."} — surface that human message rather than
+    // the raw JSON blob, so callers can show it directly (e.g. upload limits).
+    let message = errorBody || response.statusText;
+    try {
+      const parsed = JSON.parse(errorBody);
+      if (parsed && typeof parsed.detail === 'string') message = parsed.detail;
+    } catch { /* not JSON — keep the raw text */ }
+    throw new ApiError(message, response.status);
   }
   if (response.status === 204) {
     return undefined as T;

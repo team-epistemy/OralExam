@@ -166,16 +166,20 @@ class PostgresRepository:
 
     _SELECT_VERSION = (
         "SELECT material_version_id, material_id, course_id, org_id, version_no,"
-        " uploaded_by, source_type, mime_type, file_name, s3_key, bytes, status"
+        " uploaded_by, source_type, mime_type, file_name, s3_key, bytes, status,"
+        " error"
         " FROM material_version")
 
     def _version_from_row(self, row) -> MaterialVersion:
+        err = row[12]
+        if isinstance(err, str):
+            err = json.loads(err) if err else None
         return MaterialVersion(
             material_version_id=str(row[0]), material_id=str(row[1]),
             course_id=str(row[2]), org_id=str(row[3]), version_no=row[4],
             uploaded_by=str(row[5]), source_type=SourceType(row[6]),
             mime_type=row[7], file_name=row[8], s3_key=row[9], bytes=row[10],
-            status=VersionStatus(row[11]))
+            status=VersionStatus(row[11]), error=err)
 
     def list_versions(self, material_id: str) -> List[MaterialVersion]:
         rows = self._all(self._SELECT_VERSION +
