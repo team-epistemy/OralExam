@@ -523,7 +523,11 @@ export default function TakeExam() {
   // Derived
   const N = questions.length;
   const cur = qData[current];
-  const isPractice = (meta?.assignment_type || 'assignment') === 'practice';
+  const assignmentType = meta?.assignment_type || 'assignment';
+  const isPractice = assignmentType === 'practice';
+  // Human label for the task type, surfaced on every exam screen so a student
+  // always knows whether this is a practice test, assignment, or exam (S-E-2.1/3.1/4.x).
+  const typeLabel = isPractice ? 'Practice Test' : assignmentType === 'exam' ? 'Exam' : 'Assignment';
 
   // Auto-speak the latest examiner line (question or probe) as it appears.
   useEffect(() => {
@@ -902,6 +906,7 @@ export default function TakeExam() {
           <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-100 rounded-full mb-3">
             <BookOpen className="w-7 h-7 text-blue-600" />
           </div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600 mb-1">{typeLabel}</p>
           <h1 className="text-2xl font-bold text-gray-900">Before you begin</h1>
           <p className="text-sm text-gray-500 mt-1">
             The timer starts only when you press <span className="font-medium text-gray-700">Start Exam</span>.
@@ -1068,7 +1073,8 @@ export default function TakeExam() {
       <div className="max-w-2xl mx-auto">
         <div className="bg-white border border-gray-200 rounded-2xl p-10 text-center">
           <div className="text-4xl mb-2">&#128221;</div>
-          <h1 className="text-2xl font-bold text-gray-900 mb-1">Exam Ready to Submit</h1>
+          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600 mb-1">{typeLabel}</p>
+          <h1 className="text-2xl font-bold text-gray-900 mb-1">Ready to Submit</h1>
           <p className="text-gray-500 text-sm mb-5">
             {attemptedCount} of {N} questions answered &middot; {N - attemptedCount} skipped.
           </p>
@@ -1261,7 +1267,8 @@ export default function TakeExam() {
           <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <CheckCircle className="w-7 h-7 text-green-600" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900 mb-1">Exam Submitted</h1>
+          <p className="text-xs font-semibold uppercase tracking-wide text-green-600 mb-1">{typeLabel}</p>
+          <h1 className="text-2xl font-bold text-gray-900 mb-1">Submitted</h1>
           <p className="text-gray-500 text-sm mb-5">
             Your responses have been recorded. {attemptedCount} of {N} questions answered.
           </p>
@@ -1345,7 +1352,7 @@ export default function TakeExam() {
       <div className="bg-blue-600 rounded-t-xl px-5 py-3 flex items-center justify-between">
         <div>
           <p className="text-blue-200 text-[11px] font-semibold uppercase tracking-wide">
-            Oral Exam
+            {typeLabel}
           </p>
           <p className="text-white font-semibold text-lg">
             {questions[current]?.topic || 'Assessment'}
