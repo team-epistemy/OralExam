@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye } from 'lucide-react';
 import { get } from '../../api/client';
 import { buildExam, assignExam, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
+import { listSessions } from '../../api/sessions';
 
 interface Course {
   course_id: string;
@@ -29,6 +30,7 @@ export default function CreateAssignment() {
   const [duration, setDuration] = useState(30);
   const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
   const [assignmentType, setAssignmentType] = useState<AssignmentType>('assignment');
+  const [weekSessionId, setWeekSessionId] = useState('');   // scope to a class session (week)
   const [includeCase, setIncludeCase] = useState(false);
   const [building, setBuilding] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -62,6 +64,18 @@ export default function CreateAssignment() {
   const graphReady = conceptCount > 0;
   const maxQuestions = Math.min(50, conceptCount * 4);
 
+  // Class sessions (weeks) for optional scoping. A session with an in-scope
+  // concept set constrains generation to just those topics (P-S-2.2).
+  const { data: sessionsData } = useQuery({
+    queryKey: ['course-sessions', courseId],
+    queryFn: () => listSessions(courseId),
+    enabled: !!courseId && !created,
+  });
+  const sessions = sessionsData?.sessions ?? [];
+  const selectedWeek = sessions.find((s) => s.session_id === weekSessionId);
+  const scopeConcepts = selectedWeek?.in_scope_concepts ?? [];
+  const weekHasScope = scopeConcepts.length > 0;
+
   const courseName = courses.find((c) => c.course_id === courseId)?.course_name || '';
   const backTo = courseId ? `/professor/courses/${courseId}?tab=assignments` : '/professor/dashboard';
   const canSubmit = !!courseId && !!title.trim() && qCount >= 1 && graphReady;
@@ -73,7 +87,11 @@ export default function CreateAssignment() {
     setBuilding(true);
     setError('');
     try {
-      const built = await buildExam(courseId, { q_count: qCount, exam_len: duration, difficulty });
+      const built = await buildExam(courseId, {
+        q_count: qCount, exam_len: duration, difficulty,
+        // Scope to the selected week's concepts, if any — otherwise the whole graph.
+        concept_ids: weekHasScope ? scopeConcepts : undefined,
+      });
       if (built.status !== 'completed' || !built.variants?.length) {
         throw new Error(built.message || 'Could not build questions — make sure this course has a concept graph (upload materials first).');
       }
@@ -108,6 +126,10 @@ export default function CreateAssignment() {
         duration_minutes: duration,
         assignment_type: assignmentType,
         include_case: includeCase,
+        // Snapshot the week + its scope so this exam stays attributed to the
+        // scope in effect now, even if the week's scope changes later (P-S-2.3).
+        session_id: weekSessionId || undefined,
+        scope_concepts: weekHasScope ? scopeConcepts : undefined,
       });
       if (res.status !== 'completed' || !res.assignment_id) {
         throw new Error(res.message || 'Failed to create assignment.');
@@ -382,6 +404,34 @@ export default function CreateAssignment() {
             ))}
           </select>
         </div>
+
+        {/* Class session (week) scope — optional */}
+        {courseId && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Class session (week) <span className="text-gray-400 font-normal">— optional scope</span></label>
+            <select
+              value={weekSessionId}
+              onChange={(e) => setWeekSessionId(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">Whole course — all topics</option>
+              {sessions.map((s) => (
+                <option key={s.session_id} value={s.session_id}>
+                  {s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'Undated session'}
+                  {s.session_document ? ` — ${s.session_document.slice(0, 40)}` : ''}
+                  {` (${s.in_scope_concepts?.length || 0} topics in scope)`}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-400 mt-1">
+              {weekSessionId
+                ? weekHasScope
+                  ? `Questions will be drawn only from this week's ${scopeConcepts.length} in-scope topic${scopeConcepts.length !== 1 ? 's' : ''}.`
+                  : 'This week has no in-scope topics set yet — set them on the course’s Sessions tab, or leave scope to the whole course.'
+                : 'Leave as-is to draw from the whole concept graph, or pick a week to scope questions to its topics.'}
+            </p>
+          </div>
+        )}
 
         {/* Title */}
         <div>

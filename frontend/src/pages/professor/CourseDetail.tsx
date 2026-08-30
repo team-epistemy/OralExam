@@ -8,7 +8,7 @@ import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
 import { listStudents, deleteCourse } from '../../api/courses';
 import { getCoursePerformance } from '../../api/performance';
-import { listSessions, createSession, deleteSession, type ClassSession } from '../../api/sessions';
+import { listSessions, createSession, deleteSession, updateSession, type ClassSession } from '../../api/sessions';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 
 // Cytoscape is heavy — load it only when a graph is actually rendered.
@@ -870,6 +870,79 @@ function PerformanceTab({ courseId }: { courseId: string }) {
   );
 }
 
+// Per-session in-scope topic picker (P-S-2.1). Selection persists via updateSession.
+function SessionScopeEditor({
+  session, concepts, saving, onSave,
+}: {
+  session: ClassSession;
+  concepts: Array<{ id: string; label: string }>;
+  saving: boolean;
+  onSave: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [sel, setSel] = useState<Set<string>>(new Set(session.in_scope_concepts ?? []));
+  const count = session.in_scope_concepts?.length ?? 0;
+
+  // Re-seed from server state whenever it changes (e.g. after a save refetch).
+  useEffect(() => { setSel(new Set(session.in_scope_concepts ?? [])); }, [session.in_scope_concepts]);
+
+  const toggle = (id: string) =>
+    setSel((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  return (
+    <div className="mt-2">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-gray-900 font-medium"
+      >
+        <Network className="w-3.5 h-3.5" />
+        Topics in scope{count > 0 ? ` (${count})` : ' — not set'}
+      </button>
+      {open && (
+        <div className="mt-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
+          {concepts.length === 0 ? (
+            <p className="text-xs text-gray-400">No concept graph yet — upload materials and let the graph build first.</p>
+          ) : (
+            <>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs text-gray-500">{sel.size} of {concepts.length} topics selected</span>
+                <div className="flex gap-2">
+                  <button onClick={() => setSel(new Set(concepts.map((c) => c.id)))} className="text-xs text-blue-600 hover:underline">All</button>
+                  <button onClick={() => setSel(new Set())} className="text-xs text-blue-600 hover:underline">None</button>
+                </div>
+              </div>
+              <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1 pr-1">
+                {concepts.map((c) => (
+                  <label key={c.id} className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer py-0.5">
+                    <input
+                      type="checkbox"
+                      checked={sel.has(c.id)}
+                      onChange={() => toggle(c.id)}
+                      className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="truncate">{c.label}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 mt-3">
+                <button
+                  onClick={() => onSave([...sel])}
+                  disabled={saving}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+                  Save scope
+                </button>
+                <span className="text-[11px] text-gray-400">Exams generated for this week draw only from the selected topics.</span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Sessions tab: a course maps to N class sessions ──────────────────────────
 function SessionsTab({ courseId, courseName }: { courseId: string; courseName: string }) {
   const queryClient = useQueryClient();
@@ -884,6 +957,16 @@ function SessionsTab({ courseId, courseName }: { courseId: string; courseName: s
   });
   const sessions: ClassSession[] = data?.sessions ?? [];
 
+  // Concept-graph nodes for the in-scope topic picker (P-S-2.1).
+  const { data: graph } = useQuery<{ concepts?: Array<{ id?: string; label?: string }> }>({
+    queryKey: ['course-graph-concepts', courseId],
+    queryFn: () => get(`/api/courses/${courseId}/graph`),
+    enabled: !!courseId,
+  });
+  const concepts = (graph?.concepts ?? [])
+    .map((c) => ({ id: c.id || c.label || '', label: c.label || c.id || '' }))
+    .filter((c) => c.id);
+
   const addMutation = useMutation({
     mutationFn: () => createSession(courseId, { session_date: date || null, session_document: doc.trim() || null }),
     onSuccess: () => {
@@ -895,6 +978,14 @@ function SessionsTab({ courseId, courseName }: { courseId: string; courseName: s
 
   const removeMutation = useMutation({
     mutationFn: (sessionId: string) => deleteSession(courseId, sessionId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] }),
+  });
+
+  const scopeMutation = useMutation({
+    mutationFn: ({ s, ids }: { s: ClassSession; ids: string[] }) =>
+      updateSession(courseId, s.session_id, {
+        session_date: s.session_date, session_document: s.session_document, in_scope_concepts: ids,
+      }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] }),
   });
 
@@ -972,6 +1063,12 @@ function SessionsTab({ courseId, courseName }: { courseId: string; courseName: s
                   >
                     <Upload className="w-3.5 h-3.5" /> Upload file to this session
                   </Link>
+                  <SessionScopeEditor
+                    session={s}
+                    concepts={concepts}
+                    saving={scopeMutation.isPending}
+                    onSave={(ids) => scopeMutation.mutate({ s, ids })}
+                  />
                 </div>
                 <button
                   onClick={() => { if (confirm('Delete this session? Its attached files are detached, not deleted.')) removeMutation.mutate(s.session_id); }}

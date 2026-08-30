@@ -516,9 +516,23 @@ class EnrollRequest(BaseModel):
 
 
 class SessionRequest(BaseModel):
-    """Body to create or update a class session; both fields optional."""
+    """Body to create or update a class session; all fields optional."""
     session_date: Optional[date] = None
     session_document: Optional[str] = Field(default=None, max_length=100000)
+    # Concept-graph node ids that are in scope for this week. None = "not
+    # provided" (leave unchanged on update); [] = explicitly no scope.
+    in_scope_concepts: Optional[List[str]] = None
+
+
+def _session_scope_col(cur) -> bool:
+    """True if class_session.in_scope_concepts exists (migration_012).
+
+    Guarded so session endpoints keep working on a DB that hasn't run the
+    migration yet — they just omit the scope until it's present."""
+    cur.execute("""SELECT 1 FROM information_schema.columns
+                   WHERE table_name='class_session'
+                     AND column_name='in_scope_concepts'""")
+    return cur.fetchone() is not None
 
 
 class SyllabusSetRequest(BaseModel):
@@ -677,8 +691,10 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 with repo.conn.cursor() as cur:
+                    has_scope = _session_scope_col(cur)
+                    scope_col = ", in_scope_concepts" if has_scope else ""
                     cur.execute(
-                        """SELECT session_id, session_date, session_document, created_at
+                        f"""SELECT session_id, session_date, session_document, created_at{scope_col}
                            FROM class_session
                            WHERE course_id = %s::uuid AND org_id = %s::uuid
                            ORDER BY session_date DESC NULLS LAST, created_at DESC""",
@@ -694,11 +710,17 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                     for sid, mid, name in cur.fetchall():
                         mats.setdefault(str(sid), []).append(
                             {"material_id": str(mid), "display_name": name})
+                def _scope_of(r):
+                    if not has_scope:
+                        return []
+                    raw = r[4]
+                    return raw if isinstance(raw, list) else (_json.loads(raw) if raw else [])
                 return {"sessions": [
                     {"session_id": str(r[0]),
                      "session_date": r[1].isoformat() if r[1] else None,
                      "session_document": r[2],
                      "created_at": r[3].isoformat() if r[3] else None,
+                     "in_scope_concepts": _scope_of(r),
                      "materials": mats.get(str(r[0]), [])}
                     for r in rows]}
             finally:
@@ -716,17 +738,28 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 sid = str(_uuid.uuid4())
+                scope = req.in_scope_concepts or []
                 with repo.conn.cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO class_session
-                           (session_id, course_id, org_id, session_date, session_document, created_by)
-                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s)""",
-                        (sid, course_id, caller.org_id, req.session_date,
-                         req.session_document, caller.user_id))
+                    if _session_scope_col(cur):
+                        cur.execute(
+                            """INSERT INTO class_session
+                               (session_id, course_id, org_id, session_date, session_document,
+                                created_by, in_scope_concepts)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s::jsonb)""",
+                            (sid, course_id, caller.org_id, req.session_date,
+                             req.session_document, caller.user_id, _json.dumps(scope)))
+                    else:
+                        cur.execute(
+                            """INSERT INTO class_session
+                               (session_id, course_id, org_id, session_date, session_document, created_by)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s)""",
+                            (sid, course_id, caller.org_id, req.session_date,
+                             req.session_document, caller.user_id))
                 repo.conn.commit()
                 return {"session_id": sid,
                         "session_date": req.session_date.isoformat() if req.session_date else None,
-                        "session_document": req.session_document}
+                        "session_document": req.session_document,
+                        "in_scope_concepts": scope}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -741,10 +774,18 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 with repo.conn.cursor() as cur:
+                    sets = ["session_date = %s", "session_document = %s"]
+                    params = [req.session_date, req.session_document]
+                    # Only touch scope when the caller provided it, so a plain
+                    # date/document edit doesn't wipe the week's in-scope set.
+                    if req.in_scope_concepts is not None and _session_scope_col(cur):
+                        sets.append("in_scope_concepts = %s::jsonb")
+                        params.append(_json.dumps(req.in_scope_concepts))
+                    params += [session_id, course_id, caller.org_id]
                     cur.execute(
-                        """UPDATE class_session SET session_date = %s, session_document = %s
+                        f"""UPDATE class_session SET {', '.join(sets)}
                            WHERE session_id = %s::uuid AND course_id = %s::uuid AND org_id = %s::uuid""",
-                        (req.session_date, req.session_document, session_id, course_id, caller.org_id))
+                        tuple(params))
                     updated = cur.rowcount
                 repo.conn.commit()
                 if not updated:
@@ -1956,6 +1997,11 @@ class AssignExamRequest(BaseModel):
     # Case-based assessment: when true, students can open the course reference
     # materials ("View Case") during the exam. Default off (issue S-E-2.1#2).
     include_case: bool = False
+    # Week scoping: the class session this exam is generated for, and a snapshot
+    # of the concept ids that were in scope at publish time. The snapshot means
+    # later edits to the session's scope don't recategorize this exam (P-S-2.3).
+    session_id: Optional[str] = None
+    scope_concepts: Optional[List[str]] = None
 
 
 def _register_questions(app: FastAPI, deps) -> None:
@@ -2307,6 +2353,10 @@ def _register_questions(app: FastAPI, deps) -> None:
                         "time_limit_minutes": req.duration_minutes,
                         "difficulty": req.difficulty, "shuffle_questions": False,
                         "include_case": req.include_case,
+                        # Snapshot the week scope so it stays attributed to this
+                        # exam even if the session's scope changes later (P-S-2.3).
+                        "scope_session_id": req.session_id,
+                        "scope_concepts": req.scope_concepts or [],
                     })
                     cur.execute(
                         """INSERT INTO assignment

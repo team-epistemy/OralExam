@@ -10,12 +10,14 @@ export interface ClassSession {
   session_date: string | null;      // ISO date (YYYY-MM-DD) or null
   session_document: string | null;
   created_at?: string | null;
+  in_scope_concepts?: string[];      // concept-graph node ids in scope for this week
   materials?: SessionMaterial[];     // files attached to this session
 }
 
 export interface SessionBody {
   session_date: string | null;
   session_document: string | null;
+  in_scope_concepts?: string[];      // omit to leave the week's scope unchanged
 }
 
 export function listSessions(courseId: string): Promise<{ sessions: ClassSession[] }> {
