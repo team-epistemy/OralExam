@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft } from 'lucide-react';
+import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye } from 'lucide-react';
 import { get } from '../../api/client';
 import { buildExam, assignExam, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
 
@@ -30,10 +30,17 @@ export default function CreateAssignment() {
   const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
   const [assignmentType, setAssignmentType] = useState<AssignmentType>('assignment');
   const [includeCase, setIncludeCase] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [created, setCreated] = useState(false);
   const [createdData, setCreatedData] = useState<{ assignment_id: string; question_count: number } | null>(null);
   const [builtQuestions, setBuiltQuestions] = useState<ExamVariantQuestion[]>([]);
+  // Preview/curation state: the built questions the professor reviews (edit /
+  // remove) before publishing. Empty until a preview is generated (P-S-3.1/3.4).
+  const [previewQuestions, setPreviewQuestions] = useState<ExamVariantQuestion[]>([]);
+  const [inPreview, setInPreview] = useState(false);
+  const [editIdx, setEditIdx] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
   const [error, setError] = useState('');
 
@@ -59,13 +66,13 @@ export default function CreateAssignment() {
   const backTo = courseId ? `/professor/courses/${courseId}?tab=assignments` : '/professor/dashboard';
   const canSubmit = !!courseId && !!title.trim() && qCount >= 1 && graphReady;
 
-  const handleCreate = async () => {
+  // Step 1: assemble questions from the concept graph and show them for review —
+  // nothing is published to students yet (P-S-3.1: preview before publishing).
+  const handleBuild = async () => {
     if (!canSubmit) return;
-    setCreating(true);
+    setBuilding(true);
     setError('');
     try {
-      // Assemble N questions from the course's concept graph (generated at graph
-      // build — no separate step), then persist them as the assignment.
       const built = await buildExam(courseId, { q_count: qCount, exam_len: duration, difficulty });
       if (built.status !== 'completed' || !built.variants?.length) {
         throw new Error(built.message || 'Could not build questions — make sure this course has a concept graph (upload materials first).');
@@ -74,9 +81,29 @@ export default function CreateAssignment() {
       if (questions.length === 0) {
         throw new Error('No questions could be assembled from the concept graph yet. Upload materials and let the graph build, then try again.');
       }
+      setPreviewQuestions(questions.map((q) => ({ ...q })));
+      setEditIdx(null);
+      setInPreview(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate preview');
+    } finally {
+      setBuilding(false);
+    }
+  };
+
+  // Step 2: publish only the curated questions. Removed questions were never
+  // sent, so they can't reappear in the student's session (P-S-3.4).
+  const handlePublish = async () => {
+    if (previewQuestions.length === 0) {
+      setError('Add at least one question before publishing.');
+      return;
+    }
+    setPublishing(true);
+    setError('');
+    try {
       const res = await assignExam(courseId, {
         title: title.trim(),
-        questions,
+        questions: previewQuestions,
         difficulty,
         duration_minutes: duration,
         assignment_type: assignmentType,
@@ -85,20 +112,37 @@ export default function CreateAssignment() {
       if (res.status !== 'completed' || !res.assignment_id) {
         throw new Error(res.message || 'Failed to create assignment.');
       }
-      setBuiltQuestions(questions);
-      setCreatedData({ assignment_id: res.assignment_id, question_count: res.question_count ?? questions.length });
+      setBuiltQuestions(previewQuestions);
+      setCreatedData({ assignment_id: res.assignment_id, question_count: res.question_count ?? previewQuestions.length });
       setCreated(true);
+      setInPreview(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create assignment');
+      setError(err instanceof Error ? err.message : 'Failed to publish assignment');
     } finally {
-      setCreating(false);
+      setPublishing(false);
     }
+  };
+
+  const removeQuestion = (i: number) => {
+    setPreviewQuestions((qs) => qs.filter((_, idx) => idx !== i));
+    setEditIdx(null);
+  };
+  const startEdit = (i: number) => { setEditIdx(i); setEditDraft(previewQuestions[i].q); };
+  const saveEdit = () => {
+    if (editIdx === null) return;
+    const text = editDraft.trim();
+    if (!text) return;
+    setPreviewQuestions((qs) => qs.map((q, idx) => (idx === editIdx ? { ...q, q: text } : q)));
+    setEditIdx(null);
   };
 
   const resetForm = () => {
     setCreated(false);
     setCreatedData(null);
     setBuiltQuestions([]);
+    setPreviewQuestions([]);
+    setInPreview(false);
+    setEditIdx(null);
     setTitle('');
     setLinkCopied(false);
     setError('');
@@ -204,6 +248,108 @@ export default function CreateAssignment() {
           </button>
           <button onClick={() => navigate(backTo)} className="px-5 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors">
             Back to Course
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Preview & curate ────────────────────────────────────────────────────────
+  if (inPreview) {
+    return (
+      <div className="max-w-3xl mx-auto space-y-4">
+        <Breadcrumb />
+        <div className="flex items-start gap-3">
+          <div className="inline-flex items-center justify-center w-10 h-10 bg-blue-100 rounded-lg flex-shrink-0">
+            <Eye className="w-5 h-5 text-blue-600" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Preview &amp; review</h1>
+            <p className="text-sm text-gray-500 mt-1">
+              This is the full sample session students will get. Edit or remove any question — nothing is published until you press <span className="font-medium text-gray-700">Publish to Students</span>.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between bg-white rounded-xl border border-gray-200 px-5 py-3">
+          <div className="text-sm text-gray-600">
+            <span className="font-semibold text-gray-900">{title || 'Untitled'}</span> · {previewQuestions.length} question{previewQuestions.length !== 1 ? 's' : ''} · {duration} min · {DIFFICULTY_LABEL[difficulty]}
+          </div>
+          <button
+            onClick={handleBuild}
+            disabled={building}
+            className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 disabled:opacity-50"
+          >
+            {building ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            Regenerate
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          {previewQuestions.map((q, i) => (
+            <div key={i} className="bg-white rounded-xl border border-gray-200 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3 min-w-0">
+                  <span className="text-sm font-bold text-blue-600 mt-0.5">Q{i + 1}</span>
+                  <div className="min-w-0">
+                    {q.topic && <span className="inline-block text-[11px] font-semibold uppercase tracking-wide text-blue-600 bg-blue-50 px-2 py-0.5 rounded mb-1">{q.topic}</span>}
+                    {editIdx === i ? (
+                      <textarea
+                        value={editDraft}
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        rows={3}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        autoFocus
+                      />
+                    ) : (
+                      <p className="text-sm text-gray-800">{q.q}</p>
+                    )}
+                  </div>
+                </div>
+                {editIdx !== i && (
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <button onClick={() => startEdit(i)} title="Edit question" className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors">
+                      <Pencil className="w-4 h-4" />
+                    </button>
+                    <button onClick={() => removeQuestion(i)} title="Remove question" className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+              </div>
+              {editIdx === i && (
+                <div className="flex items-center gap-2 mt-2 pl-9">
+                  <button onClick={saveEdit} className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700">Save</button>
+                  <button onClick={() => setEditIdx(null)} className="px-3 py-1 border border-gray-300 text-gray-700 rounded text-xs font-medium hover:bg-gray-50">Cancel</button>
+                </div>
+              )}
+            </div>
+          ))}
+          {previewQuestions.length === 0 && (
+            <div className="bg-white rounded-xl border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500">
+              All questions removed. Regenerate to build a fresh set, or go back to change the settings.
+            </div>
+          )}
+        </div>
+
+        {error && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
+        )}
+
+        <div className="flex flex-wrap gap-3 justify-between pb-8">
+          <button
+            onClick={() => { setInPreview(false); setError(''); }}
+            className="px-5 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+          >
+            ← Back to settings
+          </button>
+          <button
+            onClick={handlePublish}
+            disabled={publishing || previewQuestions.length === 0}
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {publishing && <Loader2 className="w-4 h-4 animate-spin" />}
+            {publishing ? 'Publishing…' : 'Publish to Students'}
           </button>
         </div>
       </div>
@@ -345,15 +491,16 @@ export default function CreateAssignment() {
         )}
 
         <button
-          onClick={handleCreate}
-          disabled={!canSubmit || creating}
+          onClick={handleBuild}
+          disabled={!canSubmit || building}
           className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {creating && <Loader2 className="w-4 h-4 animate-spin" />}
-          {creating ? 'Generating & creating…'
+          {building && <Loader2 className="w-4 h-4 animate-spin" />}
+          {building ? 'Generating preview…'
             : courseId && !graphReady ? 'Waiting for concept graph…'
-            : 'Generate Questions & Create Assignment'}
+            : 'Generate Preview'}
         </button>
+        <p className="text-xs text-gray-400 text-center -mt-2">You'll review and can edit the questions before anything is published to students.</p>
       </div>
     </div>
   );
