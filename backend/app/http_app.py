@@ -1014,13 +1014,20 @@ def _register_assignment_case(app: FastAPI, deps) -> None:
 
                 with repo.conn.cursor() as cur:
                     cur.execute(
-                        "SELECT course_id FROM assignment WHERE assignment_id = %s::uuid",
+                        "SELECT course_id, config FROM assignment WHERE assignment_id = %s::uuid",
                         (assignment_id,),
                     )
                     row = cur.fetchone()
                 if not row:
                     raise AuthorizationError("assignment not found")
                 course_id = str(row[0])
+                cfg = row[1] if isinstance(row[1], dict) else (_json.loads(row[1]) if row[1] else {})
+
+                # "View Case" is only offered when the professor marked this
+                # assignment as case-based. Otherwise return no case materials so
+                # the button hides — course docs aren't a "case" (issue S-E-2.1#2).
+                if not cfg.get("include_case"):
+                    return {"materials": []}
 
                 materials = []
                 for m in repo.list_materials(course_id):
@@ -1946,6 +1953,9 @@ class AssignExamRequest(BaseModel):
     difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
     duration_minutes: Optional[int] = None
     assignment_type: str = Field(default="assignment", pattern=r"^(practice|assignment|exam)$")
+    # Case-based assessment: when true, students can open the course reference
+    # materials ("View Case") during the exam. Default off (issue S-E-2.1#2).
+    include_case: bool = False
 
 
 def _register_questions(app: FastAPI, deps) -> None:
@@ -2296,6 +2306,7 @@ def _register_questions(app: FastAPI, deps) -> None:
                         "adaptive": True, "max_questions": len(question_ids),
                         "time_limit_minutes": req.duration_minutes,
                         "difficulty": req.difficulty, "shuffle_questions": False,
+                        "include_case": req.include_case,
                     })
                     cur.execute(
                         """INSERT INTO assignment
@@ -2677,6 +2688,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     "time_limit_minutes": config_raw.get("duration_minutes"),
                     "difficulty": config_raw.get("difficulty", "balanced"),
                     "shuffle_questions": config_raw.get("shuffle_questions", False),
+                    "include_case": config_raw.get("include_case", False),
                 }
 
                 assignment_id = str(_uuid.uuid4())

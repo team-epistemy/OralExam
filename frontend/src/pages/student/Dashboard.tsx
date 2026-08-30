@@ -31,6 +31,11 @@ export default function StudentDashboard() {
     queryKey: ['student-dashboard'],
     queryFn: () => get<StudentDashboardData>('/api/student/dashboard'),
     retry: false,
+    // Enrollment can change server-side (a professor adds the student to a
+    // course); always re-check when the student lands on the dashboard so a
+    // new course isn't hidden behind the 30s cache (issue S-E-2.3).
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
   });
 
   const assignments = data?.assignments || [];
@@ -48,15 +53,31 @@ export default function StudentDashboard() {
     );
   }
 
-  // The student's courses are those with items visible to them, keyed by course.
-  const byCourse = new Map<string, { course_id: string; course_name: string; count: number }>();
+  // Course grid is driven by the student's *enrollments* (data.courses), not by
+  // the assignments — otherwise a course a professor just added the student to
+  // stays invisible until it has a visible assignment (issue S-E-2.3). Assignment
+  // counts are overlaid per course; a freshly-added course shows with 0 items.
+  const countByCourse = new Map<string, number>();
   for (const a of assignments) {
     const key = a.course_id || a.course_name;
-    const e = byCourse.get(key) || { course_id: a.course_id, course_name: a.course_name, count: 0 };
-    e.count += 1;
-    byCourse.set(key, e);
+    countByCourse.set(key, (countByCourse.get(key) || 0) + 1);
   }
-  const courses = [...byCourse.values()];
+  const enrolled = data?.courses || [];
+  const seen = new Set(enrolled.map((c) => c.course_id));
+  // Defensive: include any course that has assignments but is missing from the
+  // enrollment list (open courses with no roster row).
+  const extras: Course[] = [];
+  for (const a of assignments) {
+    if (a.course_id && !seen.has(a.course_id)) {
+      seen.add(a.course_id);
+      extras.push({ course_id: a.course_id, course_name: a.course_name });
+    }
+  }
+  const courses = [...enrolled, ...extras].map((c) => ({
+    course_id: c.course_id,
+    course_name: c.course_name,
+    count: countByCourse.get(c.course_id) || 0,
+  }));
 
   return (
     <div className="space-y-8">

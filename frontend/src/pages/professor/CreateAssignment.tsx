@@ -29,6 +29,7 @@ export default function CreateAssignment() {
   const [duration, setDuration] = useState(30);
   const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
   const [assignmentType, setAssignmentType] = useState<AssignmentType>('assignment');
+  const [includeCase, setIncludeCase] = useState(false);
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState(false);
   const [createdData, setCreatedData] = useState<{ assignment_id: string; question_count: number } | null>(null);
@@ -79,6 +80,7 @@ export default function CreateAssignment() {
         difficulty,
         duration_minutes: duration,
         assignment_type: assignmentType,
+        include_case: includeCase,
       });
       if (res.status !== 'completed' || !res.assignment_id) {
         throw new Error(res.message || 'Failed to create assignment.');
@@ -270,6 +272,20 @@ export default function CreateAssignment() {
             ))}
           </div>
         </div>
+
+        {/* Case-based toggle — only case assessments expose "View Case" to students */}
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={includeCase}
+            onChange={(e) => setIncludeCase(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          <span>
+            <span className="block text-sm font-medium text-gray-700">Case-based assessment</span>
+            <span className="block text-xs text-gray-500">Let students open the course reference materials ("View Case") during the exam. Leave off for standard tests.</span>
+          </span>
+        </label>
 
         {/* Number of questions + Duration + Difficulty */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

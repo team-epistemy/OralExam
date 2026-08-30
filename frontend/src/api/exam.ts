@@ -165,7 +165,7 @@ export type AssignmentType = 'practice' | 'assignment' | 'exam';
 
 export async function assignExam(
   courseId: string,
-  body: { title: string; questions: ExamVariantQuestion[]; difficulty: string; duration_minutes?: number; assignment_type?: AssignmentType },
+  body: { title: string; questions: ExamVariantQuestion[]; difficulty: string; duration_minutes?: number; assignment_type?: AssignmentType; include_case?: boolean },
 ): Promise<AssignExamResult> {
   return post<AssignExamResult>(`/api/courses/${courseId}/exams/assign`, body);
 }
