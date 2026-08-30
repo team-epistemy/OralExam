@@ -11,6 +11,7 @@ interface SessionSummary {
   status: string;
   overall_eds: number | null;
   completed_at: string | null;
+  anonymized?: boolean;
 }
 
 interface AssignmentDetail {
@@ -34,6 +35,7 @@ interface SessionGrade {
   overall_comment?: string;
   component_scores?: Record<string, unknown>;
   released_at?: string | null;
+  anonymized?: boolean;
 }
 
 interface TurnEvaluation {
@@ -330,6 +332,11 @@ function SessionDetail({
 
   return (
     <div className="space-y-4">
+      {sessionGrade.anonymized && (
+        <div className="rounded-lg bg-blue-50 border border-blue-100 px-3 py-2 text-xs text-blue-800">
+          Practice test — anonymized. Student identity and verbatim answers are hidden; only scores and reasoning are shown.
+        </div>
+      )}
       {/* Per-question responses, scores, and reasoning */}
       {sessionGrade.evaluations && sessionGrade.evaluations.length > 0 ? (
         <div>
@@ -349,7 +356,7 @@ function SessionDetail({
                       {group.attempts.length > 1 && (
                         <p className="text-[11px] uppercase tracking-wide text-gray-400">{i === 0 ? 'Initial answer' : `Probe response ${i}`}</p>
                       )}
-                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">no answer</em>}</p>
+                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">{sessionGrade.anonymized ? 'hidden (anonymized)' : 'no answer'}</em>}</p>
                       {(ev.rationale || ev.feedback) && (
                         <p className="mt-1 text-xs text-gray-500"><span className="font-medium text-gray-600">Why this score:</span>{' '}{ev.rationale || ev.feedback}</p>
                       )}

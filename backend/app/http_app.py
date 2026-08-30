@@ -1229,6 +1229,21 @@ def _query_courses(repo, org_id: str, owner: Optional[str] = None) -> list:
     return [{"course_id": str(r[0]), "course_name": r[1]} for r in rows]
 
 
+def _assignment_is_practice(cur, assignment_id: str) -> bool:
+    """True if the assignment is a practice test. Practice results are shown to
+    the professor anonymized (no email, no verbatim transcript) — the same
+    privacy stance as the aggregate performance dashboard (issue S-E-2.2).
+    Guarded on the assignment_type column so it is safe pre-migration."""
+    cur.execute("""SELECT 1 FROM information_schema.columns
+                   WHERE table_name='assignment' AND column_name='assignment_type'""")
+    if cur.fetchone() is None:
+        return False
+    cur.execute("SELECT assignment_type FROM assignment WHERE assignment_id = %s::uuid",
+                (assignment_id,))
+    row = cur.fetchone()
+    return bool(row) and (row[0] or "assignment") == "practice"
+
+
 def _query_student_courses(repo, org_id: str, student_email: str) -> list:
     """Courses a student can access: those with no roster (open) OR where the
     student is enrolled — the same gate as assignment visibility, so the course
@@ -2838,17 +2853,30 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     )
                     rows = cur.fetchall()
 
+                # Practice tests are anonymized to the professor: replace the
+                # student's email with a stable "Student N" label so performance
+                # is visible but identity is not (issue S-E-2.2). Labels are keyed
+                # off the sorted student_id so the mapping is deterministic.
+                with repo.conn.cursor() as cur:
+                    anon = _assignment_is_practice(cur, assignment_id)
+                label_by_student = {}
+                if anon:
+                    for i, sid in enumerate(sorted({r[1] for r in rows})):
+                        label_by_student[sid] = f"Student {i + 1}"
+
                 sessions = []
                 for r in rows:
                     overall_eds = round(float(r[5]) * 100, 1) if r[5] is not None else None
+                    who = label_by_student.get(r[1], r[1]) if anon else r[1]
                     sessions.append({
                         "session_id": str(r[0]),
-                        "student_id": r[1],
-                        "student_email": r[1],
+                        "student_id": who,
+                        "student_email": who,
                         "status": r[2],
                         "current_turn_index": r[3],
                         "overall_eds": overall_eds,
                         "completed_at": r[4].isoformat() if r[4] else None,
+                        "anonymized": anon,
                     })
 
                 return sessions
@@ -3733,6 +3761,14 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                 if caller.role != Role.PROFESSOR and srow[1] != caller.user_id:
                     raise AuthorizationError("access denied")
 
+                # Practice tests are anonymized to the professor: withhold the
+                # verbatim student answers (the transcript) so a practice run
+                # can't be tied back to what a specific student said (S-E-2.2).
+                # The student viewing their own session still sees everything.
+                with repo.conn.cursor() as cur:
+                    anon = (caller.role == Role.PROFESSOR
+                            and _assignment_is_practice(cur, str(srow[2])))
+
                 with repo.conn.cursor() as cur:
                     cur.execute(
                         """SELECT grade_id, final_score, component_scores, status,
@@ -3777,7 +3813,7 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                         "turn_index": er[5],
                         "sub_turn_index": er[6],
                         "question_text": er[8] or "",
-                        "student_answer": er[7] or "",
+                        "student_answer": "" if anon else (er[7] or ""),
                         "eds_score": score,
                         "eds_bucket": er[2],
                         "answered": raw.get("answered", True),
@@ -3807,6 +3843,7 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                         "total_eds": round(total_eds, 2),
                         "turns_evaluated": len(evaluations),
                         "evaluations": evaluations,
+                        "anonymized": anon,
                     }
 
                 # No grade row yet: surface an auto EDS score so the professor's
@@ -3827,6 +3864,7 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                     "total_eds": round(total_eds, 2),
                     "turns_evaluated": len(evaluations),
                     "evaluations": evaluations,
+                    "anonymized": anon,
                 }
             finally:
                 _release_repo(d, repo)

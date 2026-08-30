@@ -451,6 +451,17 @@ export default function TakeExam() {
     setSpeaking(false);
   }, []);
 
+  // Hard-stop the examiner's question audio (not paused — it won't resume).
+  // Called on submit, exit, retake, and unmount so a question's TTS never keeps
+  // playing after the student has left that question (issue S-E-4.5).
+  const stopSpeech = useCallback(() => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+  }, []);
+
+  // Leaving the exam (navigating away / component unmount) must also silence any
+  // in-flight question audio — otherwise the examiner keeps talking on the next page.
+  useEffect(() => () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } }, []);
+
   const toggleMic = () => {
     const SR = (window as unknown as { SpeechRecognition?: new () => any; webkitSpeechRecognition?: new () => any });
     const Ctor = SR.SpeechRecognition || SR.webkitSpeechRecognition;
@@ -647,6 +658,7 @@ export default function TakeExam() {
   // screen so Start Exam spins up a brand-new session. The old completed session
   // no longer blocks it (the active-session unique guard is partial).
   const retake = useCallback(() => {
+    stopSpeech();
     if (assignmentId) clearExamState(assignmentId);
     setSessionId(null);
     setQuestions([]);
@@ -659,7 +671,7 @@ export default function TakeExam() {
     setMicNotice(null);
     spokenRef.current = '';
     setPhase('ready');
-  }, [assignmentId]);
+  }, [assignmentId, stopSpeech]);
 
   // ── Persist state on meaningful changes ─────────────────────────────────────
 
@@ -825,8 +837,9 @@ export default function TakeExam() {
 
   // ── Submit exam ────────────────────────────────────────────────────────────
 
-  const submitExam = () => setPhase('review');
+  const submitExam = () => { stopSpeech(); stopMic(); setPhase('review'); };
   const confirmSubmit = async () => {
+    stopSpeech();
     if (sessionId) {
       try { await completeSession(sessionId); } catch { /* best-effort */ }
     }
