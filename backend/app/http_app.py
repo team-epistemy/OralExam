@@ -632,6 +632,7 @@ _COURSE_DELETE_STMTS = (
 
 def _register_course_ops(app: FastAPI, deps) -> None:
     """Course lifecycle (create/delete), roster enrollment, and syllabus."""
+    import json as _json  # in scope for every handler below (sessions, syllabus)
 
     def _pro(x_user_id, x_role, x_org_name, repo, d):
         api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
