@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, BarChart3, Calendar, Plus } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, BarChart3, Calendar, Plus, Lock, BookOpen, Sparkles } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
-import { listStudents, deleteCourse } from '../../api/courses';
+import { listStudents, deleteCourse, getSyllabus, processSyllabus } from '../../api/courses';
 import { getCoursePerformance } from '../../api/performance';
 import { listSessions, createSession, deleteSession, updateSession, type ClassSession } from '../../api/sessions';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
@@ -66,6 +66,18 @@ export default function CourseDetail() {
     queryFn: () => listAssignments(courseId!),
     enabled: !!courseId,
   });
+
+  // Syllabus gate: until a syllabus is attached, every course action except
+  // managing students is locked (mirrors the backend 409). Re-check on mount so
+  // the course unlocks as soon as the professor returns from uploading it.
+  const { data: syllabus, isLoading: syllabusLoading } = useQuery({
+    queryKey: ['syllabus', courseId],
+    queryFn: () => getSyllabus(courseId!),
+    enabled: !!courseId,
+    refetchOnMount: 'always',
+  });
+  const hasSyllabus = !!syllabus;
+  const locked = !syllabusLoading && !hasSyllabus;   // don't lock until we know
 
 
   const navigate = useNavigate();
@@ -130,32 +142,45 @@ export default function CourseDetail() {
       {/* Tabs */}
       <div className="border-b border-gray-200">
         <nav className="flex gap-6">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 pb-3 px-1 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab.id
-                  ? 'border-blue-600 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              <tab.icon className="w-4 h-4" />
-              {tab.label}
-            </button>
-          ))}
+          {tabs.map((tab) => {
+            const tabLocked = locked && tab.id !== 'students';
+            return (
+              <button
+                key={tab.id}
+                onClick={() => { if (!tabLocked) setActiveTab(tab.id); }}
+                disabled={tabLocked}
+                title={tabLocked ? 'Add the course syllabus to unlock this' : undefined}
+                className={`flex items-center gap-2 pb-3 px-1 text-sm font-medium border-b-2 transition-colors ${
+                  activeTab === tab.id && !tabLocked
+                    ? 'border-blue-600 text-blue-600'
+                    : tabLocked
+                      ? 'border-transparent text-gray-300 cursor-not-allowed'
+                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {tabLocked ? <Lock className="w-3.5 h-3.5" /> : <tab.icon className="w-4 h-4" />}
+                {tab.label}
+              </button>
+            );
+          })}
         </nav>
       </div>
 
-      {/* Tab content */}
-      {activeTab === 'materials' && (
-        <MaterialsTab materials={materials} courseId={courseId!} courseName={course?.name || ''} queryClient={queryClient} />
+      {/* Tab content — gated behind the syllabus for everything but Students */}
+      {locked && activeTab !== 'students' ? (
+        <SyllabusGate courseId={courseId!} courseName={course?.name || ''} />
+      ) : (
+        <>
+          {activeTab === 'materials' && (
+            <MaterialsTab materials={materials} courseId={courseId!} courseName={course?.name || ''} queryClient={queryClient} />
+          )}
+          {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
+          {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
+          {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
+          {activeTab === 'sessions' && <SessionsTab courseId={courseId!} courseName={course?.name || ''} hasSyllabus={hasSyllabus} />}
+          {activeTab === 'performance' && <PerformanceTab courseId={courseId!} />}
+        </>
       )}
-      {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
-      {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
-      {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
-      {activeTab === 'sessions' && <SessionsTab courseId={courseId!} courseName={course?.name || ''} />}
-      {activeTab === 'performance' && <PerformanceTab courseId={courseId!} />}
     </div>
   );
 }
@@ -870,6 +895,29 @@ function PerformanceTab({ courseId }: { courseId: string }) {
   );
 }
 
+// Shown in place of a locked tab until the course has a syllabus. Everything
+// except managing students is gated behind this (matches the backend 409).
+function SyllabusGate({ courseId, courseName }: { courseId: string; courseName: string }) {
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-8 text-center max-w-2xl mx-auto">
+      <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-100 rounded-full mb-4">
+        <BookOpen className="w-7 h-7 text-blue-600" />
+      </div>
+      <h2 className="text-xl font-bold text-gray-900">Add your course syllabus to get started</h2>
+      <p className="text-sm text-gray-500 mt-2 max-w-md mx-auto">
+        Materials, the concept graph, assignments, sessions, and performance all unlock once your syllabus is attached — and we'll auto-create your class sessions with their topics straight from it.
+      </p>
+      <Link
+        to={`/professor/upload?syllabus=1&course=${encodeURIComponent(courseName)}&courseId=${courseId}`}
+        className="inline-flex items-center gap-2 mt-5 px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+      >
+        <Upload className="w-4 h-4" /> Upload syllabus
+      </Link>
+      <p className="text-xs text-gray-400 mt-4">You can still add and manage students in the meantime.</p>
+    </div>
+  );
+}
+
 // Per-session in-scope topic picker (P-S-2.1). Selection persists via updateSession.
 function SessionScopeEditor({
   session, concepts, saving, onSave,
@@ -944,11 +992,14 @@ function SessionScopeEditor({
 }
 
 // ── Sessions tab: a course maps to N class sessions ──────────────────────────
-function SessionsTab({ courseId, courseName }: { courseId: string; courseName: string }) {
+function SessionsTab({ courseId, courseName, hasSyllabus }: { courseId: string; courseName: string; hasSyllabus?: boolean }) {
   const queryClient = useQueryClient();
   const [date, setDate] = useState('');
   const [doc, setDoc] = useState('');
   const [error, setError] = useState('');
+  const [paste, setPaste] = useState('');
+  const [showPaste, setShowPaste] = useState(false);
+  const [genError, setGenError] = useState('');
 
   const { data, isLoading } = useQuery({
     queryKey: ['course-sessions', courseId],
@@ -989,8 +1040,55 @@ function SessionsTab({ courseId, courseName }: { courseId: string; courseName: s
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] }),
   });
 
+  // Auto-create sessions from the syllabus. Tries the stored syllabus text; if
+  // that isn't ready (or has no schedule) it reveals a paste box as a fallback.
+  const genMutation = useMutation({
+    mutationFn: (text?: string) => processSyllabus(courseId, text),
+    onSuccess: (res) => {
+      setGenError(''); setShowPaste(false); setPaste('');
+      if (res.status === 'exists') setGenError(res.message || 'This course already has sessions.');
+      queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] });
+    },
+    onError: (e: Error) => { setGenError(e.message || 'Could not generate sessions.'); setShowPaste(true); },
+  });
+
   return (
     <div className="space-y-4">
+      {/* Auto-create from syllabus — the ingestion engine, wired into the flow */}
+      {hasSyllabus && sessions.length === 0 && (
+        <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl border border-blue-100 p-5">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-lg bg-blue-600 text-white grid place-items-center flex-shrink-0">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-gray-900">Auto-create sessions from your syllabus</h3>
+              <p className="text-xs text-gray-600 mt-0.5">The engine reads your syllabus's weekly schedule and creates one class session per week with its topics mapped as the in-scope set.</p>
+              {genError && <p className="text-xs text-amber-700 mt-2">{genError}</p>}
+              {showPaste && (
+                <textarea
+                  value={paste}
+                  onChange={(e) => setPaste(e.target.value)}
+                  rows={5}
+                  placeholder={'Paste your class schedule, e.g.\nWeek 1 (Sep 3): Intro; supervised learning\nWeek 2 (Sep 10): Linear models; loss; gradient descent'}
+                  className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              )}
+              <div className="mt-3">
+                <button
+                  onClick={() => genMutation.mutate(showPaste ? paste.trim() : undefined)}
+                  disabled={genMutation.isPending || (showPaste && !paste.trim())}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  {genMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  {showPaste ? 'Generate from pasted schedule' : 'Generate sessions'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Add a session */}
       <div className="bg-white rounded-xl border border-gray-200 p-5">
         <h3 className="text-sm font-medium text-gray-700 mb-1">Add a class session</h3>

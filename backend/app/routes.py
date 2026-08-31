@@ -27,6 +27,7 @@ COURSE_PERFORMANCE = "/api/courses/{course_id}/performance"  # GET anonymized pr
 COURSE_SESSIONS = "/api/courses/{course_id}/sessions"                 # GET list, POST create
 COURSE_SESSION = "/api/courses/{course_id}/sessions/{session_id}"     # PUT update, DELETE, DELETE unenroll
 COURSE_SYLLABUS = "/api/courses/{course_id}/syllabus"   # GET syllabus, POST mark a material as syllabus
+COURSE_SYLLABUS_PROCESS = "/api/courses/{course_id}/syllabus/process"  # POST: parse syllabus -> sessions
 
 # ── Dashboard routes ─────────────────────────────────────────────────────────
 PROFESSOR_DASHBOARD = "/api/professor/dashboard"

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { CheckCircle, AlertCircle, Loader2, Network } from 'lucide-react';
+import { CheckCircle, AlertCircle, Loader2, Network, Calendar } from 'lucide-react';
 import { uploadMaterial, listVersions } from '../../api/materials';
 import type { MaterialVersion } from '../../api/materials';
 import { setSyllabus } from '../../api/courses';
@@ -268,6 +268,19 @@ export default function UploadMaterial() {
               // uploads where the URL only carried the course name); fall back to the
               // URL's courseId, then the dashboard.
               const gid = uploadResult?.course_id || syllabusCourseId;
+              // After a syllabus upload the course is now unlocked — send the
+              // professor to the Sessions tab where they can auto-create sessions
+              // from it. Other uploads go to the concept graph as before.
+              if (isSyllabus) {
+                return (
+                  <Link
+                    to={gid ? `/professor/courses/${gid}?tab=sessions` : '/professor/dashboard'}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                  >
+                    <Calendar className="w-4 h-4" /> Continue — create sessions →
+                  </Link>
+                );
+              }
               return (
                 <Link
                   to={gid ? `/professor/courses/${gid}?tab=graph` : '/professor/dashboard'}

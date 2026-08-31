@@ -35,6 +35,7 @@ from backend.graph.layout import neighbors as graph_neighbors
 from backend.questions.exam_builder import build_variants, assemble_questions
 from backend.app import factory, routes as R
 from backend.app.emails import parse_emails as _parse_emails
+from backend.app.syllabus_parser import parse_syllabus as _parse_syllabus, normalize_date as _normalize_date
 from backend.app.exam_questions import (
     stored_concept_banks as _concept_banks,
     merge_generated_banks,
@@ -542,6 +543,12 @@ class SyllabusSetRequest(BaseModel):
     file_name: Optional[str] = None
 
 
+class SyllabusProcessRequest(BaseModel):
+    """POST body to turn the syllabus into class sessions. When `text` is given
+    it is parsed directly; otherwise the stored syllabus's extracted text is used."""
+    text: Optional[str] = Field(default=None, max_length=200000)
+
+
 def _ensure_enrollment_table(repo) -> None:
     """Create the roster table on first use.
 
@@ -560,6 +567,26 @@ def _ensure_enrollment_table(repo) -> None:
                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                    PRIMARY KEY (course_id, student_email))""")
     repo.conn.commit()
+
+
+def _course_has_syllabus(repo, course_id: str) -> bool:
+    """True if the course has a syllabus attached (course_syllabus row)."""
+    _ensure_syllabus_table(repo)
+    with repo.conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM course_syllabus WHERE course_id = %s::uuid", (course_id,))
+        return cur.fetchone() is not None
+
+
+def _require_syllabus(repo, course_id: str) -> None:
+    """Gate a course action behind an uploaded syllabus (409 if missing).
+
+    Every substantive course action (build the graph, generate/assign exams,
+    create sessions) requires the syllabus first — only enrollment is exempt.
+    Returns a 409 so the client can prompt "Add the syllabus to continue"."""
+    if not _course_has_syllabus(repo, course_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Add the course syllabus before this action.")
 
 
 def _ensure_syllabus_table(repo) -> None:
@@ -737,6 +764,7 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             d = deps(); repo = _request_repo(d)
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                _require_syllabus(repo, course_id)
                 sid = str(_uuid.uuid4())
                 scope = req.in_scope_concepts or []
                 with repo.conn.cursor() as cur:
@@ -916,6 +944,85 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                                  req.file_name))
                 repo.conn.commit()
                 return {"status": "ok", "file_name": req.file_name}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.COURSE_SYLLABUS_PROCESS)
+    def process_syllabus(course_id: str, req: SyllabusProcessRequest,
+                         x_org_name: str = Header(...), x_user_id: str = Header("operator"),
+                         x_role: str = Header("professor")):
+        """Parse the course syllabus into class sessions + in-scope topics.
+
+        Uses the pasted text when provided, else the stored syllabus's extracted
+        text. Idempotent-ish: if the course already has sessions, it creates
+        nothing and returns them, so re-running never duplicates."""
+        import uuid as _uuid
+
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                caller = _pro(x_user_id, x_role, x_org_name, repo, d)
+                _require_syllabus(repo, course_id)
+
+                # Source text: explicit paste wins; otherwise the syllabus's chunks.
+                text = (req.text or "").strip()
+                if not text:
+                    with repo.conn.cursor() as cur:
+                        cur.execute("SELECT material_version_id FROM course_syllabus WHERE course_id = %s::uuid",
+                                    (course_id,))
+                        row = cur.fetchone()
+                    vid = str(row[0]) if row and row[0] else None
+                    if vid:
+                        chunks = repo.list_chunks(vid)
+                        text = "\n".join(c.get("text", "") for c in chunks).strip()
+                if not text:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="The syllabus is still being processed. Try again in a moment, or paste its schedule.")
+
+                # Don't duplicate: if sessions already exist, return them untouched.
+                has_scope = None
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM class_session WHERE course_id = %s::uuid AND org_id = %s::uuid",
+                                (course_id, caller.org_id))
+                    if cur.fetchone()[0] > 0:
+                        return {"status": "exists", "created": 0,
+                                "message": "This course already has sessions — clear them to regenerate."}
+                    has_scope = _session_scope_col(cur)
+
+                parsed = _parse_syllabus(text)
+                if not parsed:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Couldn't find a weekly schedule in the syllabus. Expected lines like \"Week 1: topic; topic\".")
+
+                year = datetime.now(timezone.utc).year
+                created = []
+                with repo.conn.cursor() as cur:
+                    for p in parsed:
+                        sid = str(_uuid.uuid4())
+                        iso = _normalize_date(p.get("date", ""), year)
+                        topics = p.get("topics", [])
+                        if has_scope:
+                            cur.execute(
+                                """INSERT INTO class_session
+                                   (session_id, course_id, org_id, session_date, session_document,
+                                    created_by, in_scope_concepts)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s::jsonb)""",
+                                (sid, course_id, caller.org_id, iso, p.get("title"),
+                                 caller.user_id, _json.dumps(topics)))
+                        else:
+                            cur.execute(
+                                """INSERT INTO class_session
+                                   (session_id, course_id, org_id, session_date, session_document, created_by)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s)""",
+                                (sid, course_id, caller.org_id, iso, p.get("title"), caller.user_id))
+                        created.append({"session_id": sid, "week": p.get("week"),
+                                        "title": p.get("title"), "session_date": iso,
+                                        "in_scope_concepts": topics})
+                repo.conn.commit()
+                return {"status": "created", "created": len(created), "sessions": created}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -1757,6 +1864,7 @@ def _register_graph(app: FastAPI, deps) -> None:
                 if caller.role != Role.PROFESSOR:
                     raise AuthorizationError("professor role required")
                 repo.set_tenant(caller.org_id)
+                _require_syllabus(repo, course_id)
 
                 with repo.conn.cursor() as cur:
                     cur.execute("SELECT count(*) FROM chunk WHERE course_id = %s", (course_id,))
@@ -2028,6 +2136,7 @@ def _register_questions(app: FastAPI, deps) -> None:
                     raise AuthorizationError("professor role required")
 
                 repo.set_tenant(caller.org_id)
+                _require_syllabus(repo, course_id)
                 settings = d["settings"]
 
                 graph_data = _query_graph_version(repo, caller.org_id, course_id)
@@ -2235,6 +2344,7 @@ def _register_questions(app: FastAPI, deps) -> None:
                 if caller.role != Role.PROFESSOR:
                     raise AuthorizationError("professor role required")
                 repo.set_tenant(caller.org_id)
+                _require_syllabus(repo, course_id)
 
                 graph = _query_graph_version(repo, caller.org_id, course_id)
                 concepts = graph.get("concepts", [])
@@ -2291,6 +2401,7 @@ def _register_questions(app: FastAPI, deps) -> None:
                 if caller.role != Role.PROFESSOR:
                     raise AuthorizationError("professor role required")
                 repo.set_tenant(caller.org_id)
+                _require_syllabus(repo, course_id)
                 if not req.questions:
                     return {"status": "error", "message": "no questions to assign"}
 

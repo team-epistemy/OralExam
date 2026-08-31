@@ -56,6 +56,27 @@ export async function setSyllabus(
   return post(`/api/courses/${courseId}/syllabus`, mat);
 }
 
+export interface ProcessedSession {
+  session_id: string;
+  week: string;
+  title: string;
+  session_date: string | null;
+  in_scope_concepts: string[];
+}
+
+export interface ProcessSyllabusResult {
+  status: 'created' | 'exists';
+  created: number;
+  sessions?: ProcessedSession[];
+  message?: string;
+}
+
+// Parse the course syllabus into class sessions + in-scope topics. Pass `text`
+// to parse pasted schedule text; omit to use the stored syllabus's own text.
+export async function processSyllabus(courseId: string, text?: string): Promise<ProcessSyllabusResult> {
+  return post(`/api/courses/${courseId}/syllabus/process`, { text: text || undefined });
+}
+
 /** Parse a pasted/loaded list of emails (CSV, newline, or space separated). */
 export function parseEmails(raw: string): string[] {
   const found = (raw.match(/[^\s,;]+@[^\s,;]+/g) || []).map((e) => e.trim().toLowerCase());
