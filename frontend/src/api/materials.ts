@@ -35,6 +35,7 @@ export async function presignUpload(
   displayName?: string,
   sessionId?: string,
   sessionDate?: string,
+  isSyllabus?: boolean,
 ): Promise<PresignResponse> {
   return post<PresignResponse>('/materials:presign', {
     org_name: orgName,
@@ -45,6 +46,7 @@ export async function presignUpload(
     display_name: displayName || undefined,
     session_id: sessionId || undefined,
     session_date: sessionDate || undefined,
+    is_syllabus: isSyllabus || undefined,
   });
 }
 
@@ -116,9 +118,10 @@ export async function uploadMaterial(
   topic?: string,
   sessionId?: string,
   sessionDate?: string,
+  isSyllabus?: boolean,
 ): Promise<PresignResponse> {
   onProgress?.(10);
-  const presign = await presignUpload(orgName, courseName, file.name, file.type, file.size, topic, sessionId, sessionDate);
+  const presign = await presignUpload(orgName, courseName, file.name, file.type, file.size, topic, sessionId, sessionDate, isSyllabus);
   onProgress?.(30);
   await uploadToS3(presign.upload_url, file);
   onProgress?.(70);

@@ -198,6 +198,9 @@ class IngestRequest(BaseModel):
     # new session is created — a material is always mapped to a session.
     session_id: Optional[str] = None
     session_date: Optional[date] = None
+    # The course syllabus is a course-level document, not a class session, so it
+    # skips session creation/attachment (avoids a stray empty session).
+    is_syllabus: bool = False
 
 
 class PresignResponse(BaseModel):

@@ -54,6 +54,17 @@ def test_upload_creates_a_session_and_maps_the_material_to_it():
     assert mat.session_id == resp.session_id  # the material is mapped to it
 
 
+def test_syllabus_upload_does_not_create_a_session():
+    repo = _repo()
+    req = IngestRequest(org_name="org_a", course_name="Ops", file_name="syllabus.pdf",
+                        mime_type="application/pdf", bytes=2048, is_syllabus=True)
+    resp = _api(repo).presign_by_name("prof_1", "professor", "org_a", req)
+    assert not resp.session_id                # the syllabus is course-level (no session)
+    assert len(repo._sessions) == 0           # no stray class session
+    mat = repo.get_material(resp.material_id)
+    assert not mat.session_id
+
+
 def test_upload_reuses_a_given_session_without_creating_another():
     repo = _repo()
     course = repo.get_or_create_course("org_a", "Ops", "prof_1")

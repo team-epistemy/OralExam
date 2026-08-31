@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, BarChart3, Calendar, Plus, Lock, BookOpen, Sparkles } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, CheckCircle2, Save, KeyRound, ChevronLeft, BarChart3, Calendar, Plus, Lock, BookOpen, Sparkles } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
-import { listMaterials } from '../../api/materials';
+import { listMaterials, uploadMaterial, listVersions } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
-import { listStudents, deleteCourse, getSyllabus, processSyllabus } from '../../api/courses';
+import { listStudents, deleteCourse, getSyllabus, setSyllabus, processSyllabus, type ProcessedSession } from '../../api/courses';
+import { DEFAULT_ORG } from '../../config';
+import FileUpload from '../../components/FileUpload';
 import { getCoursePerformance } from '../../api/performance';
 import { listSessions, createSession, deleteSession, updateSession, type ClassSession } from '../../api/sessions';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
@@ -895,25 +897,175 @@ function PerformanceTab({ courseId }: { courseId: string }) {
   );
 }
 
-// Shown in place of a locked tab until the course has a syllabus. Everything
-// except managing students is gated behind this (matches the backend 409).
+// Dedicated, simple "Upload Syllabus" shown in place of a locked tab until the
+// course has a syllabus. Drop a document -> it's stored, its text is read, and
+// class sessions with their topics are created from it. No material-upload chrome.
 function SyllabusGate({ courseId, courseName }: { courseId: string; courseName: string }) {
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 p-8 text-center max-w-2xl mx-auto">
-      <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-100 rounded-full mb-4">
-        <BookOpen className="w-7 h-7 text-blue-600" />
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  type Phase = 'idle' | 'uploading' | 'reading' | 'creating' | 'done' | 'error';
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState('');
+  const [created, setCreated] = useState<ProcessedSession[]>([]);
+  const [showPaste, setShowPaste] = useState(false);
+  const [paste, setPaste] = useState('');
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const runProcess = async (text?: string) => {
+    setPhase('creating');
+    setError('');
+    try {
+      const res = await processSyllabus(courseId, text);
+      setCreated(res.sessions || []);
+      setPhase('done');
+      queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] });
+    } catch (e) {
+      setError((e as Error).message || 'Could not create sessions from the syllabus.');
+      setShowPaste(true);
+      setPhase('error');
+    }
+  };
+
+  const handleFiles = async (files: File[]) => {
+    const file = files[0];
+    if (!file) return;
+    setError(''); setProgress(0); setPhase('uploading'); setShowPaste(false);
+    try {
+      const res = await uploadMaterial(DEFAULT_ORG, courseName, file, setProgress,
+        undefined, undefined, undefined, true /* isSyllabus */);
+      await setSyllabus(courseId, {
+        material_id: res.material_id, material_version_id: res.material_version_id, file_name: file.name,
+      });
+      // The syllabus is attached now — unlock the course tabs.
+      queryClient.invalidateQueries({ queryKey: ['syllabus', courseId] });
+      // Wait for the text to be extracted, then create sessions.
+      setPhase('reading');
+      let status = '';
+      for (let i = 0; i < 40; i++) {
+        const vers = await listVersions(DEFAULT_ORG, res.material_id);
+        const v = vers.find((x) => x.material_version_id === res.material_version_id);
+        status = v?.status || '';
+        if (status === 'ready' || status === 'failed') break;
+        await sleep(2000);
+      }
+      if (status === 'ready') {
+        await runProcess();
+      } else {
+        setError(status === 'failed'
+          ? "We couldn't read text from that file (it may be a scanned/image-only PDF). Paste the schedule below to create sessions."
+          : "Your syllabus is uploaded, but reading it is taking a while. Paste the schedule below, or come back and use “Auto-create sessions” on the Sessions tab.");
+        setShowPaste(true);
+        setPhase('error');
+      }
+    } catch (e) {
+      setError((e as Error).message || 'Upload failed. Please try again.');
+      setPhase('error');
+    }
+  };
+
+  const busy = phase === 'uploading' || phase === 'reading' || phase === 'creating';
+  const statusText = phase === 'uploading' ? 'Uploading syllabus…'
+    : phase === 'reading' ? 'Reading your syllabus…'
+    : phase === 'creating' ? 'Creating class sessions…' : '';
+
+  if (phase === 'done') {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 p-8 max-w-2xl mx-auto">
+        <div className="text-center">
+          <div className="inline-flex items-center justify-center w-14 h-14 bg-green-100 rounded-full mb-4">
+            <CheckCircle2 className="w-7 h-7 text-green-600" />
+          </div>
+          <h2 className="text-xl font-bold text-gray-900">Syllabus processed</h2>
+          <p className="text-sm text-gray-500 mt-1">Created {created.length} class session{created.length !== 1 ? 's' : ''} with their topics. Your course is unlocked.</p>
+        </div>
+        <div className="mt-5 space-y-2 max-h-72 overflow-y-auto">
+          {created.map((s) => (
+            <div key={s.session_id} className="border border-gray-100 rounded-lg p-3">
+              <div className="flex items-baseline gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-blue-600">{s.week}</span>
+                {s.session_date && <span className="text-xs text-gray-400 font-mono">{s.session_date}</span>}
+              </div>
+              <p className="text-sm font-medium text-gray-800">{s.title}</p>
+              {s.in_scope_concepts?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {s.in_scope_concepts.map((t, i) => (
+                    <span key={i} className="text-xs bg-blue-50 text-blue-700 border border-blue-100 rounded px-2 py-0.5">{t}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-6 text-center">
+          <button
+            onClick={() => { queryClient.invalidateQueries({ queryKey: ['syllabus', courseId] }); navigate(`/professor/courses/${courseId}?tab=sessions`); }}
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+          >
+            Go to your course →
+          </button>
+        </div>
       </div>
-      <h2 className="text-xl font-bold text-gray-900">Add your course syllabus to get started</h2>
-      <p className="text-sm text-gray-500 mt-2 max-w-md mx-auto">
-        Materials, the concept graph, assignments, sessions, and performance all unlock once your syllabus is attached — and we'll auto-create your class sessions with their topics straight from it.
-      </p>
-      <Link
-        to={`/professor/upload?syllabus=1&course=${encodeURIComponent(courseName)}&courseId=${courseId}`}
-        className="inline-flex items-center gap-2 mt-5 px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-      >
-        <Upload className="w-4 h-4" /> Upload syllabus
-      </Link>
-      <p className="text-xs text-gray-400 mt-4">You can still add and manage students in the meantime.</p>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-8 max-w-2xl mx-auto">
+      <div className="text-center">
+        <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-100 rounded-full mb-4">
+          <BookOpen className="w-7 h-7 text-blue-600" />
+        </div>
+        <h2 className="text-xl font-bold text-gray-900">Upload your course syllabus</h2>
+        <p className="text-sm text-gray-500 mt-2 max-w-md mx-auto">
+          Drop your syllabus and we'll read its weekly schedule and create your class sessions with their topics. Everything else unlocks once it's added.
+        </p>
+      </div>
+
+      <div className="mt-6">
+        {busy ? (
+          <div className="flex flex-col items-center justify-center gap-3 border-2 border-dashed border-blue-200 rounded-xl p-8 bg-blue-50/40">
+            <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
+            <p className="text-sm font-medium text-gray-700">{statusText}</p>
+            {phase === 'uploading' && (
+              <div className="w-56 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                <div className="h-full bg-blue-600 transition-all" style={{ width: `${progress}%` }} />
+              </div>
+            )}
+          </div>
+        ) : (
+          <FileUpload accept=".pdf,.docx,.txt,.pptx,.md" onFilesSelected={handleFiles} />
+        )}
+      </div>
+
+      {error && (
+        <div className="mt-4 flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {showPaste && (
+        <div className="mt-3">
+          <textarea
+            value={paste}
+            onChange={(e) => setPaste(e.target.value)}
+            rows={6}
+            placeholder={'Paste your class schedule, e.g.\nWeek 1 (Sep 3): Intro; supervised learning\nWeek 2 (Sep 10): Linear models; loss; gradient descent'}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <button
+            onClick={() => runProcess(paste.trim())}
+            disabled={!paste.trim() || phase === 'creating'}
+            className="mt-2 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          >
+            {phase === 'creating' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            Create sessions from pasted schedule
+          </button>
+        </div>
+      )}
+
+      <p className="text-xs text-gray-400 mt-5 text-center">PDF, DOCX, TXT, or PPTX. You can manage students while the syllabus is being set up.</p>
     </div>
   );
 }

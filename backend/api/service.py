@@ -73,9 +73,10 @@ class MaterialsApi:
         self.repo.set_tenant(org_id)  # RLS is FORCEd: bind tenant before course create
         # user_id owns the course on first creation (existing courses keep their owner).
         course = self.repo.get_or_create_course(org_id, req.course_name, user_id)
-        # A material is always mapped to a class session — reuse the chosen one, or
-        # instantiate one now if none was given (or it doesn't belong to the course).
-        session_id = self.repo.get_or_create_session(
+        # A material is normally mapped to a class session — reuse the chosen one,
+        # or instantiate one now. The syllabus is course-level, not a class, so it
+        # skips this (otherwise it would leave a stray empty session behind).
+        session_id = None if req.is_syllabus else self.repo.get_or_create_session(
             org_id, course.course_id, req.session_id, req.session_date, user_id)
         caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         inner = PresignRequest(file_name=req.file_name, mime_type=req.mime_type,
