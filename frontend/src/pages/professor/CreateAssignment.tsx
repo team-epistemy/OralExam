@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye } from 'lucide-react';
-import { get } from '../../api/client';
+import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network } from 'lucide-react';
+import { get, post } from '../../api/client';
 import { buildExam, assignExam, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
 import { listSessions } from '../../api/sessions';
 
@@ -41,6 +41,9 @@ export default function CreateAssignment() {
   // remove) before publishing. Empty until a preview is generated (P-S-3.1/3.4).
   const [previewQuestions, setPreviewQuestions] = useState<ExamVariantQuestion[]>([]);
   const [inPreview, setInPreview] = useState(false);
+  const [needsRebuild, setNeedsRebuild] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
+  const [rebuildFired, setRebuildFired] = useState(false);
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
@@ -86,6 +89,7 @@ export default function CreateAssignment() {
     if (!canSubmit) return;
     setBuilding(true);
     setError('');
+    setRebuildFired(false);
     try {
       const built = await buildExam(courseId, {
         q_count: qCount, exam_len: duration, difficulty,
@@ -100,6 +104,7 @@ export default function CreateAssignment() {
         throw new Error('No questions could be assembled from the concept graph yet. Upload materials and let the graph build, then try again.');
       }
       setPreviewQuestions(questions.map((q) => ({ ...q })));
+      setNeedsRebuild(!!built.needs_rebuild);
       setEditIdx(null);
       setInPreview(true);
     } catch (err) {
@@ -142,6 +147,22 @@ export default function CreateAssignment() {
       setError(err instanceof Error ? err.message : 'Failed to publish assignment');
     } finally {
       setPublishing(false);
+    }
+  };
+
+  // Author real (case-based) questions: kicks off the async concept-graph
+  // rebuild. Runs in the background (~a minute); the professor regenerates the
+  // preview once it's done.
+  const rebuildGraph = async () => {
+    if (!courseId) return;
+    setRebuilding(true);
+    try {
+      await post(`/api/courses/${courseId}/graph/rebuild`, { domain: 'general' });
+      setRebuildFired(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not start the graph rebuild.');
+    } finally {
+      setRebuilding(false);
     }
   };
 
@@ -306,6 +327,34 @@ export default function CreateAssignment() {
             Regenerate
           </button>
         </div>
+
+        {needsRebuild && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-amber-900">These are placeholder questions</p>
+                <p className="text-xs text-amber-800 mt-0.5">
+                  This course's concept graph doesn't have authored questions yet, so generic templates were used. Rebuild the graph to author real, case-based questions from your materials — then regenerate the preview.
+                </p>
+                {rebuildFired ? (
+                  <p className="text-xs text-amber-800 mt-2 inline-flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Rebuilding in the background (~a minute). Press <span className="font-medium">Regenerate</span> once it's done.
+                  </p>
+                ) : (
+                  <button
+                    onClick={rebuildGraph}
+                    disabled={rebuilding}
+                    className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs font-medium hover:bg-amber-700 disabled:opacity-50 transition-colors"
+                  >
+                    {rebuilding ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Network className="w-3.5 h-3.5" />}
+                    Rebuild concept graph
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="space-y-3">
           {previewQuestions.map((q, i) => (

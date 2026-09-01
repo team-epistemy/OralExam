@@ -165,8 +165,14 @@ class IngestPipeline:
             system_prompt = (
                 "You are an expert knowledge graph builder for educational content. "
                 "Given NEW course material, extract key concepts and their relationships. "
+                "For EACH concept also write 4 oral-exam questions grounded strictly in the "
+                "material: THREE that probe understanding of that concept, and ONE CASE-BASED "
+                "question that opens with a brief 1-2 sentence mini-case (a realistic scenario "
+                "from the material's domain) and then asks the student to APPLY the concept. "
                 "Return ONLY valid JSON: "
-                '{"concepts": [{"label": "...", "definition": "...", "abstraction_level": 0.5}], '
+                '{"concepts": [{"label": "...", "definition": "...", "abstraction_level": 0.5, '
+                '"questions": ["probe 1", "probe 2", "probe 3", '
+                '"Mini-case: <1-2 sentence scenario>. <question applying the concept>"]}], '
                 '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
                 "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
                 "Extract 5-20 NEW concepts from this material. Only return JSON."
@@ -175,7 +181,7 @@ class IngestPipeline:
             data = call_bedrock(
                 self.settings, system_prompt,
                 f"Domain: general\n\n{combined}",
-                max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.1,
+                max_tokens=8000, temperature=0.1,
             )
             new_concepts = data.get("concepts", [])
             new_relations = data.get("relations", [])
@@ -185,6 +191,9 @@ class IngestPipeline:
             merged_concepts = list(existing_concepts)
             for c in new_concepts:
                 if c.get("label", "").lower() not in existing_labels:
+                    # Keep only well-formed authored questions (≤4) so build_exam
+                    # assembles a real bank instead of the generic template.
+                    c["questions"] = [q for q in (c.get("questions") or []) if isinstance(q, str)][:4]
                     merged_concepts.append(c)
                     existing_labels.add(c.get("label", "").lower())
 

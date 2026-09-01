@@ -141,6 +141,7 @@ export interface BuildExamResponse {
   concept_count?: number;
   variants?: ExamVariant[];
   message?: string;
+  needs_rebuild?: boolean;   // stored banks were empty -> generic templates used
 }
 
 export interface BuildExamConfig {
