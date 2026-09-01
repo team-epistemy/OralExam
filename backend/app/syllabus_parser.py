@@ -19,8 +19,14 @@ _DATE_RE = re.compile(
     r"|\d{4}-\d{2}-\d{2}"
     r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?", re.I)
 _HEADER_RE = re.compile(
-    r"^\s*(?:#+\s*|\*+\s*)?(week|class|session|lecture|module|unit|day)\s*#?\s*(\d+)\b\s*(.*)$",
+    r"^\s*(?:#+\s*|\*+\s*)?(week|class|session|lecture|day)\s*#?\s*(\d+)\b\s*(.*)$",
     re.I)
+# A bare-numbered class line ("1. 8/24: Title", "2) Topic") at low indentation —
+# the common schedule format that carries no Week/Class keyword. Requires a
+# period/paren after the number + real content, so page numbers and wrapped
+# lines ("3", "262-267...") don't match. (Modules use Roman numerals and are
+# intentionally not treated as classes.)
+_NUM_HEADER_RE = re.compile(r"^\s{0,3}(\d{1,2})[.)]\s+(\S.*)$")
 _STOP = {"and", "or", "the", "a", "an", "etc", "tbd", "n/a", "readings", "reading"}
 _MONTH_NUM = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
               "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
@@ -61,6 +67,17 @@ def _split_topics(s: str) -> List[str]:
         seen.add(k)
         out.append(c)
     return out
+
+
+def _split_header_topics(s: str) -> List[str]:
+    """Split a class title line into topics. Dashes introduce a sub-list
+    ("Process analysis — flow rate, bottlenecks"), so treat ` — `/` - ` like a
+    separator; then split on ; and commas (outside parens). Internal ':' and
+    'and'/'&' are kept, so "Decision Making under Uncertainty: The Value..." and
+    "Firm Boundaries and Contracting" each stay a single topic."""
+    s = re.sub(r"\s+[—–]\s+", "; ", s)
+    s = re.sub(r"\s-\s", "; ", s)
+    return _split_topics(s)
 
 
 def normalize_date(s: str, default_year: int) -> Optional[str]:
@@ -109,12 +126,17 @@ def parse_syllabus(raw: str) -> List[Dict]:
     blocks: List[Dict] = []
     cur: Optional[Dict] = None
     for line in text.split("\n"):
-        m = _HEADER_RE.match(line)
-        if m:
+        km = _HEADER_RE.match(line)
+        nm = None if km else _NUM_HEADER_RE.match(line)
+        if km or nm:
             if cur:
                 blocks.append(cur)
-            cur = {"kind": m.group(1).lower(), "num": int(m.group(2)),
-                   "rest": m.group(3) or "", "body": []}
+            if km:
+                cur = {"kind": km.group(1).lower(), "num": int(km.group(2)),
+                       "rest": km.group(3) or "", "body": []}
+            else:
+                cur = {"kind": "session", "num": int(nm.group(1)),
+                       "rest": nm.group(2) or "", "body": []}
         elif cur is not None:
             cur["body"].append(line)
     if cur:
@@ -123,25 +145,24 @@ def parse_syllabus(raw: str) -> List[Dict]:
     sessions: List[Dict] = []
     for i, b in enumerate(blocks):
         body_text = "\n".join(b["body"])
-        scan = b["rest"] + "\n" + body_text
-        dm = _DATE_RE.search(scan)
+        # Prefer a date on the header line; fall back to the body.
+        dm = _DATE_RE.search(b["rest"]) or _DATE_RE.search(body_text)
         date = re.sub(r"\s+", " ", dm.group(0)).strip() if dm else ""
 
-        rest = _DATE_RE.sub("", b["rest"])
+        # The class title/topics are on the header line. Drop the date and any
+        # leading numbering/date punctuation.
+        rest = _DATE_RE.sub("", b["rest"], count=1)
         rest = re.sub(r"^[\s\-–—:().,]+", "", rest)
         rest = re.sub(r"[\s\-–—:().,]+$", "", rest).strip()
 
-        title, inline = "", ""
-        sep = re.search(r"\s*[:—–]\s*|\s-\s", rest)
-        if sep:
-            title = rest[:sep.start()].strip()
-            inline = rest[sep.end():].strip()
-        elif re.search(r"[;,]", rest):
-            inline = rest
+        # Topics come from the header title. Bullets under a titled class are
+        # readings/citations, so they're ignored — but when the header has no
+        # title (e.g. "Class 1 — Sep 3"), the bullets ARE the topics.
+        if rest:
+            topics = _split_header_topics(rest)
         else:
-            title = rest
+            topics = _split_topics(body_text)
 
-        topics = _split_topics(inline) + _split_topics(body_text)
         seen, deduped = set(), []
         for t in topics:
             k = t.lower()
@@ -154,7 +175,7 @@ def parse_syllabus(raw: str) -> List[Dict]:
         sessions.append({
             "index": i + 1,
             "week": week_label,
-            "title": title or week_label,
+            "title": rest or week_label,
             "date": date,
             "topics": deduped,
         })
