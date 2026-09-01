@@ -49,6 +49,7 @@ QUESTION_UPDATE = "/api/questions/{question_id}"
 QUESTION_APPROVE = "/api/questions/{question_id}/approve"
 QUESTION_REJECT = "/api/questions/{question_id}/reject"
 EXAM_BUILD = "/api/courses/{course_id}/exams/build"
+EXAM_REGENERATE = "/api/courses/{course_id}/exams/regenerate"  # POST: fresh LLM-authored questions
 EXAM_ASSIGN = "/api/courses/{course_id}/exams/assign"
 
 # ── Text-to-speech (ElevenLabs proxy) ────────────────────────────────────────

@@ -16,6 +16,7 @@ from backend.extract.base import get_extractor
 from backend.chunking import Chunker
 from backend.config import Settings
 from backend.constants import MAX_CHUNKS_FOR_GRAPH, LLM_MAX_TOKENS_GENERATION
+from backend.app.exam_questions import sanitize_bank
 from backend.bedrock_helper import call_bedrock
 
 logger = logging.getLogger(__name__)
@@ -165,14 +166,17 @@ class IngestPipeline:
             system_prompt = (
                 "You are an expert knowledge graph builder for educational content. "
                 "Given NEW course material, extract key concepts and their relationships. "
-                "For EACH concept also write 4 oral-exam questions grounded strictly in the "
-                "material: THREE that probe understanding of that concept, and ONE CASE-BASED "
-                "question that opens with a brief 1-2 sentence mini-case (a realistic scenario "
-                "from the material's domain) and then asks the student to APPLY the concept. "
+                "For EACH concept also author a DEPTH-TAGGED oral-exam question bank grounded "
+                "strictly in the material: 'recall' = 2 questions on precise definitions/facts/"
+                "formulas; 'application' = 2 questions applying the concept to a straightforward "
+                "situation; 'in_depth' = 2 higher-order 'why/how' questions on mechanisms, "
+                "prerequisite chains, or multi-step reasoning; 'case' = 1 question opening with a "
+                "brief 1-2 sentence mini-case (a realistic scenario) that asks the student to APPLY "
+                "the concept. "
                 "Return ONLY valid JSON: "
                 '{"concepts": [{"label": "...", "definition": "...", "abstraction_level": 0.5, '
-                '"questions": ["probe 1", "probe 2", "probe 3", '
-                '"Mini-case: <1-2 sentence scenario>. <question applying the concept>"]}], '
+                '"questions": {"recall": ["...", "..."], "application": ["...", "..."], '
+                '"in_depth": ["...", "..."], "case": ["Mini-case: <scenario>. <apply the concept>"]}}], '
                 '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
                 "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
                 "Extract 5-20 NEW concepts from this material. Only return JSON."
@@ -191,9 +195,9 @@ class IngestPipeline:
             merged_concepts = list(existing_concepts)
             for c in new_concepts:
                 if c.get("label", "").lower() not in existing_labels:
-                    # Keep only well-formed authored questions (≤4) so build_exam
-                    # assembles a real bank instead of the generic template.
-                    c["questions"] = [q for q in (c.get("questions") or []) if isinstance(q, str)][:4]
+                    # Normalize to the depth-tagged bank shape so build_exam can
+                    # filter by difficulty (recall / application / in_depth / case).
+                    c["questions"] = sanitize_bank(c.get("questions"))
                     merged_concepts.append(c)
                     existing_labels.add(c.get("label", "").lower())
 

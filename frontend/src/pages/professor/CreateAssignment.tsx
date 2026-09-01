@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network } from 'lucide-react';
 import { get, post } from '../../api/client';
-import { buildExam, assignExam, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
+import { buildExam, regenerateExam, assignExam, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
 import { listSessions } from '../../api/sessions';
 
 interface Course {
@@ -44,6 +44,7 @@ export default function CreateAssignment() {
   const [needsRebuild, setNeedsRebuild] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildFired, setRebuildFired] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
@@ -163,6 +164,29 @@ export default function CreateAssignment() {
       setError(e instanceof Error ? e.message : 'Could not start the graph rebuild.');
     } finally {
       setRebuilding(false);
+    }
+  };
+
+  // Regenerate = author a fresh set with the LLM (not a reshuffle of the stored
+  // bank), at the current difficulty and week scope.
+  const handleRegenerate = async () => {
+    setRegenerating(true);
+    setError('');
+    try {
+      const res = await regenerateExam(courseId, {
+        q_count: qCount, exam_len: duration, difficulty,
+        concept_ids: weekHasScope ? scopeConcepts : undefined,
+      });
+      if (res.status !== 'completed' || !res.variants?.length) {
+        throw new Error(res.message || 'Could not regenerate questions.');
+      }
+      setPreviewQuestions((res.variants[0].questions || []).map((q) => ({ ...q })));
+      setEditIdx(null);
+      setNeedsRebuild(false);   // these are freshly authored, not templates
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not regenerate questions.');
+    } finally {
+      setRegenerating(false);
     }
   };
 
@@ -319,12 +343,13 @@ export default function CreateAssignment() {
             <span className="font-semibold text-gray-900">{title || 'Untitled'}</span> · {previewQuestions.length} question{previewQuestions.length !== 1 ? 's' : ''} · {duration} min · {DIFFICULTY_LABEL[difficulty]}
           </div>
           <button
-            onClick={handleBuild}
-            disabled={building}
+            onClick={handleRegenerate}
+            disabled={regenerating || building}
+            title="Author a fresh set of questions with AI"
             className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 disabled:opacity-50"
           >
-            {building ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            Regenerate
+            {regenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            {regenerating ? 'Authoring fresh questions…' : 'Regenerate'}
           </button>
         </div>
 

@@ -39,6 +39,7 @@ from backend.app.syllabus_parser import parse_syllabus as _parse_syllabus, norma
 from backend.app.exam_questions import (
     stored_concept_banks as _concept_banks,
     merge_generated_banks,
+    sanitize_bank as _sanitize_bank,
     DIFFICULTY_FOCUS,
 )
 from backend.app.graph_curation import apply_curation
@@ -249,16 +250,19 @@ _GRAPH_EXTRACTION_PROMPT = (
     "(8 to 14). Do not introduce concepts that are not present in the material. "
     "Treat broad or introductory material sparsely, as a few high-level concepts; "
     "for specific, quantitative, or formula-driven material capture concepts more "
-    "granularly. For EACH concept also write 4 oral-exam questions grounded strictly "
-    "in the material: THREE that probe understanding of that concept, and ONE "
-    "CASE-BASED question that opens with a brief 1-2 sentence mini-case (a realistic "
-    "scenario from the material's domain) and then asks the student to APPLY the "
-    "concept to that case. Also identify the prerequisite relationships between "
-    "concepts. "
+    "granularly. For EACH concept also author a DEPTH-TAGGED question bank grounded "
+    "strictly in the material, with these tiers: 'recall' = 2 questions on precise "
+    "definitions/facts/formulas; 'application' = 2 questions applying the concept to "
+    "a straightforward situation; 'in_depth' = 2 higher-order 'why/how' questions on "
+    "mechanisms, prerequisite chains, or multi-step reasoning; 'case' = 1 question "
+    "that opens with a brief 1-2 sentence mini-case (a realistic scenario from the "
+    "material's domain) and asks the student to APPLY the concept to it. Also identify "
+    "the prerequisite relationships between concepts. "
     "Return ONLY valid JSON, no prose, no markdown fences: "
     '{"concepts": [{"label": "2-5 word noun phrase", "definition": "1 sentence", '
-    '"abstraction_level": 0.5, "questions": ["probe 1", "probe 2", "probe 3", '
-    '"Mini-case: <1-2 sentence scenario>. <question applying the concept>"]}], '
+    '"abstraction_level": 0.5, "questions": {"recall": ["...", "..."], '
+    '"application": ["...", "..."], "in_depth": ["...", "..."], '
+    '"case": ["Mini-case: <1-2 sentence scenario>. <question applying the concept>"]}}], '
     '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
     "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
     "src is a prerequisite of dst. Labels are short noun phrases, no numbering."
@@ -294,7 +298,7 @@ def _build_graph_async(settings, org_id: str, course_id: str, domain: str = "gen
             label_ids = build_node_ids(concepts)
             for c in concepts:
                 c["id"] = label_ids.get(c.get("label", ""), "")
-                c["questions"] = [q for q in (c.get("questions") or []) if isinstance(q, str)][:4]
+                c["questions"] = _sanitize_bank(c.get("questions"))
             with conn.cursor() as cur:
                 cur.execute("UPDATE graph_version SET is_active = false "
                             "WHERE org_id = %s AND course_id = %s", (org_id, course_id))
@@ -1986,7 +1990,7 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
     """
     labels = [c.get("label", "") for c in concepts if c.get("label")]
     if not labels:
-        return _concept_banks(concepts)
+        return _concept_banks(concepts, difficulty)
 
     focus = DIFFICULTY_FOCUS.get(difficulty, DIFFICULTY_FOCUS["balanced"])
     concept_lines = "\n".join(
@@ -2020,10 +2024,10 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
                             max_tokens=8000, temperature=0.6)
     except Exception as exc:  # noqa: BLE001 - degrade to stored bank, assignment still works
         logger.warning("per-assignment question generation failed: %s", exc)
-        return _concept_banks(concepts)
+        return _concept_banks(concepts, difficulty)
 
     # Deterministic parse/merge lives in exam_questions (web-free + unit-tested).
-    return merge_generated_banks(concepts, data)
+    return merge_generated_banks(concepts, data, difficulty)
 
 
 def _generate_expected_paths(settings, questions: list, concepts: list, relations: list) -> dict:
@@ -2367,7 +2371,7 @@ def _register_questions(app: FastAPI, deps) -> None:
                 # assemble_questions falls back to a generic template for it; the
                 # `needs_rebuild` flag tells the professor to rebuild the concept
                 # graph, which authors real, case-based questions asynchronously.
-                banks = _concept_banks(concepts)
+                banks = _concept_banks(concepts, req.difficulty)
                 populated = sum(1 for c in concepts
                                 if (banks.get(c.get("id")) or banks.get(c.get("label"))))
                 needs_rebuild = populated < max(1, (len(concepts) + 1) // 2)
@@ -2378,6 +2382,58 @@ def _register_questions(app: FastAPI, deps) -> None:
                 variant["questions"] = assemble_questions(variant["distribution"], banks)
                 return {"status": "completed", "concept_count": len(simple),
                         "variants": [variant], "needs_rebuild": needs_rebuild}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.EXAM_REGENERATE)
+    def regenerate_exam(
+        course_id: str,
+        req: BuildExamRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Like build_exam, but authors FRESH questions with the LLM at the chosen
+        difficulty (synchronous — the professor pressed Regenerate). Bounded to a
+        cap of concepts so one LLM call stays under the gateway timeout; falls back
+        to the stored bank per concept the generator skips."""
+        MAX_REGEN_CONCEPTS = 20
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                _require_syllabus(repo, course_id)
+
+                graph = _query_graph_version(repo, caller.org_id, course_id)
+                concepts = graph.get("concepts", [])
+                relations = graph.get("relations", [])
+                if not concepts:
+                    return {"status": "error",
+                            "message": "No concept graph found. Build the graph first."}
+
+                if req.concept_ids:
+                    sel = set(req.concept_ids)
+                    concepts = [c for c in concepts
+                                if c.get("id") in sel or c.get("label") in sel]
+                # Keep the LLM call bounded so it returns within the gateway window.
+                capped = concepts[:MAX_REGEN_CONCEPTS]
+
+                simple = [{"id": c.get("id") or c.get("label", ""), "label": c.get("label", "")}
+                          for c in capped]
+                banks = _generate_concept_banks(d["settings"], capped, relations, req.difficulty)
+                variant = build_variants(simple, req.q_count, req.difficulty, req.exam_len)[0]
+                variant["title"] = variant["title"].split(" · ")[0]
+                variant["angle_label"] = None
+                variant["questions"] = assemble_questions(variant["distribution"], banks)
+                return {"status": "completed", "concept_count": len(simple),
+                        "variants": [variant], "regenerated": True}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

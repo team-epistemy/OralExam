@@ -155,6 +155,12 @@ export async function buildExam(courseId: string, cfg: BuildExamConfig): Promise
   return post<BuildExamResponse>(`/api/courses/${courseId}/exams/build`, cfg);
 }
 
+// Author FRESH questions with the LLM at the chosen difficulty (synchronous —
+// slower than buildExam, used when the professor presses Regenerate).
+export async function regenerateExam(courseId: string, cfg: BuildExamConfig): Promise<BuildExamResponse> {
+  return post<BuildExamResponse>(`/api/courses/${courseId}/exams/regenerate`, cfg);
+}
+
 export interface AssignExamResult {
   status: string;
   assignment_id?: string;
