@@ -42,6 +42,7 @@ from backend.app.exam_questions import (
     sanitize_bank as _sanitize_bank,
     DIFFICULTY_FOCUS,
 )
+from backend.app.concept_graph import write_document_concepts, recompute_course_graph
 from backend.app.graph_curation import apply_curation
 from backend.app.performance import aggregate_performance
 from backend.db.postgres import PostgresRepository
@@ -164,82 +165,89 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
         return {"nodes": [], "edges": [], "extensions": []}
 
 
-def _rebuild_graph_async(settings, org_id: str, course_id: str) -> None:
-    """Rebuild a course's concept graph in a background thread.
+def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str = "general") -> None:
+    """Rebuild a course's concept graph from ITS OWN documents, with provenance.
 
-    Called after a material is deleted: its concepts would otherwise linger in the
-    active graph forever, since builds are additive and only run on upload. Uses a
-    dedicated connection because the request's pooled one is released before this runs.
+    Extracts concepts per document (writing document_concept / _edge), then
+    recomputes course_concept / _edge from only this course's documents and
+    snapshots the result into graph_version. Because the course graph is a pure
+    function of the course's current documents, off-subject concepts can never
+    accumulate (fixes cross-course leaks) and a deleted document drops out cleanly.
+    Runs synchronously — callers wrap it in a thread.
     """
-    import json as _json, threading, uuid as _uuid
-
-    def _work() -> None:
-        conn = None
-        try:
-            conn = factory.db_connection(settings)
-            with conn.cursor() as cur:
-                cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
-                conn.commit()
-                cur.execute(
-                    "SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
-                    (course_id,),
-                )
-                chunks = [r[0] for r in cur.fetchall()]
-
-            if not chunks:
-                # Last material gone: retire the graph. Clear is_stale too — an empty
-                # course has nothing to be out of date with.
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE graph_version SET is_active = false, is_stale = false "
-                        "WHERE org_id = %s AND course_id = %s",
-                        (org_id, course_id),
-                    )
-                conn.commit()
-                logger.info("Graph retired for course %s (no chunks remain)", course_id[:8])
-                return
-
-            data = call_bedrock(
-                settings,
-                "You are an expert knowledge graph builder for educational content. "
-                "Given course material, extract key concepts and their relationships. "
-                "Return ONLY valid JSON: "
-                '{"concepts": [{"label": "...", "definition": "...", "abstraction_level": 0.5}], '
-                '"relations": [{"src": "...", "dst": "...", "edge_type": "PREREQUISITE_FOR", "confidence": 0.9}]} '
-                "Edge types: PREREQUISITE_FOR, ENABLES, IS_A, PART_OF, APPLIED_IN, CO_REQUIRED_WITH. "
-                "Extract 10-30 concepts. Only return JSON.",
-                f"Domain: general\n\n" + "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH]),
-                max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.1,
-            )
-            concepts = data.get("concepts", [])
-            relations = data.get("relations", [])
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE graph_version SET is_active = false "
-                    "WHERE org_id = %s AND course_id = %s",
-                    (org_id, course_id),
-                )
-                cur.execute(
-                    """INSERT INTO graph_version
-                       (version_id, org_id, course_id, graph_version, node_count,
-                        edge_count, validation_score, is_active, s3_key)
-                       VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
-                    (str(_uuid.uuid4()), org_id, course_id, len(concepts),
-                     len(relations), 0.8,
-                     _json.dumps({"concepts": concepts, "relations": relations})),
-                )
+    import json as _json, uuid as _uuid
+    conn = None
+    try:
+        conn = factory.db_connection(settings)
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
             conn.commit()
-            logger.info("Graph rebuilt after delete for course %s: %d concepts",
-                        course_id[:8], len(concepts))
-        except Exception as exc:
-            logger.warning("Post-delete graph rebuild failed for course %s: %s",
-                           course_id[:8], exc, exc_info=True)
-        finally:
-            if conn is not None:
-                conn.close()
+            cur.execute(
+                "SELECT DISTINCT material_version_id FROM chunk WHERE course_id = %s ORDER BY material_version_id",
+                (course_id,))
+            mv_ids = [str(r[0]) for r in cur.fetchall()]
 
-    threading.Thread(target=_work, daemon=True).start()
+        if not mv_ids:
+            # No materials remain: clear provenance and retire the graph.
+            with conn.cursor() as cur:
+                for tbl in ("document_concept", "document_concept_edge", "course_concept", "course_concept_edge"):
+                    cur.execute("DELETE FROM %s WHERE course_id = %%s::uuid AND org_id = %%s::uuid" % tbl,
+                                (course_id, org_id))
+                cur.execute("UPDATE graph_version SET is_active = false, is_stale = false "
+                            "WHERE org_id = %s AND course_id = %s", (org_id, course_id))
+            conn.commit()
+            logger.info("Graph retired for course %s (no materials remain)", course_id[:8])
+            return
+
+        # Extract per document so every concept keeps its provenance.
+        for mv in mv_ids:
+            with conn.cursor() as cur:
+                cur.execute("SELECT text FROM chunk WHERE material_version_id = %s ORDER BY chunk_index", (mv,))
+                chunks = [r[0] for r in cur.fetchall()]
+            if not chunks:
+                continue
+            data = call_bedrock(settings, _GRAPH_EXTRACTION_PROMPT,
+                                f"Domain: {domain}\n\n" + "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH]),
+                                max_tokens=8000, temperature=0.2)
+            with conn.cursor() as cur:
+                write_document_concepts(cur, org_id, course_id, mv,
+                                        data.get("concepts", []), data.get("relations", []))
+            conn.commit()
+
+        with conn.cursor() as cur:
+            snapshot = recompute_course_graph(cur, org_id, course_id)
+            cur.execute("UPDATE graph_version SET is_active = false WHERE org_id = %s AND course_id = %s",
+                        (org_id, course_id))
+            cur.execute(
+                """INSERT INTO graph_version
+                   (version_id, org_id, course_id, graph_version, node_count,
+                    edge_count, validation_score, is_active, s3_key)
+                   VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
+                (str(_uuid.uuid4()), org_id, course_id, len(snapshot["concepts"]),
+                 len(snapshot["relations"]), 0.8, _json.dumps(snapshot)))
+        conn.commit()
+        logger.info("Course graph rebuilt for %s from %d documents: %d concepts, %d relations",
+                    course_id[:8], len(mv_ids), len(snapshot["concepts"]), len(snapshot["relations"]))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Course graph rebuild failed for %s: %s", course_id[:8], exc, exc_info=True)
+        if conn is not None:
+            try:
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE graph_version SET is_stale = false "
+                                "WHERE org_id = %s AND course_id = %s AND is_active = true", (org_id, course_id))
+                conn.commit()
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _rebuild_graph_async(settings, org_id: str, course_id: str) -> None:
+    """Background rebuild after a material is deleted (provenance-based)."""
+    import threading
+    threading.Thread(target=_rebuild_course_graph_bg, args=(settings, org_id, course_id), daemon=True).start()
 
 
 # Shared extraction prompt: concepts + relationships + a per-concept question bank
@@ -270,68 +278,12 @@ _GRAPH_EXTRACTION_PROMPT = (
 
 
 def _build_graph_async(settings, org_id: str, course_id: str, domain: str = "general") -> None:
-    """(Re)build a course's concept graph WITH an authored question bank in a
-    background thread. The extraction LLM call is large and slow, so it must never
-    run on a web request (that is what caused the "Load failed" gateway timeouts).
-    Persists a fresh active graph version and clears is_stale when done.
-    """
-    import json as _json, threading, uuid as _uuid
-
-    def _work() -> None:
-        conn = None
-        try:
-            conn = factory.db_connection(settings)
-            with conn.cursor() as cur:
-                cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
-                conn.commit()
-                cur.execute("SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
-                            (course_id,))
-                chunks = [r[0] for r in cur.fetchall()]
-            if not chunks:
-                return
-            combined = "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH])
-            data = call_bedrock(settings, _GRAPH_EXTRACTION_PROMPT,
-                                f"Domain: {domain}\n\n{combined}",
-                                max_tokens=8000, temperature=0.2)
-            concepts = data.get("concepts", [])
-            relations = data.get("relations", [])
-            label_ids = build_node_ids(concepts)
-            for c in concepts:
-                c["id"] = label_ids.get(c.get("label", ""), "")
-                c["questions"] = _sanitize_bank(c.get("questions"))
-            with conn.cursor() as cur:
-                cur.execute("UPDATE graph_version SET is_active = false "
-                            "WHERE org_id = %s AND course_id = %s", (org_id, course_id))
-                cur.execute(
-                    """INSERT INTO graph_version
-                       (version_id, org_id, course_id, graph_version, node_count, edge_count,
-                        validation_score, is_active, s3_key)
-                       VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
-                    (str(_uuid.uuid4()), org_id, course_id, len(concepts), len(relations),
-                     0.8, _json.dumps({"concepts": concepts, "relations": relations})),
-                )
-            conn.commit()
-            logger.info("Async graph build done for course %s: %d concepts (with question bank)",
-                        course_id[:8], len(concepts))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Async graph build failed for course %s: %s",
-                           course_id[:8], exc, exc_info=True)
-            # Clear the stale flag so the UI stops polling a build that won't finish.
-            if conn is not None:
-                try:
-                    conn.rollback()
-                    with conn.cursor() as cur:
-                        cur.execute("UPDATE graph_version SET is_stale = false "
-                                    "WHERE org_id = %s AND course_id = %s AND is_active = true",
-                                    (org_id, course_id))
-                    conn.commit()
-                except Exception:  # noqa: BLE001
-                    pass
-        finally:
-            if conn is not None:
-                conn.close()
-
-    threading.Thread(target=_work, daemon=True).start()
+    """Background full (re)build of a course's concept graph, per-document with
+    provenance. The extraction LLM calls are large/slow, so this never runs on a
+    web request (that caused the "Load failed" gateway timeouts)."""
+    import threading
+    threading.Thread(target=_rebuild_course_graph_bg,
+                     args=(settings, org_id, course_id, domain), daemon=True).start()
 
 
 def _is_public(path: str) -> bool:

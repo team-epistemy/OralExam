@@ -17,6 +17,7 @@ from backend.chunking import Chunker
 from backend.config import Settings
 from backend.constants import MAX_CHUNKS_FOR_GRAPH, LLM_MAX_TOKENS_GENERATION
 from backend.app.exam_questions import sanitize_bank
+from backend.app.concept_graph import write_document_concepts, recompute_course_graph
 from backend.bedrock_helper import call_bedrock
 
 logger = logging.getLogger(__name__)
@@ -134,33 +135,21 @@ class IngestPipeline:
             logger.info("Extracting topics from %d new chunks (material %s)",
                         len(new_chunks), msg.material_version_id[:8])
 
-            # Load existing graph to merge into
-            existing_concepts = []
-            existing_relations = []
+            # Concepts already known for THIS course — tell the model so it reuses
+            # exact labels (dedup keys on label) instead of coining variants.
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT s3_key FROM graph_version WHERE course_id = %s AND is_active = true",
-                    (msg.course_id,),
-                )
-                row = cur.fetchone()
-                if row and row[0]:
-                    try:
-                        existing = json.loads(row[0])
-                        existing_concepts = existing.get("concepts", [])
-                        existing_relations = existing.get("relations", [])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                cur.execute("SELECT label FROM course_concept WHERE course_id = %s::uuid AND org_id = %s::uuid",
+                            (msg.course_id, msg.org_id))
+                known_labels = [r[0] for r in cur.fetchall()]
 
             combined = "\n\n".join(new_chunks[:MAX_CHUNKS_FOR_GRAPH])
 
-            # If existing graph has concepts, tell the model about them to avoid duplicates
             existing_context = ""
-            if existing_concepts:
-                existing_labels = [c.get("label", "") for c in existing_concepts]
+            if known_labels:
                 existing_context = (
-                    f"\n\nExisting concepts already in the graph: {', '.join(existing_labels)}. "
-                    "Do NOT re-extract these unless the new material adds significant depth. "
-                    "Focus on NEW concepts from this material and relationships to existing ones."
+                    f"\n\nConcepts already in this course: {', '.join(known_labels)}. "
+                    "Reuse the EXACT same label when this material covers one of them; "
+                    "otherwise add new concepts found in this material."
                 )
 
             system_prompt = (
@@ -190,35 +179,16 @@ class IngestPipeline:
             new_concepts = data.get("concepts", [])
             new_relations = data.get("relations", [])
 
-            # Merge: add new concepts (deduplicate by label)
-            existing_labels = {c.get("label", "").lower() for c in existing_concepts}
-            merged_concepts = list(existing_concepts)
-            for c in new_concepts:
-                if c.get("label", "").lower() not in existing_labels:
-                    # Normalize to the depth-tagged bank shape so build_exam can
-                    # filter by difficulty (recall / application / in_depth / case).
-                    c["questions"] = sanitize_bank(c.get("questions"))
-                    merged_concepts.append(c)
-                    existing_labels.add(c.get("label", "").lower())
-
-            # Merge relations (deduplicate by src+dst+edge_type)
-            existing_rel_keys = {
-                (r.get("src", ""), r.get("dst", ""), r.get("edge_type", ""))
-                for r in existing_relations
-            }
-            merged_relations = list(existing_relations)
-            for r in new_relations:
-                key = (r.get("src", ""), r.get("dst", ""), r.get("edge_type", ""))
-                if key not in existing_rel_keys:
-                    merged_relations.append(r)
-                    existing_rel_keys.add(key)
-
-            version_id = str(uuid.uuid4())
-            graph_json = json.dumps({"concepts": merged_concepts, "relations": merged_relations})
+            # Record THIS document's concepts (mapping 1), then recompute the course
+            # graph from ONLY this course's documents (mapping 2) and snapshot it.
+            # The graph can no longer accumulate off-subject concepts across courses.
             with conn.cursor() as cur:
+                write_document_concepts(cur, msg.org_id, msg.course_id,
+                                        msg.material_version_id, new_concepts, new_relations)
+                snapshot = recompute_course_graph(cur, msg.org_id, msg.course_id)
+                graph_json = json.dumps(snapshot)
                 cur.execute(
-                    "UPDATE graph_version SET is_active = false "
-                    "WHERE org_id = %s AND course_id = %s",
+                    "UPDATE graph_version SET is_active = false WHERE org_id = %s AND course_id = %s",
                     (msg.org_id, msg.course_id),
                 )
                 cur.execute(
@@ -226,13 +196,15 @@ class IngestPipeline:
                        (version_id, org_id, course_id, graph_version, node_count,
                         edge_count, validation_score, is_active, s3_key)
                        VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
-                    (version_id, msg.org_id, msg.course_id, len(merged_concepts),
-                     len(merged_relations), 0.8, graph_json),
+                    (str(uuid.uuid4()), msg.org_id, msg.course_id, len(snapshot["concepts"]),
+                     len(snapshot["relations"]), 0.8, graph_json),
                 )
             conn.commit()
 
-            logger.info("Incremental graph build for course %s: %d new concepts merged, total %d concepts, %d relations",
-                        msg.course_id[:8], len(new_concepts), len(merged_concepts), len(merged_relations))
+            logger.info("Graph build for course %s: document contributed %d concepts; "
+                        "course graph now %d concepts, %d relations",
+                        msg.course_id[:8], len(new_concepts),
+                        len(snapshot["concepts"]), len(snapshot["relations"]))
         finally:
             conn.close()
 
