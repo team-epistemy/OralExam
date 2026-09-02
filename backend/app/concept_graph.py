@@ -128,7 +128,20 @@ def write_document_concepts(cur, org_id, course_id, material_version_id, concept
 
 def recompute_course_graph(cur, org_id, course_id) -> dict:
     """Rebuild course_concept + course_concept_edge from ONLY this course's
-    document_concept rows; return the {concepts, relations} snapshot."""
+    document_concept rows; return the {concepts, relations} snapshot.
+
+    First purges orphaned provenance — rows whose source document no longer has
+    chunks (the material was deleted or re-ingested). Without this, a removed
+    document's concepts would keep resurrecting on every recompute (the observed
+    cross-subject 'leak')."""
+    cur.execute("""DELETE FROM document_concept dc
+                   WHERE dc.course_id = %s::uuid AND dc.org_id = %s::uuid
+                     AND NOT EXISTS (SELECT 1 FROM chunk c WHERE c.material_version_id = dc.material_version_id)""",
+                (course_id, org_id))
+    cur.execute("""DELETE FROM document_concept_edge de
+                   WHERE de.course_id = %s::uuid AND de.org_id = %s::uuid
+                     AND NOT EXISTS (SELECT 1 FROM chunk c WHERE c.material_version_id = de.material_version_id)""",
+                (course_id, org_id))
     cur.execute("""SELECT material_version_id, label, definition, abstraction_level, questions
                    FROM document_concept WHERE course_id = %s::uuid AND org_id = %s::uuid""",
                 (course_id, org_id))

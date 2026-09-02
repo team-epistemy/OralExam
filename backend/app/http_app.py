@@ -567,7 +567,14 @@ def _ensure_syllabus_table(repo) -> None:
 
 # Ordered wipe for course deletion — FKs to course have no ON DELETE CASCADE,
 # so children are removed before parents (course_id where present, else subquery).
+# FK-safe delete order. Several tables reference course / question / exam_session
+# with NO ON DELETE CASCADE, so every one must be cleared before its parent or
+# "Remove course" fails with a foreign-key violation. `_delete_course_rows`
+# skips any table not present in this DB (to_regclass guard), so it's safe across
+# environments/migrations.
 _COURSE_DELETE_STMTS = (
+    "DELETE FROM question_eds_aggregate WHERE session_id IN (SELECT session_id FROM exam_session WHERE course_id = %s::uuid)",
+    "DELETE FROM graph_eds_results WHERE course_id = %s::uuid",
     "DELETE FROM evaluation WHERE course_id = %s::uuid",
     "DELETE FROM session_turn WHERE session_id IN (SELECT session_id FROM exam_session WHERE course_id = %s::uuid)",
     "DELETE FROM grade WHERE course_id = %s::uuid",
@@ -576,14 +583,31 @@ _COURSE_DELETE_STMTS = (
     "DELETE FROM question_set_membership WHERE question_set_id IN (SELECT question_set_id FROM question_set WHERE course_id = %s::uuid)",
     "DELETE FROM question_set WHERE course_id = %s::uuid",
     "DELETE FROM question WHERE course_id = %s::uuid",
+    "DELETE FROM generation_job WHERE course_id = %s::uuid",   # after question (question.generation_job_id → generation_job)
     "DELETE FROM chunk WHERE course_id = %s::uuid",
     "DELETE FROM material_version WHERE material_id IN (SELECT material_id FROM material WHERE course_id = %s::uuid)",
     "DELETE FROM material WHERE course_id = %s::uuid",
     "DELETE FROM graph_version WHERE course_id = %s::uuid",
+    "DELETE FROM document_concept WHERE course_id = %s::uuid",
+    "DELETE FROM document_concept_edge WHERE course_id = %s::uuid",
+    "DELETE FROM course_concept WHERE course_id = %s::uuid",
+    "DELETE FROM course_concept_edge WHERE course_id = %s::uuid",
+    "DELETE FROM class_session WHERE course_id = %s::uuid",
     "DELETE FROM enrollment WHERE course_id = %s::uuid",
     "DELETE FROM course_syllabus WHERE course_id = %s::uuid",
     "DELETE FROM course WHERE course_id = %s::uuid",
 )
+
+
+def _delete_course_rows(cur, course_id: str) -> None:
+    """Run the ordered course-delete statements, skipping tables absent in this
+    DB. One statement per savepoint so a skippable error can't abort the txn."""
+    for sql in _COURSE_DELETE_STMTS:
+        table = sql.split("FROM", 1)[1].split()[0]
+        cur.execute("SELECT to_regclass(%s)", ("public." + table,))
+        if cur.fetchone()[0] is None:
+            continue
+        cur.execute(sql, (course_id,))
 
 
 def _register_course_ops(app: FastAPI, deps) -> None:
@@ -626,8 +650,7 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                 if not row:
                     raise AuthorizationError("course not found")
                 with repo.conn.cursor() as cur:
-                    for sql in _COURSE_DELETE_STMTS:
-                        cur.execute(sql, (course_id,))
+                    _delete_course_rows(cur, course_id)
                 repo.conn.commit()
                 return {"status": "deleted", "course_id": course_id, "course_name": row[0]}
             finally:
