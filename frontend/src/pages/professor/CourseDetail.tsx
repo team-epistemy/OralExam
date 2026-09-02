@@ -12,6 +12,7 @@ import FileUpload from '../../components/FileUpload';
 import { getCoursePerformance } from '../../api/performance';
 import { listSessions, createSession, deleteSession, updateSession, type ClassSession } from '../../api/sessions';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
+import DocumentGraphModal from '../../components/DocumentGraphModal';
 
 // Cytoscape is heavy — load it only when a graph is actually rendered.
 const ConceptGraphCanvas = lazy(() => import('../../components/ConceptGraphCanvas'));
@@ -191,12 +192,23 @@ export default function CourseDetail() {
 
 function MaterialsTab({ materials, courseId, courseName, queryClient }: { materials: Material[]; courseId: string; courseName: string; queryClient: ReturnType<typeof useQueryClient> }) {
   const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
+  const [graphViewing, setGraphViewing] = useState<{ id: string; name: string } | null>(null);
   // Sessions carry which materials belong to them; use that to group the list.
   const { data: sessionsData } = useQuery({
     queryKey: ['course-sessions', courseId],
     queryFn: () => listSessions(courseId),
   });
   const sessions = sessionsData?.sessions ?? [];
+
+  // Which documents have a per-document concept graph (mapping 1) → material_version_id -> concept_count.
+  const { data: docGraphData } = useQuery({
+    queryKey: ['graph-documents', courseId],
+    queryFn: () => get<{ documents: Array<{ material_version_id: string; file_name: string; concept_count: number }> }>(
+      `/api/courses/${courseId}/graph/documents`),
+    enabled: !!courseId,
+  });
+  const conceptCounts = new Map<string, number>(
+    (docGraphData?.documents ?? []).map((d) => [d.material_version_id, d.concept_count]));
 
   const handleDelete = async (materialId: string) => {
     if (!confirm('Delete this material? This will also remove its chunks and embeddings.')) return;
@@ -230,33 +242,45 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
   const unassigned = materials.filter((m) => !byMaterial.has(materialId(m)));
   if (unassigned.length) groups.push({ key: '__none__', title: 'Not assigned to a session', subtitle: '', items: unassigned });
 
-  const renderRow = (material: any, i: number) => (
-    <div key={materialId(material) || i} className="flex items-center gap-4 px-5 py-3">
+  const renderRow = (material: any, i: number) => {
+    const mvid = materialId(material);
+    const name = material.display_name || material.filename || material.file_name || 'Document';
+    const conceptCount = conceptCounts.get(mvid);
+    return (
+    <div key={mvid || i} className="flex items-center gap-4 px-5 py-3">
       <FileText className="w-4 h-4 text-gray-400" />
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-gray-900 truncate">{material.display_name || material.filename || material.file_name}</p>
+        <p className="text-sm font-medium text-gray-900 truncate">{name}</p>
         <p className="text-xs text-gray-500">{material.created_at ? new Date(material.created_at).toLocaleDateString() : ''}</p>
       </div>
       <StatusBadge status={material.status || 'ready'} />
+      {conceptCount ? (
+        <button
+          onClick={() => setGraphViewing({ id: mvid, name })}
+          className="inline-flex items-center gap-1 p-1.5 text-purple-600 hover:bg-purple-50 rounded transition-colors"
+          title={`View concept graph (${conceptCount} concept${conceptCount === 1 ? '' : 's'})`}
+        >
+          <Network className="w-4 h-4" />
+          <span className="text-xs">{conceptCount}</span>
+        </button>
+      ) : null}
       <button
-        onClick={() => setViewing({
-          id: materialId(material),
-          name: material.display_name || material.filename || material.file_name || 'Document',
-        })}
+        onClick={() => setViewing({ id: mvid, name })}
         className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
         title="View document"
       >
         <Eye className="w-4 h-4" />
       </button>
       <button
-        onClick={() => handleDelete(materialId(material))}
+        onClick={() => handleDelete(mvid)}
         className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
         title="Delete material"
       >
         <Trash2 className="w-4 h-4" />
       </button>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-4">
@@ -292,6 +316,13 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
           materialId={viewing.id}
           fallbackName={viewing.name}
           onClose={() => setViewing(null)}
+        />
+      )}
+      {graphViewing && (
+        <DocumentGraphModal
+          materialVersionId={graphViewing.id}
+          fallbackName={graphViewing.name}
+          onClose={() => setGraphViewing(null)}
         />
       )}
     </div>
