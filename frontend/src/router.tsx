@@ -9,6 +9,7 @@ import UploadMaterial from './pages/professor/UploadMaterial';
 import CreateAssignment from './pages/professor/CreateAssignment';
 import ProfessorAssignments from './pages/professor/Assignments';
 import GradeView from './pages/professor/GradeView';
+import AssignmentPreview from './pages/professor/AssignmentPreview';
 import StudentDashboard from './pages/student/Dashboard';
 import StudentCourse from './pages/student/StudentCourse';
 import TakeExam from './pages/student/TakeExam';
@@ -111,6 +112,10 @@ export const router = createBrowserRouter([
       {
         path: '/professor/assignments/:assignmentId/grades',
         element: <RequireRole role="professor"><GradeView /></RequireRole>,
+      },
+      {
+        path: '/professor/assignments/:assignmentId/preview',
+        element: <RequireRole role="professor"><AssignmentPreview /></RequireRole>,
       },
       // Student routes
       {

@@ -3198,6 +3198,98 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
+    @app.get(R.ASSIGNMENT_PREVIEW)
+    def preview_assignment(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Read-only view of exactly what a student sees, for a professor.
+
+        Returns the same question payload as ASSIGNMENT_START (question text +
+        derived topic + position) plus the meta needed to render the exam chrome
+        and the case materials — but never creates an exam_session, submits an
+        answer, or grades anything. Professors only (tenant-scoped)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                with repo.conn.cursor() as cur:
+                    cur.execute("""SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='assignment' AND column_name='assignment_type'""")
+                    type_col = "assignment_type" if cur.fetchone() is not None else "'assignment'"
+                    cur.execute(
+                        f"""SELECT course_id, title, question_set_id, config, status, {type_col}
+                            FROM assignment WHERE assignment_id = %s::uuid""",
+                        (assignment_id,),
+                    )
+                    arow = cur.fetchone()
+                if not arow:
+                    raise AuthorizationError("assignment not found")
+
+                question_set_id = str(arow[2])
+                cfg = arow[3] if isinstance(arow[3], dict) else (_json.loads(arow[3]) if arow[3] else {})
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT q.question_id, q.text, q.concept_ids, qsm.position
+                           FROM question_set_membership qsm
+                           JOIN question q ON q.question_id = qsm.question_id
+                           WHERE qsm.question_set_id = %s::uuid
+                           ORDER BY qsm.position""",
+                        (question_set_id,),
+                    )
+                    qrows = cur.fetchall()
+
+                questions = []
+                for qr in qrows:
+                    concept_ids = qr[2] if isinstance(qr[2], list) else []
+                    questions.append({
+                        "question_id": str(qr[0]),
+                        "topic": concept_ids[0] if concept_ids else "general",
+                        "text": qr[1],
+                        "index": qr[3],
+                    })
+
+                # Case materials — mirror ASSIGNMENT_CASE (only when case-based).
+                case_materials = []
+                if cfg.get("include_case"):
+                    for m in repo.list_materials(str(arow[0])):
+                        if not m.current_version_id:
+                            continue
+                        v = repo.get_version(m.current_version_id)
+                        if not v or getattr(v.status, "value", str(v.status)) != "ready":
+                            continue
+                        case_materials.append({
+                            "material_id": m.material_id,
+                            "version_id": v.material_version_id,
+                            "file_name": v.file_name,
+                            "source_type": getattr(v.source_type, "value", str(v.source_type)),
+                        })
+
+                return {
+                    "assignment_id": assignment_id,
+                    "title": arow[1],
+                    "assignment_type": arow[5] or "assignment",
+                    "status": arow[4],
+                    "difficulty": cfg.get("difficulty", "balanced"),
+                    "duration_minutes": cfg.get("time_limit_minutes"),
+                    "include_case": bool(cfg.get("include_case")),
+                    "question_count": len(questions),
+                    "questions": questions,
+                    "case_materials": case_materials,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
     # ── GET /api/assignments/{assignment_id}/sessions ──────────────────────
     @app.get(R.ASSIGNMENT_SESSIONS)
     def list_assignment_sessions(

@@ -660,6 +660,13 @@ function AssignmentsTab({ assignments, courseId, queryClient }: { assignments: A
               </div>
               <StatusBadge status={a.status || 'active'} />
               <Link
+                to={`/professor/assignments/${a.assignment_id || a.id}/preview`}
+                className="inline-flex items-center gap-1 text-xs px-3 py-1 border border-purple-200 text-purple-600 rounded-lg hover:bg-purple-50 transition-colors"
+                title="See exactly what the student sees"
+              >
+                <Eye className="w-3.5 h-3.5" /> Preview
+              </Link>
+              <Link
                 to={`/professor/assignments/${a.assignment_id || a.id}/grades`}
                 className="text-xs px-3 py-1 border border-blue-200 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
               >

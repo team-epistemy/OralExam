@@ -67,6 +67,7 @@ MATERIAL_DELETE = "/api/materials/{material_id}"
 ASSIGNMENT_START = "/api/assignments/{assignment_id}/start"
 ASSIGNMENT_RESULTS = "/api/assignments/{assignment_id}/results"
 ASSIGNMENT_CASE = "/api/assignments/{assignment_id}/case"
+ASSIGNMENT_PREVIEW = "/api/assignments/{assignment_id}/preview"  # GET: read-only student-view data for a professor (no session)
 SESSION_ANSWER = "/api/sessions/{session_id}/answer"
 SESSION_COMPLETE = "/api/sessions/{session_id}/complete"
 SESSION_STATUS = "/api/sessions/{session_id}/status"

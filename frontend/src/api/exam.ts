@@ -57,6 +57,24 @@ export async function startExamSession(assignmentId: string): Promise<StartExamR
   return post<StartExamResponse>(`/api/assignments/${assignmentId}/start`, {});
 }
 
+// Read-only view of what a student sees, for a professor. Never starts a session.
+export interface AssignmentPreview {
+  assignment_id: string;
+  title: string;
+  assignment_type: AssignmentType;
+  status: string;
+  difficulty: string;
+  duration_minutes: number | null;
+  include_case: boolean;
+  question_count: number;
+  questions: Array<{ question_id: string; topic: string; text: string; index: number }>;
+  case_materials: CaseMaterial[];
+}
+
+export async function getAssignmentPreview(assignmentId: string): Promise<AssignmentPreview> {
+  return get<AssignmentPreview>(`/api/assignments/${assignmentId}/preview`);
+}
+
 export async function submitAnswer(
   sessionId: string,
   questionIndex: number,
