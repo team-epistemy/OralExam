@@ -807,8 +807,18 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 with repo.conn.cursor() as cur:
-                    _require_unique_session_topic(cur, course_id, caller.org_id,
-                                                  req.session_document, session_id)
+                    # Enforce unique titles only when the title actually changes —
+                    # a scope-only save resends the existing title and must not trip
+                    # the guard (which would 409 whenever a duplicate title exists,
+                    # e.g. from a syllabus with repeated class titles).
+                    cur.execute("""SELECT session_document FROM class_session
+                                   WHERE session_id = %s::uuid AND course_id = %s::uuid AND org_id = %s::uuid""",
+                                (session_id, course_id, caller.org_id))
+                    _cur_row = cur.fetchone()
+                    _current_title = ((_cur_row[0] if _cur_row else None) or "").strip().lower()
+                    if (req.session_document or "").strip().lower() != _current_title:
+                        _require_unique_session_topic(cur, course_id, caller.org_id,
+                                                      req.session_document, session_id)
                     sets = ["session_date = %s", "session_document = %s"]
                     params = [req.session_date, req.session_document]
                     # Only touch scope when the caller provided it, so a plain
@@ -1005,28 +1015,48 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                         detail="Couldn't find a weekly schedule in the syllabus. Expected lines like \"Week 1: topic; topic\".")
 
                 year = datetime.now(timezone.utc).year
+                # Session titles are unique per course (enforced on manual add/edit).
+                # A syllabus can repeat a class title (e.g. two "Introduction"s), so
+                # uniquify here — append " (2)", " (3)" — to uphold that invariant.
+                # Blank titles are exempt (untitled sessions may repeat).
+                _used = set()
+
+                def _uniq_title(t):
+                    base = (t or "").strip()
+                    if not base:
+                        return base
+                    if base.lower() not in _used:
+                        _used.add(base.lower())
+                        return base
+                    n = 2
+                    while ("%s (%d)" % (base.lower(), n)) in _used:
+                        n += 1
+                    _used.add("%s (%d)" % (base.lower(), n))
+                    return "%s (%d)" % (base, n)
+
                 created = []
                 with repo.conn.cursor() as cur:
                     for p in parsed:
                         sid = str(_uuid.uuid4())
                         iso = _normalize_date(p.get("date", ""), year)
                         topics = p.get("topics", [])
+                        title = _uniq_title(p.get("title"))
                         if has_scope:
                             cur.execute(
                                 """INSERT INTO class_session
                                    (session_id, course_id, org_id, session_date, session_document,
                                     created_by, in_scope_concepts)
                                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s::jsonb)""",
-                                (sid, course_id, caller.org_id, iso, p.get("title"),
+                                (sid, course_id, caller.org_id, iso, title,
                                  caller.user_id, _json.dumps(topics)))
                         else:
                             cur.execute(
                                 """INSERT INTO class_session
                                    (session_id, course_id, org_id, session_date, session_document, created_by)
                                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s)""",
-                                (sid, course_id, caller.org_id, iso, p.get("title"), caller.user_id))
+                                (sid, course_id, caller.org_id, iso, title, caller.user_id))
                         created.append({"session_id": sid, "week": p.get("week"),
-                                        "title": p.get("title"), "session_date": iso,
+                                        "title": title, "session_date": iso,
                                         "in_scope_concepts": topics})
                 repo.conn.commit()
                 return {"status": "created", "created": len(created), "sessions": created}
