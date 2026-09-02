@@ -244,8 +244,11 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
 
   const renderRow = (material: any, i: number) => {
     const mvid = materialId(material);
+    // The graph is keyed by material_version_id; the name-based list returns it as
+    // current_version_id (the dashboard path already puts the version id in material_id).
+    const versionId = material.current_version_id || mvid;
     const name = material.display_name || material.filename || material.file_name || 'Document';
-    const conceptCount = conceptCounts.get(mvid);
+    const conceptCount = versionId ? conceptCounts.get(versionId) : undefined;
     return (
     <div key={mvid || i} className="flex items-center gap-4 px-5 py-3">
       <FileText className="w-4 h-4 text-gray-400" />
@@ -256,7 +259,7 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
       <StatusBadge status={material.status || 'ready'} />
       {conceptCount ? (
         <button
-          onClick={() => setGraphViewing({ id: mvid, name })}
+          onClick={() => setGraphViewing({ id: versionId, name })}
           className="inline-flex items-center gap-1 p-1.5 text-purple-600 hover:bg-purple-50 rounded transition-colors"
           title={`View concept graph (${conceptCount} concept${conceptCount === 1 ? '' : 's'})`}
         >
