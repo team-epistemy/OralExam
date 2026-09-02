@@ -42,7 +42,7 @@ from backend.app.exam_questions import (
     sanitize_bank as _sanitize_bank,
     DIFFICULTY_FOCUS,
 )
-from backend.app.concept_graph import write_document_concepts, recompute_course_graph
+from backend.app.concept_graph import write_document_concepts, recompute_course_graph, document_graph
 from backend.app.graph_curation import apply_curation
 from backend.app.performance import aggregate_performance
 from backend.db.postgres import PostgresRepository
@@ -1819,6 +1819,81 @@ def _register_graph(app: FastAPI, deps) -> None:
 
                 graph_info = _query_graph_version(repo, caller.org_id, course_id)
                 return graph_info
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.GRAPH_DOCUMENTS)
+    def list_graph_documents(
+        course_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Documents in this course that have a per-document concept graph."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.document_concept')")
+                    if cur.fetchone()[0] is None:
+                        return {"documents": []}
+                    cur.execute(
+                        """SELECT mv.material_version_id, mv.file_name, count(*)
+                           FROM document_concept dc
+                           JOIN material_version mv ON mv.material_version_id = dc.material_version_id
+                           WHERE dc.course_id = %s::uuid AND dc.org_id = %s::uuid
+                           GROUP BY mv.material_version_id, mv.file_name
+                           ORDER BY mv.file_name""",
+                        (course_id, caller.org_id))
+                    docs = [{"material_version_id": str(r[0]), "file_name": r[1], "concept_count": r[2]}
+                            for r in cur.fetchall()]
+                return {"documents": docs}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.MATERIAL_GRAPH)
+    def material_graph(
+        material_version_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """One document's concept graph (its own concepts + edges), same shape as
+        the course graph so the UI renders it identically."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    g = document_graph(cur, caller.org_id, material_version_id)
+                    cur.execute("SELECT file_name FROM material_version WHERE material_version_id = %s::uuid",
+                                (material_version_id,))
+                    row = cur.fetchone()
+                layout = compute_layout(g["concepts"], g["relations"])
+                return {
+                    "status": "ready" if g["concepts"] else "empty",
+                    "source": row[0] if row else None,
+                    "node_count": len(g["concepts"]),
+                    "edge_count": len(g["relations"]),
+                    "concepts": g["concepts"],
+                    "edges": g["relations"],
+                    "relations": g["relations"],
+                    "nodes": layout["nodes"],
+                    "graph_edges": layout["edges"],
+                }
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

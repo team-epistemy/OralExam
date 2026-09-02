@@ -39,6 +39,8 @@ STUDENT_ASSIGNMENTS = "/api/student/assignments"
 GRAPH_GET = "/api/courses/{course_id}/graph"
 GRAPH_REBUILD = "/api/courses/{course_id}/graph/rebuild"
 GRAPH_CONCEPTS = "/api/courses/{course_id}/graph/concepts"  # PUT: persist curated concept set
+GRAPH_DOCUMENTS = "/api/courses/{course_id}/graph/documents"  # GET: docs that have a per-document concept graph
+MATERIAL_GRAPH = "/api/materials/{material_version_id}/graph"  # GET: one document's concept graph
 GRAPH_NEIGHBORS = "/api/graph/{concept_id}/neighbors"
 
 # ── M5 Question routes ───────────────────────────────────────────────────────

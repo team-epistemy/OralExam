@@ -126,6 +126,26 @@ def write_document_concepts(cur, org_id, course_id, material_version_id, concept
              float(r.get("confidence") or 0.8)))
 
 
+def document_graph(cur, org_id, material_version_id) -> dict:
+    """The concept graph for a SINGLE document (mapping 1): its own concepts +
+    edges from document_concept / document_concept_edge. Returns the same
+    {concepts, relations} shape as the course graph so the UI renders it the same."""
+    cur.execute("""SELECT material_version_id, label, definition, abstraction_level, questions
+                   FROM document_concept WHERE material_version_id = %s::uuid AND org_id = %s::uuid""",
+                (material_version_id, org_id))
+    concept_rows = [{"material_version_id": r[0], "label": r[1], "definition": r[2],
+                     "abstraction_level": r[3], "questions": r[4]} for r in cur.fetchall()]
+    cur.execute("""SELECT src_label, dst_label, edge_type, confidence
+                   FROM document_concept_edge WHERE material_version_id = %s::uuid AND org_id = %s::uuid""",
+                (material_version_id, org_id))
+    edge_rows = [{"src_label": r[0], "dst_label": r[1], "edge_type": r[2], "confidence": r[3]}
+                 for r in cur.fetchall()]
+    graph = merge_document_concepts(concept_rows, edge_rows)
+    for c in graph["concepts"]:
+        c.pop("sources", None)
+    return graph
+
+
 def recompute_course_graph(cur, org_id, course_id) -> dict:
     """Rebuild course_concept + course_concept_edge from ONLY this course's
     document_concept rows; return the {concepts, relations} snapshot.

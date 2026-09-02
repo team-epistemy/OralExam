@@ -309,7 +309,6 @@ function GraphTab({ courseId }: { courseId: string }) {
   });
 
   const rawConcepts = graphData?.concepts || [];
-  const edges = graphData?.edges || [];
   const nodeCount = graphData?.node_count || rawConcepts.length;
   const isStale = Boolean(graphData?.is_stale);
 
@@ -358,6 +357,46 @@ function GraphTab({ courseId }: { courseId: string }) {
     setDirty(true);
   };
 
+  // Per-document concept graph: the cumulative course graph is the union of each
+  // document's own graph. This selector lets the professor view one document's
+  // graph (mapping: document -> concept-list -> graph). Read-only.
+  const [docId, setDocId] = useState('');
+  const { data: docsData } = useQuery({
+    queryKey: ['graph-documents', courseId],
+    queryFn: () => get<{ documents: Array<{ material_version_id: string; file_name: string; concept_count: number }> }>(
+      `/api/courses/${courseId}/graph/documents`),
+    enabled: !!courseId,
+  });
+  const documents = docsData?.documents ?? [];
+  const { data: docGraph } = useQuery<any>({
+    queryKey: ['material-graph', docId],
+    queryFn: () => get<any>(`/api/materials/${docId}/graph`),
+    enabled: !!docId,
+  });
+  const viewingDoc = !!docId;
+  const view = viewingDoc ? docGraph : graphData;
+  const viewConcepts = view?.concepts || [];
+  const viewEdges = view?.edges || [];
+  const viewNodeCount = view?.node_count ?? viewConcepts.length;
+
+  const DocSelect = documents.length > 0 ? (
+    <div className="flex items-center gap-2">
+      <label className="text-xs font-medium text-gray-600">Graph for</label>
+      <select
+        value={docId}
+        onChange={(e) => setDocId(e.target.value)}
+        className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+      >
+        <option value="">Whole course (cumulative)</option>
+        {documents.map((dc) => (
+          <option key={dc.material_version_id} value={dc.material_version_id}>
+            {dc.file_name} ({dc.concept_count})
+          </option>
+        ))}
+      </select>
+    </div>
+  ) : null;
+
   if (isLoading) {
     return (
       <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
@@ -369,7 +408,15 @@ function GraphTab({ courseId }: { courseId: string }) {
   if (nodeCount > 0) {
     return (
       <div className="space-y-4">
-        {isStale && (
+        {DocSelect && (
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            {DocSelect}
+            {viewingDoc && (
+              <span className="text-xs text-gray-400">Read-only · document graph{view?.source ? ` · ${view.source}` : ''}</span>
+            )}
+          </div>
+        )}
+        {!viewingDoc && isStale && (
           <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
             <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
             <div className="flex-1">
@@ -392,11 +439,11 @@ function GraphTab({ courseId }: { courseId: string }) {
         {/* Graph stats */}
         <div className="flex items-center justify-center gap-8 py-4">
           <div className="text-center">
-            <p className="text-3xl font-bold text-blue-600">{nodeCount}</p>
+            <p className="text-3xl font-bold text-blue-600">{viewNodeCount}</p>
             <p className="text-xs text-gray-500">Concepts</p>
           </div>
           <div className="text-center">
-            <p className="text-3xl font-bold text-purple-600">{edges.length}</p>
+            <p className="text-3xl font-bold text-purple-600">{viewEdges.length}</p>
             <p className="text-xs text-gray-500">Connections</p>
           </div>
         </div>
@@ -405,11 +452,18 @@ function GraphTab({ courseId }: { courseId: string }) {
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <h3 className="text-sm font-medium text-gray-700 mb-3">Concept Map</h3>
           <Suspense fallback={<div className="h-[520px] flex items-center justify-center text-sm text-gray-400">Loading map…</div>}>
-            <ConceptGraphCanvas concepts={rawConcepts} edges={edges} />
+            <ConceptGraphCanvas concepts={viewConcepts} edges={viewEdges} />
           </Suspense>
         </div>
 
-        {/* Concept chips - Review & Curate */}
+        {viewingDoc && (
+          <div className="bg-white rounded-xl border border-gray-200 p-4 text-sm text-gray-600">
+            Concepts extracted from this one document. Curation &amp; rebuild apply to the cumulative course graph — switch to <span className="font-medium">Whole course</span> to edit.
+          </div>
+        )}
+
+        {/* Concept chips - Review & Curate (cumulative course graph only) */}
+        {!viewingDoc && (
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <h3 className="text-sm font-medium text-gray-700 mb-1">Concept Graph — Review & Curate</h3>
           <p className="text-xs text-gray-500 mb-4 leading-relaxed">
@@ -479,13 +533,14 @@ function GraphTab({ courseId }: { courseId: string }) {
             </div>
           </div>
         </div>
+        )}
 
-        {/* Relationships */}
-        {edges.length > 0 && (
+        {/* Relationships (reflects the active view — course or document) */}
+        {viewEdges.length > 0 && (
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <h3 className="text-sm font-medium text-gray-700 mb-3">Relationships</h3>
             <div className="space-y-1.5 max-h-48 overflow-y-auto">
-              {edges.slice(0, 15).map((edge: any, i: number) => (
+              {viewEdges.slice(0, 15).map((edge: any, i: number) => (
                 <div key={i} className="flex items-center gap-2 text-xs text-gray-600">
                   <span className="font-medium text-gray-900">{edge.src || '?'}</span>
                   <span className="text-purple-600 font-medium">{edge.edge_type}</span>
