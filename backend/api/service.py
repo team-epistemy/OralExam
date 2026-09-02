@@ -28,6 +28,10 @@ def detect_source_type(file_name: str) -> SourceType:
         return SourceType.PPTX
     if lower.endswith(".docx"):
         return SourceType.DOCX
+    if lower.endswith(".doc"):
+        return SourceType.DOC
+    if lower.endswith(".rtf"):
+        return SourceType.RTF
     if lower.endswith(".pdf"):
         return SourceType.PDF
     if lower.endswith(".txt"):
@@ -74,10 +78,12 @@ class MaterialsApi:
         # user_id owns the course on first creation (existing courses keep their owner).
         course = self.repo.get_or_create_course(org_id, req.course_name, user_id)
         # A material is normally mapped to a class session — reuse the chosen one,
-        # or instantiate one now. The syllabus is course-level, not a class, so it
-        # skips this (otherwise it would leave a stray empty session behind).
+        # or instantiate one now, titled with the topic. The syllabus is
+        # course-level, so it skips this (avoids a stray empty session).
+        title = (req.session_title or "").strip() or None
         session_id = None if req.is_syllabus else self.repo.get_or_create_session(
-            org_id, course.course_id, req.session_id, req.session_date, user_id)
+            org_id, course.course_id, req.session_id, req.session_date, user_id,
+            session_document=title)
         caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         inner = PresignRequest(file_name=req.file_name, mime_type=req.mime_type,
                                bytes=req.bytes, material_id=req.material_id,

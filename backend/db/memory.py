@@ -60,7 +60,8 @@ class InMemoryRepository:
 
     def get_or_create_session(self, org_id: str, course_id: str,
                               session_id: Optional[str] = None,
-                              session_date=None, created_by: Optional[str] = None) -> str:
+                              session_date=None, created_by: Optional[str] = None,
+                              session_document: Optional[str] = None) -> str:
         """Reuse a session that belongs to the course, else create a new one."""
         import uuid as _uuid
         if session_id:
@@ -70,6 +71,7 @@ class InMemoryRepository:
         new_id = str(_uuid.uuid4())
         self._sessions[new_id] = {"session_id": new_id, "course_id": course_id,
                                   "org_id": org_id, "session_date": session_date,
+                                  "session_document": session_document,
                                   "created_by": created_by}
         return new_id
 

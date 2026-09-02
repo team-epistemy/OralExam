@@ -6,6 +6,7 @@ uvicorn>=0.27
 pyjwt[crypto]>=2.8
 python-pptx>=0.6.21
 python-docx>=1.1.0
+striprtf>=0.0.26
 pypdf>=4.0
 psycopg2-binary>=2.9
 # M4 — graph, vector search, embeddings

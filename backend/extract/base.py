@@ -18,6 +18,8 @@ def get_extractor(source_type: SourceType) -> Extractor:
     from backend.extract.markdown import MarkdownExtractor
     from backend.extract.pptx import PptxExtractor
     from backend.extract.docx import DocxExtractor
+    from backend.extract.doc import DocExtractor
+    from backend.extract.rtf import RtfExtractor
     from backend.extract.pdf import PdfExtractor
     table = {
         SourceType.MARKDOWN: MarkdownExtractor(),
@@ -25,6 +27,8 @@ def get_extractor(source_type: SourceType) -> Extractor:
         SourceType.TEXT: MarkdownExtractor(),
         SourceType.PPTX: PptxExtractor(),
         SourceType.DOCX: DocxExtractor(),
+        SourceType.DOC: DocExtractor(),
+        SourceType.RTF: RtfExtractor(),
         SourceType.PDF: PdfExtractor(),
     }
     if source_type not in table:

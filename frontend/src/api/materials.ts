@@ -7,6 +7,7 @@ export interface PresignResponse {
   s3_key: string;
   upload_url: string;
   course_id?: string;
+  session_id?: string;
 }
 
 export interface MaterialVersion {
@@ -32,18 +33,20 @@ export async function presignUpload(
   fileName: string,
   mimeType: string,
   bytes: number,
-  displayName?: string,
+  sessionTitle?: string,
   sessionId?: string,
   sessionDate?: string,
   isSyllabus?: boolean,
 ): Promise<PresignResponse> {
+  // sessionTitle titles a newly created session (the group heading); the
+  // material itself keeps its file name as the display name.
   return post<PresignResponse>('/materials:presign', {
     org_name: orgName,
     course_name: courseName,
     file_name: fileName,
     mime_type: mimeType,
     bytes: bytes,
-    display_name: displayName || undefined,
+    session_title: sessionTitle || undefined,
     session_id: sessionId || undefined,
     session_date: sessionDate || undefined,
     is_syllabus: isSyllabus || undefined,
@@ -115,13 +118,13 @@ export async function uploadMaterial(
   courseName: string,
   file: File,
   onProgress?: (pct: number) => void,
-  topic?: string,
+  sessionTitle?: string,
   sessionId?: string,
   sessionDate?: string,
   isSyllabus?: boolean,
 ): Promise<PresignResponse> {
   onProgress?.(10);
-  const presign = await presignUpload(orgName, courseName, file.name, file.type, file.size, topic, sessionId, sessionDate, isSyllabus);
+  const presign = await presignUpload(orgName, courseName, file.name, file.type, file.size, sessionTitle, sessionId, sessionDate, isSyllabus);
   onProgress?.(30);
   await uploadToS3(presign.upload_url, file);
   onProgress?.(70);

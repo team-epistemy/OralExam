@@ -57,10 +57,12 @@ export default function CourseDetail() {
     enabled: !!courseId,
   });
 
+  // Name-based list returns the REAL material_id (+ status); the courseId-only
+  // fallback returns version ids, which won't join to a session's materials.
   const { data: materials = [] } = useQuery({
-    queryKey: ['materials', courseId],
-    queryFn: () => listMaterials(courseId!),
-    enabled: !!courseId,
+    queryKey: ['materials', courseId, course?.name],
+    queryFn: () => listMaterials(DEFAULT_ORG, course!.name),
+    enabled: !!course?.name,
   });
 
   const { data: assignments = [] } = useQuery({
@@ -189,6 +191,12 @@ export default function CourseDetail() {
 
 function MaterialsTab({ materials, courseId, courseName, queryClient }: { materials: Material[]; courseId: string; courseName: string; queryClient: ReturnType<typeof useQueryClient> }) {
   const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
+  // Sessions carry which materials belong to them; use that to group the list.
+  const { data: sessionsData } = useQuery({
+    queryKey: ['course-sessions', courseId],
+    queryFn: () => listSessions(courseId),
+  });
+  const sessions = sessionsData?.sessions ?? [];
 
   const handleDelete = async (materialId: string) => {
     if (!confirm('Delete this material? This will also remove its chunks and embeddings.')) return;
@@ -199,6 +207,56 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
       alert('Failed to delete material: ' + (err?.message || 'Unknown error'));
     }
   };
+
+  const materialId = (m: any) => m.material_id || m.id;
+  const sessionLabel = (s: ClassSession) =>
+    s.session_document?.trim() ||
+    (s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'Untitled session');
+
+  // Build session-ordered groups (by date, nulls last), then an "unassigned" bucket.
+  const byMaterial = new Map<string, ClassSession>();
+  sessions.forEach((s) => s.materials?.forEach((m) => byMaterial.set(m.material_id, s)));
+  const ordered = [...sessions].sort((a, b) =>
+    (a.session_date || '9999').localeCompare(b.session_date || '9999'));
+  const groups = ordered
+    .map((s) => ({
+      key: s.session_id,
+      title: sessionLabel(s),
+      subtitle: s.session_document?.trim() && s.session_date
+        ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : '',
+      items: materials.filter((m) => byMaterial.get(materialId(m))?.session_id === s.session_id),
+    }))
+    .filter((g) => g.items.length > 0);
+  const unassigned = materials.filter((m) => !byMaterial.has(materialId(m)));
+  if (unassigned.length) groups.push({ key: '__none__', title: 'Not assigned to a session', subtitle: '', items: unassigned });
+
+  const renderRow = (material: any, i: number) => (
+    <div key={materialId(material) || i} className="flex items-center gap-4 px-5 py-3">
+      <FileText className="w-4 h-4 text-gray-400" />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-gray-900 truncate">{material.display_name || material.filename || material.file_name}</p>
+        <p className="text-xs text-gray-500">{material.created_at ? new Date(material.created_at).toLocaleDateString() : ''}</p>
+      </div>
+      <StatusBadge status={material.status || 'ready'} />
+      <button
+        onClick={() => setViewing({
+          id: materialId(material),
+          name: material.display_name || material.filename || material.file_name || 'Document',
+        })}
+        className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+        title="View document"
+      >
+        <Eye className="w-4 h-4" />
+      </button>
+      <button
+        onClick={() => handleDelete(materialId(material))}
+        className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
+        title="Delete material"
+      >
+        <Trash2 className="w-4 h-4" />
+      </button>
+    </div>
+  );
 
   return (
     <div className="space-y-4">
@@ -217,32 +275,14 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
           <p className="text-sm text-gray-500">No materials uploaded yet</p>
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
-          {materials.map((material: any, i: number) => (
-            <div key={material.material_id || material.id || i} className="flex items-center gap-4 px-5 py-3">
-              <FileText className="w-4 h-4 text-gray-400" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 truncate">{material.display_name || material.filename || material.file_name}</p>
-                <p className="text-xs text-gray-500">{material.created_at ? new Date(material.created_at).toLocaleDateString() : ''}</p>
+        <div className="space-y-4">
+          {groups.map((g) => (
+            <div key={g.key} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-5 py-2.5 bg-gray-50 border-b border-gray-100">
+                <p className="text-sm font-semibold text-gray-800">{g.title}</p>
+                {g.subtitle && <p className="text-xs text-gray-500">{g.subtitle}</p>}
               </div>
-              <StatusBadge status={material.status || 'ready'} />
-              <button
-                onClick={() => setViewing({
-                  id: material.material_id || material.id,
-                  name: material.display_name || material.filename || material.file_name || 'Document',
-                })}
-                className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
-                title="View document"
-              >
-                <Eye className="w-4 h-4" />
-              </button>
-              <button
-                onClick={() => handleDelete(material.material_id || material.id)}
-                className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
-                title="Delete material"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              <div className="divide-y divide-gray-100">{g.items.map(renderRow)}</div>
             </div>
           ))}
         </div>
@@ -1034,7 +1074,7 @@ function SyllabusGate({ courseId, courseName }: { courseId: string; courseName: 
             )}
           </div>
         ) : (
-          <FileUpload accept=".pdf,.docx,.txt,.pptx,.md" onFilesSelected={handleFiles} />
+          <FileUpload accept=".pdf,.docx,.doc,.rtf,.txt,.pptx,.md" onFilesSelected={handleFiles} />
         )}
       </div>
 
@@ -1176,7 +1216,7 @@ function SessionsTab({ courseId, courseName, hasSyllabus }: { courseId: string; 
       setDate(''); setDoc(''); setError('');
       queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] });
     },
-    onError: () => setError('Could not add the session. Please try again.'),
+    onError: (e: Error) => setError(e.message || 'Could not add the session. Please try again.'),
   });
 
   const removeMutation = useMutation({

@@ -24,6 +24,8 @@ class SourceType(str, Enum):
     PPTX = "pptx"
     PDF = "pdf"
     DOCX = "docx"
+    DOC = "doc"
+    RTF = "rtf"
 
 
 class VersionStatus(str, Enum):
@@ -192,12 +194,15 @@ class IngestRequest(BaseModel):
     mime_type: str
     bytes: int
     material_id: Optional[str] = None
-    # Optional topic / class-session label shown as the material's display name.
+    # Optional override for the material's display name (defaults to the file name).
     display_name: Optional[str] = None
     # The class session to attach the material to. If omitted (or not found), a
     # new session is created — a material is always mapped to a session.
     session_id: Optional[str] = None
     session_date: Optional[date] = None
+    # Topic that titles a NEWLY created session (the group heading in the UI).
+    # Ignored when session_id points at an existing (already titled) session.
+    session_title: Optional[str] = None
     # The course syllabus is a course-level document, not a class session, so it
     # skips session creation/attachment (avoids a stray empty session).
     is_syllabus: bool = False

@@ -65,6 +65,38 @@ def test_syllabus_upload_does_not_create_a_session():
     assert not mat.session_id
 
 
+def test_upload_titles_a_new_session_and_keeps_the_file_name():
+    repo = _repo()
+    req = IngestRequest(org_name="org_a", course_name="Ops", file_name="reading.pdf",
+                        mime_type="application/pdf", bytes=1024,
+                        session_title="Week 1 — Intro")
+    resp = _api(repo).presign_by_name("prof_1", "professor", "org_a", req)
+    # The topic titles the session; the material keeps its file name.
+    assert repo._sessions[resp.session_id]["session_document"] == "Week 1 — Intro"
+    assert repo.get_material(resp.material_id).display_name == "reading.pdf"
+
+
+def test_blank_session_title_leaves_session_untitled():
+    repo = _repo()
+    req = IngestRequest(org_name="org_a", course_name="Ops", file_name="l1.md",
+                        mime_type="text/markdown", bytes=512, session_title="   ")
+    resp = _api(repo).presign_by_name("prof_1", "professor", "org_a", req)
+    assert repo._sessions[resp.session_id]["session_document"] is None
+
+
+def test_session_title_ignored_for_existing_session():
+    repo = _repo()
+    course = repo.get_or_create_course("org_a", "Ops", "prof_1")
+    sid = repo.get_or_create_session("org_a", course.course_id, None, None, "prof_1",
+                                     session_document="Original")
+    req = IngestRequest(org_name="org_a", course_name="Ops", file_name="l1.md",
+                        mime_type="text/markdown", bytes=512, session_id=sid,
+                        session_title="Renamed")
+    resp = _api(repo).presign_by_name("prof_1", "professor", "org_a", req)
+    assert resp.session_id == sid
+    assert repo._sessions[sid]["session_document"] == "Original"  # not renamed
+
+
 def test_upload_reuses_a_given_session_without_creating_another():
     repo = _repo()
     course = repo.get_or_create_course("org_a", "Ops", "prof_1")

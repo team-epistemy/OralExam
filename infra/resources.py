@@ -78,8 +78,10 @@ def ensure_queue(sqs, name: str) -> str:
     try:
         return sqs.get_queue_url(QueueName=name)["QueueUrl"]
     except ClientError:
+        # 900s: a large (~200-page) reading embeds one chunk per Bedrock call
+        # sequentially; 5 min risked redelivery mid-ingest, so allow 15.
         return sqs.create_queue(QueueName=name,
-                                Attributes={"VisibilityTimeout": "300"})["QueueUrl"]
+                                Attributes={"VisibilityTimeout": "900"})["QueueUrl"]
 
 
 def queue_arn(sqs, url: str) -> str:

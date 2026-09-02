@@ -4,9 +4,9 @@ FROM public.ecr.aws/docker/library/python:3.11-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 
-# System libs needed by psycopg2 and python-pptx (lxml).
+# System libs needed by psycopg2 and python-pptx (lxml); antiword reads .doc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 libxml2 libxslt1.1 && rm -rf /var/lib/apt/lists/*
+    libpq5 libxml2 libxslt1.1 antiword && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-runtime.txt ./
 RUN pip install --no-cache-dir -r requirements-runtime.txt

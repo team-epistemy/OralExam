@@ -545,6 +545,29 @@ def _require_syllabus(repo, course_id: str) -> None:
             detail="Add the course syllabus before this action.")
 
 
+def _require_unique_session_topic(cur, course_id: str, org_id: str,
+                                  document, exclude_session_id: str = None) -> None:
+    """409 if another session in the course already uses this topic/title.
+
+    Case-insensitive, trimmed match. Blank topics are exempt (undated/untitled
+    sessions may repeat). Reusing an existing topic on the SAME session is fine.
+    """
+    topic = (document or "").strip()
+    if not topic:
+        return
+    sql = ("SELECT 1 FROM class_session WHERE course_id = %s::uuid AND org_id = %s::uuid "
+           "AND lower(btrim(session_document)) = lower(%s)")
+    params = [course_id, org_id, topic]
+    if exclude_session_id:
+        sql += " AND session_id <> %s::uuid"
+        params.append(exclude_session_id)
+    cur.execute(sql + " LIMIT 1", tuple(params))
+    if cur.fetchone():
+        raise HTTPException(
+            status_code=409,
+            detail=f'A session titled "{topic}" already exists in this course.')
+
+
 def _ensure_syllabus_table(repo) -> None:
     """Create the per-course syllabus pointer table on first use.
 
@@ -748,6 +771,8 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                 sid = str(_uuid.uuid4())
                 scope = req.in_scope_concepts or []
                 with repo.conn.cursor() as cur:
+                    _require_unique_session_topic(cur, course_id, caller.org_id,
+                                                  req.session_document)
                     if _session_scope_col(cur):
                         cur.execute(
                             """INSERT INTO class_session
@@ -782,6 +807,8 @@ def _register_course_ops(app: FastAPI, deps) -> None:
             try:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 with repo.conn.cursor() as cur:
+                    _require_unique_session_topic(cur, course_id, caller.org_id,
+                                                  req.session_document, session_id)
                     sets = ["session_date = %s", "session_document = %s"]
                     params = [req.session_date, req.session_document]
                     # Only touch scope when the caller provided it, so a plain

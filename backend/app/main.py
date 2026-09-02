@@ -106,6 +106,18 @@ def migrate() -> None:
             print(f"applying {migration_011.name} ...")
             cur.execute(migration_011.read_text())
 
+        # Always apply migration_012 (class_session.in_scope_concepts; idempotent)
+        migration_012 = db_dir / "migration_012_session_scope.sql"
+        if migration_012.exists():
+            print(f"applying {migration_012.name} ...")
+            cur.execute(migration_012.read_text())
+
+        # Always apply migration_013 (concept provenance; fixes cross-course leaks; idempotent)
+        migration_013 = db_dir / "migration_013_concept_provenance.sql"
+        if migration_013.exists():
+            print(f"applying {migration_013.name} ...")
+            cur.execute(migration_013.read_text())
+
     conn.commit()
     print("all schemas applied")
 

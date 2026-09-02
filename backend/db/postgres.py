@@ -86,9 +86,11 @@ class PostgresRepository:
 
     def get_or_create_session(self, org_id: str, course_id: str,
                               session_id: Optional[str] = None,
-                              session_date=None, created_by: Optional[str] = None) -> str:
+                              session_date=None, created_by: Optional[str] = None,
+                              session_document: Optional[str] = None) -> str:
         """Return a class session for the course — reuse the given one if it
-        exists, else create a new one. A material always maps to a session."""
+        exists, else create a new one (titled with session_document if given).
+        A material always maps to a session."""
         import uuid as _uuid
         if session_id:
             row = self._one(
@@ -100,9 +102,9 @@ class PostgresRepository:
         new_id = str(_uuid.uuid4())
         with self.conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO class_session (session_id, course_id, org_id, session_date, created_by)"
-                " VALUES (%s,%s,%s,%s,%s)",
-                (new_id, course_id, org_id, session_date, created_by))
+                "INSERT INTO class_session (session_id, course_id, org_id, session_date,"
+                " session_document, created_by) VALUES (%s,%s,%s,%s,%s,%s)",
+                (new_id, course_id, org_id, session_date, session_document, created_by))
         self.conn.commit()
         return new_id
 

@@ -1,17 +1,43 @@
 import { useCallback, useState } from 'react';
-import { Upload, File as FileIcon, X, CheckCircle } from 'lucide-react';
+import { Upload, File as FileIcon, X, CheckCircle, AlertCircle } from 'lucide-react';
 
 interface FileUploadProps {
   accept?: string;
   multiple?: boolean;
+  maxFiles?: number;
   onFilesSelected: (files: File[]) => void;
   uploading?: boolean;
   progress?: number;
 }
 
-export default function FileUpload({ accept, multiple = false, onFilesSelected, uploading = false, progress = 0 }: FileUploadProps) {
+export default function FileUpload({ accept, multiple = false, maxFiles, onFilesSelected, uploading = false, progress = 0 }: FileUploadProps) {
   const [dragOver, setDragOver] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [formatError, setFormatError] = useState('');
+
+  // Extensions allowed, parsed from the `accept` prop (e.g. ".pdf,.docx").
+  const allowed = (accept || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  const supportedLabel = allowed.map((e) => e.replace('.', '').toUpperCase()).join(', ');
+  const unsupported = (files: File[]) =>
+    allowed.length > 0 && files.some((f) => !allowed.some((ext) => f.name.toLowerCase().endsWith(ext)));
+
+  // Validate count + format; the drag-drop path bypasses the input's accept
+  // filter, so both handlers must gate here before emitting the files. Too many
+  // files rejects the whole selection rather than silently truncating.
+  const accept_files = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+    if (maxFiles && files.length > maxFiles) {
+      setFormatError(`Select at most ${maxFiles} files at a time (you chose ${files.length}).`);
+      return;
+    }
+    if (unsupported(files)) {
+      setFormatError(`File format not supported. Supported formats: ${supportedLabel}.`);
+      return;
+    }
+    setFormatError('');
+    setSelectedFiles(files);
+    onFilesSelected(files);
+  }, [onFilesSelected, supportedLabel, maxFiles]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -27,20 +53,16 @@ export default function FileUpload({ accept, multiple = false, onFilesSelected, 
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      const files = Array.from(e.dataTransfer.files);
-      setSelectedFiles(files);
-      onFilesSelected(files);
+      accept_files(Array.from(e.dataTransfer.files));
     },
-    [onFilesSelected]
+    [accept_files]
   );
 
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(e.target.files || []);
-      setSelectedFiles(files);
-      onFilesSelected(files);
+      accept_files(Array.from(e.target.files || []));
     },
-    [onFilesSelected]
+    [accept_files]
   );
 
   const removeFile = useCallback((index: number) => {
@@ -70,8 +92,15 @@ export default function FileUpload({ accept, multiple = false, onFilesSelected, 
         <p className="text-sm text-gray-600">
           <span className="font-medium text-blue-600">Click to upload</span> or drag and drop
         </p>
-        <p className="text-xs text-gray-400 mt-1">PDF, DOCX, TXT, or PPTX files</p>
+        <p className="text-xs text-gray-400 mt-1">{supportedLabel ? `${supportedLabel} files` : 'Upload a file'}</p>
       </div>
+
+      {formatError && (
+        <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+          <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+          <p className="text-sm text-red-700">{formatError}</p>
+        </div>
+      )}
 
       {selectedFiles.length > 0 && (
         <div className="space-y-2">

@@ -13,7 +13,6 @@ export default function UploadMaterial() {
   const [params] = useSearchParams();
   const isSyllabus = params.get('syllabus') === '1';
   const syllabusCourseId = params.get('courseId') || '';
-  const [orgName, setOrgName] = useState(DEFAULT_ORG);
   const coursePrefilled = !!params.get('course');
   const [courseName, setCourseName] = useState(params.get('course') || '');
   const [topic, setTopic] = useState('');
@@ -34,56 +33,105 @@ export default function UploadMaterial() {
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState('');
   const [uploadResult, setUploadResult] = useState<{ material_id: string; version_no: number; course_id?: string } | null>(null);
+  const [uploadedCount, setUploadedCount] = useState(0);
   const [versions, setVersions] = useState<MaterialVersion[]>([]);
+  const [stalled, setStalled] = useState('');
   const [pollInterval, setPollInterval] = useState<ReturnType<typeof setInterval> | null>(null);
+
+  // Stop polling after this long if a version never reaches a terminal status,
+  // so a stuck job shows a "still processing" notice instead of an infinite spinner.
+  const POLL_INTERVAL_MS = 3000;
+  const POLL_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — covers a large (~200pg) reading
+  const MAX_BATCH = 10; // upload up to 10 files at once; each becomes its own material
+
+  // Poll every uploaded material until all are ready/failed (or we time out).
+  const pollBatch = (materialIds: string[]) => {
+    const startedAt = Date.now();
+    const interval = setInterval(async () => {
+      try {
+        const perMaterial = await Promise.all(
+          materialIds.map((id) => listVersions(DEFAULT_ORG, id).catch(() => [])));
+        // One row per material: its latest version (highest version_no).
+        const latest = perMaterial
+          .map((vers) => vers.slice().sort((a, b) => b.version_no - a.version_no)[0])
+          .filter(Boolean) as MaterialVersion[];
+        setVersions(latest);
+        const allTerminal = latest.length === materialIds.length &&
+          latest.every((v) => v.status === 'ready' || v.status === 'failed');
+        if (allTerminal) {
+          clearInterval(interval);
+          setPollInterval(null);
+        } else if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+          clearInterval(interval);
+          setPollInterval(null);
+          setStalled('Still processing — large files can take a few minutes. '
+            + 'You can leave this page; the status will update on the course materials list when it finishes.');
+        }
+      } catch {
+        // ignore polling errors
+      }
+    }, POLL_INTERVAL_MS);
+    setPollInterval(interval);
+  };
 
   const handleFilesSelected = async (files: File[]) => {
     if (files.length === 0 || !courseName.trim()) return;
+    // A course has a single syllabus; batch applies to the materials path only.
+    const batch = isSyllabus ? files.slice(0, 1) : files.slice(0, MAX_BATCH);
 
     setUploading(true);
     setError('');
+    setStalled('');
     setSuccess(false);
     setVersions([]);
 
-    try {
-      const sessionId = sessionChoice !== 'new' ? sessionChoice : undefined;
-      const sessionDate = sessionChoice === 'new' ? (newSessionDate || undefined) : undefined;
-      const result = await uploadMaterial(orgName, courseName, files[0], setProgress, topic, sessionId, sessionDate);
-      setUploadResult(result);
-      setSuccess(true);
+    let batchSessionId = sessionChoice !== 'new' ? sessionChoice : undefined;
+    const sessionDate = sessionChoice === 'new' ? (newSessionDate || undefined) : undefined;
+    const materialIds: string[] = [];
+    const failures: string[] = [];
+    let firstResult: typeof uploadResult = null;
 
-      // If this upload is the course syllabus, mark it so (best-effort).
-      if (isSyllabus && syllabusCourseId) {
-        try {
-          await setSyllabus(syllabusCourseId, {
-            material_id: result.material_id,
-            material_version_id: result.material_version_id,
-            file_name: files[0].name,
-          });
-        } catch {
-          // non-fatal: the material still uploaded
+    // Upload sequentially so progress is monotonic and one bad file doesn't abort
+    // the rest; each file shares the batch's topic + session. For a "+ New session"
+    // batch the first upload creates the session; the rest reuse its id so all
+    // files land under ONE session (not one per file).
+    for (let i = 0; i < batch.length; i++) {
+      const file = batch[i];
+      const base = Math.round((i / batch.length) * 100);
+      try {
+        const result = await uploadMaterial(
+          DEFAULT_ORG, courseName, file,
+          (pct) => setProgress(base + Math.round(pct / batch.length)),
+          topic, batchSessionId, sessionDate, isSyllabus);
+        if (!batchSessionId && result.session_id) batchSessionId = result.session_id;
+        materialIds.push(result.material_id);
+        if (!firstResult) firstResult = result;
+        if (isSyllabus && syllabusCourseId) {
+          try {
+            await setSyllabus(syllabusCourseId, {
+              material_id: result.material_id,
+              material_version_id: result.material_version_id,
+              file_name: file.name,
+            });
+          } catch { /* non-fatal: the material still uploaded */ }
         }
+      } catch (err) {
+        failures.push(`${file.name}: ${err instanceof Error ? err.message : 'upload failed'}`);
       }
+    }
 
-      // Start polling for version status
-      const interval = setInterval(async () => {
-        try {
-          const vers = await listVersions(orgName, result.material_id);
-          setVersions(vers);
-          const latest = vers.find((v) => v.material_version_id === result.material_version_id);
-          if (latest && (latest.status === 'ready' || latest.status === 'failed')) {
-            clearInterval(interval);
-            setPollInterval(null);
-          }
-        } catch {
-          // ignore polling errors
-        }
-      }, 3000);
-      setPollInterval(interval);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upload failed');
-    } finally {
-      setUploading(false);
+    setProgress(100);
+    setUploading(false);
+    if (failures.length) {
+      setError(failures.length === batch.length
+        ? `Upload failed. ${failures[0]}`
+        : `${failures.length} of ${batch.length} files failed to upload: ${failures.join('; ')}`);
+    }
+    if (materialIds.length) {
+      setUploadResult(firstResult);
+      setUploadedCount(materialIds.length);
+      setSuccess(true);
+      pollBatch(materialIds);
     }
   };
 
@@ -108,22 +156,6 @@ export default function UploadMaterial() {
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-5">
-        {/* Org name */}
-        <div>
-          <label htmlFor="org" className="block text-sm font-medium text-gray-700 mb-1">
-            Organization Name
-          </label>
-          <input
-            id="org"
-            type="text"
-            value={orgName}
-            onChange={(e) => setOrgName(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder="e.g. epistemy"
-          />
-          <p className="text-xs text-gray-400 mt-1">Your organization/university. Auto-created if new.</p>
-        </div>
-
         {/* Course name */}
         <div>
           <label htmlFor="course" className="block text-sm font-medium text-gray-700 mb-1">
@@ -156,7 +188,7 @@ export default function UploadMaterial() {
             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             placeholder="e.g. Week 3 — Supervised Learning"
           />
-          <p className="text-xs text-gray-400 mt-1">Optional label for this material. Defaults to the file name if left blank.</p>
+          <p className="text-xs text-gray-400 mt-1">Titles the class session (the heading files are grouped under). Files keep their own names. Ignored if you pick an existing session below.</p>
         </div>
 
         {/* Class session — a material is always attached to a session */}
@@ -192,18 +224,25 @@ export default function UploadMaterial() {
 
         {/* File upload */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">File</label>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            {isSyllabus ? 'File' : 'Files'}
+          </label>
           {!courseName.trim() ? (
             <div className="border-2 border-dashed border-gray-200 rounded-xl p-8 text-center text-sm text-gray-400">
               Enter a course name above to enable upload
             </div>
           ) : (
             <FileUpload
-              accept=".pdf,.docx,.txt,.pptx,.md"
+              accept=".pdf,.docx,.doc,.rtf,.txt,.pptx,.md"
+              multiple={!isSyllabus}
+              maxFiles={isSyllabus ? 1 : MAX_BATCH}
               onFilesSelected={handleFilesSelected}
               uploading={uploading}
               progress={progress}
             />
+          )}
+          {!isSyllabus && (
+            <p className="text-xs text-gray-400 mt-1">Upload up to {MAX_BATCH} files at once — each is processed as its own material.</p>
           )}
         </div>
 
@@ -213,10 +252,9 @@ export default function UploadMaterial() {
             <CheckCircle className="w-5 h-5 text-green-600 shrink-0" />
             <div>
               <p className="text-sm font-medium text-green-800">
-                Upload successful — version {uploadResult.version_no}
-              </p>
-              <p className="text-xs text-green-600 mt-0.5">
-                Material: {uploadResult.material_id}
+                {uploadedCount > 1
+                  ? `Uploaded ${uploadedCount} files — processing below.`
+                  : 'Upload successful — processing below.'}
               </p>
             </div>
           </div>
@@ -230,6 +268,14 @@ export default function UploadMaterial() {
               <p className="text-sm font-medium text-red-800">Upload failed</p>
               <p className="text-xs text-red-600 mt-0.5">{error}</p>
             </div>
+          </div>
+        )}
+
+        {/* Stalled — polling gave up but the job may still finish server-side */}
+        {stalled && (
+          <div className="flex items-center gap-3 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+            <p className="text-xs text-amber-700">{stalled}</p>
           </div>
         )}
 
@@ -295,7 +341,9 @@ export default function UploadMaterial() {
                 setSuccess(false);
                 setProgress(0);
                 setUploadResult(null);
+                setUploadedCount(0);
                 setVersions([]);
+                setStalled('');
                 if (pollInterval) clearInterval(pollInterval);
               }}
               className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
