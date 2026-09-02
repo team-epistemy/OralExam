@@ -8,7 +8,8 @@ import logging
 import os
 import re
 from datetime import datetime, timezone, timedelta, date
-from typing import List, Optional
+import threading
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -165,6 +166,38 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
         return {"nodes": [], "edges": [], "extensions": []}
 
 
+# Course graph rebuilds run as background threads inside the web process. If the
+# ECS task is replaced (a deploy) or recycled mid-rebuild, that thread is killed
+# and the `is_stale=true` flag the endpoint set would otherwise never clear — the
+# UI then spins "Rebuilding…" forever. We track in-flight rebuilds here so the
+# graceful-shutdown hook (see create_app) can clear the flag for any that were
+# interrupted. Keyed course_id -> org_id (org needed to satisfy RLS on the clear).
+_INFLIGHT_REBUILDS: Dict[str, str] = {}
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def _clear_stale_flag(settings, org_id: str, course_id: str) -> None:
+    """Clear is_stale on a course's active graph (RLS-scoped to org_id)."""
+    conn = None
+    try:
+        conn = factory.db_connection(settings)
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
+            cur.execute("UPDATE graph_version SET is_stale = false "
+                        "WHERE org_id = %s AND course_id = %s AND is_active = true",
+                        (org_id, course_id))
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str = "general") -> None:
     """Rebuild a course's concept graph from ITS OWN documents, with provenance.
 
@@ -177,6 +210,8 @@ def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str 
     """
     import json as _json, uuid as _uuid
     conn = None
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_REBUILDS[course_id] = org_id
     try:
         conn = factory.db_connection(settings)
         with conn.cursor() as cur:
@@ -240,6 +275,8 @@ def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str 
             except Exception:  # noqa: BLE001
                 pass
     finally:
+        with _INFLIGHT_LOCK:
+            _INFLIGHT_REBUILDS.pop(course_id, None)
         if conn is not None:
             conn.close()
 
@@ -358,6 +395,18 @@ def create_app() -> FastAPI:
     )
     _register_routes(app, deps)
     _mount_demo(app)
+
+    @app.on_event("shutdown")
+    def _clear_interrupted_rebuilds() -> None:
+        """On graceful shutdown (ECS SIGTERM during a deploy), clear the is_stale
+        flag for any rebuild still in flight so its course's graph doesn't stay
+        wedged in the 'Rebuilding…' state after the task is replaced."""
+        with _INFLIGHT_LOCK:
+            pending = list(_INFLIGHT_REBUILDS.items())
+        for course_id, org_id in pending:
+            logger.warning("Clearing stale flag for interrupted rebuild of course %s", course_id[:8])
+            _clear_stale_flag(settings, org_id, course_id)
+
     return app
 
 
