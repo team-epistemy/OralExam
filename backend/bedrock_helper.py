@@ -29,9 +29,20 @@ _anthropic_client = None
 _anthropic_lock = threading.Lock()
 
 
-def _get_bedrock_client(region: str):
-    """Return a cached bedrock-runtime client for the given region."""
+def _get_bedrock_client(region: str, read_timeout: Optional[float] = None):
+    """Return a bedrock-runtime client for the given region.
+
+    Cached per-region for the common (no-timeout) case. When a read_timeout is
+    requested (bounded, interactive calls that must return before a gateway
+    timeout) a dedicated client is built with that socket timeout and no internal
+    retries, so a slow model surfaces a timeout fast instead of hanging."""
     import boto3
+    if read_timeout is not None:
+        from botocore.config import Config
+        return boto3.client(
+            "bedrock-runtime", region_name=region,
+            config=Config(read_timeout=read_timeout, connect_timeout=10,
+                          retries={"max_attempts": 0}))
     if region not in _bedrock_clients:
         with _bedrock_clients_lock:
             # Double-check after acquiring lock
@@ -74,30 +85,42 @@ def call_bedrock(
     user_message: str,
     max_tokens: int = 4000,
     temperature: float = 0.1,
+    retries: int = 3,
+    timeout: Optional[float] = None,
 ) -> dict:
     """Dispatch to Claude or Bedrock, then parse the JSON response. Name kept for compat.
 
     Retries on a JSON parse failure: LLMs occasionally emit slightly-malformed JSON
     on large nested outputs, and a fresh sample almost always parses cleanly.
+
+    `retries` bounds the JSON-reparse attempts (use 1 for interactive calls that
+    must return before a gateway timeout — extra large retries are what push a
+    slow call past the 60s window). `timeout` caps a single request's wall-clock
+    (seconds); on timeout the underlying client raises, so callers that pass it
+    should degrade gracefully (e.g. to a stored bank) rather than surface an error.
     """
     anthropic_provider = getattr(settings, "llm_provider", "anthropic") == "anthropic"
     last_err: Optional[Exception] = None
-    for attempt in range(3):
+    attempts = max(1, retries)
+    for attempt in range(attempts):
         try:
             if anthropic_provider:
-                return _call_anthropic(settings, system_prompt, user_message, max_tokens)
-            return _call_bedrock_converse(settings, system_prompt, user_message, max_tokens, temperature)
+                return _call_anthropic(settings, system_prompt, user_message, max_tokens, timeout)
+            return _call_bedrock_converse(settings, system_prompt, user_message, max_tokens, temperature, timeout)
         except (json.JSONDecodeError, ValueError) as exc:
             last_err = exc
-            logger.warning("LLM JSON parse failed (attempt %d/3): %s", attempt + 1, exc)
+            logger.warning("LLM JSON parse failed (attempt %d/%d): %s", attempt + 1, attempts, exc)
     raise last_err  # exhausted retries
 
 
 def _call_anthropic(
-    settings: Settings, system_prompt: str, user_message: str, max_tokens: int
+    settings: Settings, system_prompt: str, user_message: str, max_tokens: int,
+    timeout: Optional[float] = None,
 ) -> dict:
     """Call Claude via the Anthropic SDK. No temperature — removed on Opus 4.8."""
     client = _get_anthropic_client(settings)
+    if timeout is not None:
+        client = client.with_options(timeout=timeout)
     model = getattr(settings, "anthropic_model", "claude-sonnet-4-6")
     message = client.messages.create(
         model=model,
@@ -111,10 +134,10 @@ def _call_anthropic(
 
 def _call_bedrock_converse(
     settings: Settings, system_prompt: str, user_message: str,
-    max_tokens: int, temperature: float,
+    max_tokens: int, temperature: float, timeout: Optional[float] = None,
 ) -> dict:
     """Call Bedrock Converse API, strip fences/thinking tags, parse JSON response."""
-    client = _get_bedrock_client(settings.bedrock_region)
+    client = _get_bedrock_client(settings.bedrock_region, read_timeout=timeout)
     response = client.converse(
         modelId=getattr(settings, "llm_model", LLM_MODEL_ID),
         system=[{"text": system_prompt}],

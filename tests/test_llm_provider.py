@@ -77,7 +77,7 @@ def test_bedrock_route_still_available(monkeypatch):
             captured.update(kwargs)
             return {"output": {"message": {"content": [{"text": '{"from": "bedrock"}'}]}}}
 
-    monkeypatch.setattr(bedrock_helper, "_get_bedrock_client", lambda region: _FakeBedrock())
+    monkeypatch.setattr(bedrock_helper, "_get_bedrock_client", lambda region, read_timeout=None: _FakeBedrock())
     settings = Settings(llm_provider="bedrock")
 
     result = bedrock_helper.call_bedrock(settings, "s", "u", temperature=0.2)

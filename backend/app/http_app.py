@@ -2154,6 +2154,12 @@ def _query_graph_version(repo, org_id: str, course_id: str) -> dict:
     }
 
 
+# Wall-clock cap for the synchronous Regenerate LLM call. Kept well under the
+# 60s CloudFront origin timeout so a slow model degrades to the stored bank
+# (returning questions) instead of the connection dropping ("Load failed").
+REGEN_LLM_TIMEOUT_S = 45
+
+
 def _generate_concept_banks(settings, concepts: list, relations: list, difficulty: str) -> dict:
     """Generate a FRESH per-concept oral-exam question bank with the LLM at
     assignment-creation time, grounded in the course's concept graph.
@@ -2193,13 +2199,16 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
             f"Concepts:\n{concept_lines}\n\n"
             f"Relationships:\n{rel_lines or '(none provided)'}")
     try:
-        # Generous token ceiling so the whole JSON returns in ONE call — truncation
-        # here yields invalid JSON, which call_bedrock retries 3x, and three large
-        # LLM calls blow past the 60s ALB idle timeout (surfaces as "Load failed").
+        # This runs synchronously while the professor waits, behind a 60s CloudFront
+        # origin timeout. Bound it hard: ONE attempt (no big JSON-reparse retries)
+        # and a wall-clock timeout with margin under 60s. On any failure/timeout we
+        # degrade to the concepts' stored bank (authored async at graph-build time),
+        # so Regenerate always returns questions instead of "Load failed".
         data = call_bedrock(settings, system_prompt, user,
-                            max_tokens=8000, temperature=0.6)
+                            max_tokens=8000, temperature=0.6,
+                            retries=1, timeout=REGEN_LLM_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 - degrade to stored bank, assignment still works
-        logger.warning("per-assignment question generation failed: %s", exc)
+        logger.warning("per-assignment question generation failed (%s) — using stored bank", exc)
         return _concept_banks(concepts, difficulty)
 
     # Deterministic parse/merge lives in exam_questions (web-free + unit-tested).
@@ -2577,7 +2586,11 @@ def _register_questions(app: FastAPI, deps) -> None:
         difficulty (synchronous — the professor pressed Regenerate). Bounded to a
         cap of concepts so one LLM call stays under the gateway timeout; falls back
         to the stored bank per concept the generator skips."""
-        MAX_REGEN_CONCEPTS = 20
+        # Fewer concepts → smaller JSON that fits in one non-truncated call and
+        # returns well inside the 45s LLM cap (see REGEN_LLM_TIMEOUT_S). Questions
+        # are still assembled from the whole graph's stored bank when the live
+        # authoring covers fewer than the assignment needs.
+        MAX_REGEN_CONCEPTS = 12
 
         def _do():
             d = deps()
