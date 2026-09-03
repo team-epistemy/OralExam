@@ -34,13 +34,24 @@ type Tab = 'materials' | 'graph' | 'assignments' | 'students' | 'sessions' | 'pe
 
 export default function CourseDetail() {
   const { courseId } = useParams<{ courseId: string }>();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const [activeTab, setActiveTab] = useState<Tab>(
     (['materials', 'graph', 'assignments', 'students', 'sessions', 'performance'].includes(tabParam || '')
       ? (tabParam as Tab)
-      : 'materials'),
+      : 'sessions'),
   );
+
+  // Selecting a tab also writes ?tab= to the URL (replace, no history spam) so a
+  // full page refresh — e.g. after a destructive action — lands on the same tab.
+  const selectTab = (id: Tab) => {
+    setActiveTab(id);
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.set('tab', id);
+      return p;
+    }, { replace: true });
+  };
 
   // Keep the active tab in sync with ?tab= so the left-nav "Add Students" link
   // switches to the Students tab even when the course page is already mounted.
@@ -85,25 +96,25 @@ export default function CourseDetail() {
   const locked = !syllabusLoading && !hasSyllabus;   // don't lock until we know
 
 
-  const navigate = useNavigate();
   const handleRemoveCourse = async () => {
     if (!confirm(`Remove course "${course?.name || 'this course'}"? This deletes its materials, questions, exams, and results. This cannot be undone.`)) return;
     try {
       await deleteCourse(courseId!);
-      queryClient.invalidateQueries({ queryKey: ['professor-courses'] });
-      navigate('/professor/dashboard');
+      // Hard navigation to the dashboard so it reloads with the course gone —
+      // no chance of a stale list lingering after the removal.
+      window.location.assign('/professor/dashboard');
     } catch {
       alert('Could not remove the course. Please try again.');
     }
   };
 
   const tabs = [
+    { id: 'sessions' as Tab, label: 'Sessions', icon: Calendar },
     { id: 'materials' as Tab, label: 'Materials', icon: FileText },
-    { id: 'graph' as Tab, label: 'Concept Graph', icon: Network },
     { id: 'assignments' as Tab, label: 'Assignments', icon: ClipboardList },
     { id: 'students' as Tab, label: 'Students', icon: Users },
-    { id: 'sessions' as Tab, label: 'Sessions', icon: Calendar },
     { id: 'performance' as Tab, label: 'Performance', icon: BarChart3 },
+    { id: 'graph' as Tab, label: 'Concept Graph', icon: Network },
   ];
 
   return (
@@ -152,7 +163,7 @@ export default function CourseDetail() {
             return (
               <button
                 key={tab.id}
-                onClick={() => { if (!tabLocked) setActiveTab(tab.id); }}
+                onClick={() => { if (!tabLocked) selectTab(tab.id); }}
                 disabled={tabLocked}
                 title={tabLocked ? 'Add the course syllabus to unlock this' : undefined}
                 className={`flex items-center gap-2 pb-3 px-1 text-sm font-medium border-b-2 transition-colors ${
@@ -623,7 +634,9 @@ function AssignmentsTab({ assignments, courseId, queryClient }: { assignments: A
     if (!confirm('Delete this assignment? This will remove all student sessions and grades for this assignment.')) return;
     try {
       await del(`/api/assignments/${assignmentId}`);
-      queryClient.invalidateQueries({ queryKey: ['assignments', courseId] });
+      // Refresh the page so the assignment (and its now-removed sessions/grades)
+      // clears everywhere. The active tab is preserved via ?tab= in the URL.
+      window.location.reload();
     } catch (err: any) {
       alert('Failed to delete assignment: ' + (err?.message || 'Unknown error'));
     }
