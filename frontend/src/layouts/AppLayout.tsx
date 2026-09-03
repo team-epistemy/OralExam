@@ -1,4 +1,4 @@
-import { Outlet, Link } from 'react-router-dom';
+import { Outlet, Link, useLocation } from 'react-router-dom';
 import { logout } from '../api/auth';
 import { GraduationCap, LogOut } from 'lucide-react';
 
@@ -30,6 +30,31 @@ function homePath(role?: string): string {
   return '/professor/dashboard';
 }
 
+// Admin header nav — the platform_admin surfaces (Professors, Agent Simulations)
+// aren't reachable from a course/dashboard, so they get inline header links.
+function AdminNav() {
+  const { pathname } = useLocation();
+  const items = [
+    { to: '/admin/professors', label: 'Professors' },
+    { to: '/admin/simulations', label: 'Simulations' },
+  ];
+  return (
+    <nav className="flex items-center gap-1 ml-2">
+      {items.map((it) => (
+        <Link
+          key={it.to}
+          to={it.to}
+          className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+            pathname === it.to ? 'bg-gold/20 text-gold-light' : 'text-parchment/70 hover:text-parchment hover:bg-parchment/10'
+          }`}
+        >
+          {it.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
 // No left navigation: a single top header carries the brand (→ dashboard) and
 // sign-out. Every action reaches its screen from the dashboard (global actions)
 // or the course page (course-scoped actions).
@@ -46,6 +71,7 @@ export default function AppLayout() {
           </div>
           <span className="font-heading text-base text-parchment"><span className="text-gold">E</span>pistemy</span>
         </Link>
+        {user?.role === 'platform_admin' && <AdminNav />}
         <div className="flex-1" />
         <div className="flex items-center gap-3">
           <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${

@@ -48,6 +48,33 @@ works and what's broken.
 **Multi-student isolation**
 - student2 takes the same assignment and sees **only their own** results
 
+## Exam-taker agent (LLM-driven student)
+
+`journey_e2e.py` proves the endpoints work but answers every question with one
+canned string. `exam_taker_agent.py` is an **agent that actually takes the oral
+exam**: it logs in as a student, answers each question in free-form prose, and
+follows the examiner's adaptive Socratic **probes** turn by turn — like a real
+student — then reads back its grade.
+
+It runs three competence personas as three seeded students and checks the grader
+**discriminates** quality:
+
+```bash
+export ANTHROPIC_API_KEY=sk-...              # answers are Claude-authored
+python exam_taker_agent.py                   # auto-discovers an assignment
+python exam_taker_agent.py --assignment <assignment_id>
+python exam_taker_agent.py --levels strong,weak --max-followups 2
+```
+
+- **Personas:** STRONG / MEDIUM / WEAK, mapped to `student1/2/3@univ.edu`. The
+  agent is never shown the answer key, so scores are earned.
+- **Discrimination check:** prints `strong ≥ medium ≥ weak` and exits non-zero if
+  the grader does **not** rank quality monotonically (so it can gate CI).
+- **No key?** It still runs with persona-templated answers (clearly flagged) to
+  exercise the plumbing offline.
+- **Side effects:** it writes real exam sessions/turns/evaluations to the target
+  backend and spends LLM tokens (its own answers + the backend's per-turn eval).
+
 ## Interpreting results / fixing
 
 - A **FAIL** with HTTP `404`/`405` → a missing or misrouted endpoint (add/route it).

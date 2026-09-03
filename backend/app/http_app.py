@@ -506,6 +506,7 @@ def _register_routes(app: FastAPI, deps) -> None:
     _register_delete_endpoints(app, deps)
     _register_course_ops(app, deps)
     _register_tts(app, deps)
+    _register_admin_simulations(app, deps)
 
 
 class CourseCreateRequest(BaseModel):
@@ -5174,6 +5175,277 @@ def _heuristic_eval(answer_text: str) -> tuple:
     feedback = "Good attempt." if not adequate else ""
     probe = "Can you explain the causal mechanism behind your answer?" if not adequate else ""
     return True, adequate, feedback, probe
+
+
+# ── Admin: agent-cohort exam simulations ──────────────────────────────────────
+class SimulationRequest(BaseModel):
+    """POST body to launch an agent-cohort simulation over an assignment."""
+    assignment_id: str
+    num_agents: int = Field(4, ge=1, le=10)
+    curve: str = "linear"                 # "linear" | "bell"
+    max_followups: int = Field(2, ge=0, le=4)
+
+
+def _ensure_agent_sim_table(repo) -> None:
+    """Create the agent_simulation table on first use (non-owner-safe)."""
+    with repo.conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.agent_simulation')")
+        if cur.fetchone()[0] is not None:
+            return
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS agent_simulation (
+                   simulation_id UUID PRIMARY KEY,
+                   org_id UUID NOT NULL,
+                   assignment_id UUID NOT NULL,
+                   course_id UUID,
+                   num_agents INT NOT NULL,
+                   curve TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   progress JSONB,
+                   report JSONB,
+                   error TEXT,
+                   created_by TEXT,
+                   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    repo.conn.commit()
+
+
+def _load_sim_questions(cur, assignment_id: str):
+    """(course_id, [questions]) for an assignment — text + concept ids + expected_path."""
+    import json as _json
+    cur.execute("SELECT question_set_id, course_id FROM assignment WHERE assignment_id = %s::uuid",
+                (assignment_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, []
+    qsid, course_id = str(row[0]), str(row[1])
+    cur.execute(
+        """SELECT q.question_id, q.text, q.concept_ids, q.expected_path
+           FROM question_set_membership qsm
+           JOIN question q ON q.question_id = qsm.question_id
+           WHERE qsm.question_set_id = %s::uuid ORDER BY qsm.position""",
+        (qsid,))
+    questions = []
+    for r in cur.fetchall():
+        cids = r[2] if isinstance(r[2], list) else []
+        ep = r[3] if isinstance(r[3], dict) else (_json.loads(r[3]) if r[3] else {})
+        questions.append({"question_id": str(r[0]), "text": r[1] or "", "concept_ids": cids,
+                          "topic": cids[0] if cids else "general", "expected_path": ep or {}})
+    return course_id, questions
+
+
+def _run_simulation_bg(settings, org_id, simulation_id, assignment_id,
+                       num_agents, curve, max_followups):
+    """Background: ensure expected paths, run the cohort, persist the report."""
+    import json as _json
+    from backend.app import agent_sim
+    conn = None
+    try:
+        conn = factory.db_connection(settings)
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
+            conn.commit()
+            _course_id, questions = _load_sim_questions(cur, assignment_id)
+
+        # Each question needs an expected reasoning path for EDS scoring — generate
+        # (and persist) any that are missing, once, before the cohort runs.
+        for q in questions:
+            if not q["expected_path"].get("nodes"):
+                try:
+                    ep = _generate_expected_path(settings, q["text"], q["concept_ids"]) or {}
+                    q["expected_path"] = ep
+                    if ep.get("nodes"):
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE question SET expected_path = %s::jsonb WHERE question_id = %s::uuid",
+                                        (_json.dumps(ep), q["question_id"]))
+                        conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("sim %s: expected_path gen failed for q %s: %s",
+                                   simulation_id[:8], q["question_id"][:8], exc)
+
+        def progress(done, total):
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE agent_simulation SET progress = %s::jsonb WHERE simulation_id = %s::uuid",
+                                (_json.dumps({"agents_done": done, "agents_total": total}), simulation_id))
+                conn.commit()
+            except Exception:  # noqa: BLE001
+                pass
+
+        report = agent_sim.run_simulation(
+            questions, num_agents=num_agents, curve=curve,
+            answer_fn=agent_sim.default_answer_fn(settings),
+            eval_fn=agent_sim.default_eval_fn(settings),
+            max_followups=max_followups, progress_fn=progress)
+
+        with conn.cursor() as cur:
+            cur.execute("UPDATE agent_simulation SET status = 'completed', report = %s::jsonb WHERE simulation_id = %s::uuid",
+                        (_json.dumps(report), simulation_id))
+        conn.commit()
+        logger.info("sim %s completed: %d agents, mean=%s", simulation_id[:8],
+                    report["num_agents"], report["aggregate"]["mean"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sim %s failed: %s", simulation_id[:8], exc, exc_info=True)
+        if conn is not None:
+            try:
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE agent_simulation SET status = 'failed', error = %s WHERE simulation_id = %s::uuid",
+                                (str(exc)[:500], simulation_id))
+                conn.commit()
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _register_admin_simulations(app: FastAPI, deps) -> None:
+    """platform_admin: launch agent-cohort exam simulations and read their reports."""
+
+    def _admin_caller(api, x_user_id, x_role, x_org_name):
+        caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+        if caller.role != Role.PLATFORM_ADMIN:
+            raise AuthorizationError("platform_admin role required")
+        return caller
+
+    @app.get(R.ADMIN_ASSIGNMENTS)
+    def list_admin_assignments(x_org_name: str = Header(...),
+                               x_user_id: str = Header("operator"),
+                               x_role: str = Header("platform_admin")):
+        """Every assignment in the admin's org, for the simulation picker."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)   # RLS scopes both tables to this org
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT a.assignment_id, a.title, a.status, c.course_name,
+                                  (SELECT count(*) FROM question_set_membership m
+                                   WHERE m.question_set_id = a.question_set_id) AS qcount
+                           FROM assignment a JOIN course c ON c.course_id = a.course_id
+                           ORDER BY a.created_at DESC LIMIT 200""")
+                    rows = cur.fetchall()
+                return {"assignments": [
+                    {"id": str(r[0]), "title": r[1], "status": r[2],
+                     "course_name": r[3], "question_count": r[4]} for r in rows]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.ADMIN_SIMULATIONS)
+    def create_simulation(req: SimulationRequest, x_org_name: str = Header(...),
+                          x_user_id: str = Header("operator"),
+                          x_role: str = Header("platform_admin")):
+        import json as _json, uuid as _uuid
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                _ensure_agent_sim_table(repo)
+                with repo.conn.cursor() as cur:
+                    course_id, questions = _load_sim_questions(cur, req.assignment_id)
+                if course_id is None:
+                    raise AuthorizationError("assignment not found")
+                if not questions:
+                    return {"status": "error", "message": "This assignment has no questions to take."}
+
+                sim_id = str(_uuid.uuid4())
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO agent_simulation
+                           (simulation_id, org_id, assignment_id, course_id, num_agents,
+                            curve, status, progress, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s::uuid, %s, %s, 'running', %s::jsonb, %s)""",
+                        (sim_id, caller.org_id, req.assignment_id, course_id, req.num_agents,
+                         req.curve, _json.dumps({"agents_done": 0, "agents_total": req.num_agents}),
+                         caller.user_id))
+                repo.conn.commit()
+
+                threading.Thread(
+                    target=_run_simulation_bg,
+                    args=(d["settings"], caller.org_id, sim_id, req.assignment_id,
+                          req.num_agents, req.curve, req.max_followups),
+                    daemon=True).start()
+                return {"simulation_id": sim_id, "status": "running",
+                        "num_agents": req.num_agents, "questions": len(questions)}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_SIMULATION)
+    def get_simulation(simulation_id: str, x_org_name: str = Header(...),
+                       x_user_id: str = Header("operator"),
+                       x_role: str = Header("platform_admin")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                _ensure_agent_sim_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT assignment_id, num_agents, curve, status, progress, report,
+                                  error, created_at
+                           FROM agent_simulation
+                           WHERE simulation_id = %s::uuid AND org_id = %s::uuid""",
+                        (simulation_id, caller.org_id))
+                    r = cur.fetchone()
+                if not r:
+                    raise AuthorizationError("simulation not found")
+                return {
+                    "simulation_id": simulation_id,
+                    "assignment_id": str(r[0]),
+                    "num_agents": r[1], "curve": r[2], "status": r[3],
+                    "progress": r[4], "report": r[5], "error": r[6],
+                    "created_at": r[7].isoformat() if r[7] else None,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_SIMULATIONS)
+    def list_simulations(x_org_name: str = Header(...),
+                         x_user_id: str = Header("operator"),
+                         x_role: str = Header("platform_admin")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                _ensure_agent_sim_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT simulation_id, assignment_id, num_agents, curve, status,
+                                  report, created_at
+                           FROM agent_simulation WHERE org_id = %s::uuid
+                           ORDER BY created_at DESC LIMIT 50""",
+                        (caller.org_id,))
+                    rows = cur.fetchall()
+                sims = []
+                for r in rows:
+                    report = r[5] if isinstance(r[5], dict) else None
+                    mean = (report or {}).get("aggregate", {}).get("mean") if report else None
+                    sims.append({
+                        "simulation_id": str(r[0]), "assignment_id": str(r[1]),
+                        "num_agents": r[2], "curve": r[3], "status": r[4],
+                        "mean_score": mean,
+                        "created_at": r[6].isoformat() if r[6] else None,
+                    })
+                return {"simulations": sims}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
 
 app = create_app()

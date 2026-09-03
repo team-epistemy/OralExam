@@ -15,6 +15,7 @@ import StudentCourse from './pages/student/StudentCourse';
 import TakeExam from './pages/student/TakeExam';
 import Results from './pages/student/Results';
 import AddProfessor from './pages/admin/AddProfessor';
+import AgentSimulations from './pages/admin/AgentSimulations';
 
 function getUser() {
   const raw = localStorage.getItem('user');
@@ -75,6 +76,10 @@ export const router = createBrowserRouter([
       {
         path: '/admin/professors',
         element: <RequireRole role="platform_admin"><AddProfessor /></RequireRole>,
+      },
+      {
+        path: '/admin/simulations',
+        element: <RequireRole role="platform_admin"><AgentSimulations /></RequireRole>,
       },
       // Professor routes
       {
