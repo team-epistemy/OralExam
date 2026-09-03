@@ -3,8 +3,9 @@ import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network } from 'lucide-react';
 import { get, post } from '../../api/client';
-import { buildExam, regenerateExam, assignExam, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
+import { buildExam, regenerateExam, assignExam, discardDraft, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
 import { listSessions } from '../../api/sessions';
+import TakeExam from '../student/TakeExam';
 
 interface Course {
   course_id: string;
@@ -52,6 +53,8 @@ export default function CreateAssignment() {
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
+  const [draftAssignmentId, setDraftAssignmentId] = useState<string | null>(null);
+  const [dryRunOpen, setDryRunOpen] = useState(false);
   const [error, setError] = useState('');
 
   const { data: courses = [] } = useQuery({
@@ -170,6 +173,39 @@ export default function CreateAssignment() {
     } finally {
       setPublishing(false);
     }
+  };
+
+  // Create a draft from the current curated questions and open the student dry-run.
+  const handleDryRun = async () => {
+    if (previewQuestions.length === 0) { setError('Add at least one question first.'); return; }
+    setError('');
+    try {
+      if (draftAssignmentId) { await discardDraft(draftAssignmentId).catch(() => {}); }  // replace any stale draft
+      const res = await assignExam(courseId, {
+        title: title.trim() || 'Untitled',
+        questions: previewQuestions,
+        difficulty,
+        duration_minutes: duration,
+        assignment_type: assignmentType,
+        include_case: includeCase,
+        session_id: weekSessionId || undefined,
+        scope_concepts: hasScope ? effectiveConcepts : undefined,
+        draft: true,
+      });
+      if (!res.assignment_id) throw new Error(res.message || 'Could not start preview.');
+      setDraftAssignmentId(res.assignment_id);
+      setDryRunOpen(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not start preview.');
+    }
+  };
+
+  // Exit the overlay. If the draft still exists (not published), auto-discard it.
+  const handleDryRunExit = async () => {
+    setDryRunOpen(false);
+    const id = draftAssignmentId;
+    setDraftAssignmentId(null);
+    if (id) { await discardDraft(id).catch(() => {}); }  // no-op if already published
   };
 
   // Author real (case-based) questions: kicks off the async concept-graph
@@ -461,6 +497,13 @@ export default function CreateAssignment() {
             ← Back to settings
           </button>
           <button
+            onClick={handleDryRun}
+            disabled={previewQuestions.length === 0}
+            className="inline-flex items-center gap-2 px-5 py-2.5 border border-blue-300 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-50 disabled:opacity-50"
+          >
+            Take it as a student
+          </button>
+          <button
             onClick={handlePublish}
             disabled={publishing || previewQuestions.length === 0}
             className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
@@ -469,6 +512,12 @@ export default function CreateAssignment() {
             {publishing ? 'Publishing…' : 'Publish to Students'}
           </button>
         </div>
+
+        {dryRunOpen && draftAssignmentId && (
+          <div className="fixed inset-0 z-50 bg-white overflow-auto p-4">
+            <TakeExam assignmentId={draftAssignmentId} preview onExit={handleDryRunExit} />
+          </div>
+        )}
       </div>
     );
   }
@@ -649,7 +698,7 @@ export default function CreateAssignment() {
             <input
               type="number"
               value={duration}
-              onChange={(e) => setDuration(+e.target.value)}
+              onChange={(e) => setDuration(Math.max(5, Math.min(180, +e.target.value || 5)))}
               min={5} max={180}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />

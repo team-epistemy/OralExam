@@ -118,6 +118,12 @@ def migrate() -> None:
             print(f"applying {migration_013.name} ...")
             cur.execute(migration_013.read_text())
 
+        # Always apply migration_015 (exam_session.is_preview; idempotent)
+        migration_015 = db_dir / "migration_015_session_preview.sql"
+        if migration_015.exists():
+            print(f"applying {migration_015.name} ...")
+            cur.execute(migration_015.read_text())
+
     conn.commit()
     print("all schemas applied")
 

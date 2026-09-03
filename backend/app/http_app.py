@@ -617,6 +617,17 @@ def _require_unique_session_topic(cur, course_id: str, org_id: str,
             detail=f'A session titled "{topic}" already exists in this course.')
 
 
+def _start_is_preview(status, owner, caller_role, caller_user_id) -> bool:
+    """Return True for a professor previewing their own draft; False for a
+    normal active start; raise AuthorizationError for anything else."""
+    if status == "active":
+        return False
+    if (status == "draft" and caller_role == Role.PROFESSOR
+            and owner == caller_user_id):
+        return True
+    raise AuthorizationError(f"assignment is not active (status: {status})")
+
+
 def _ensure_syllabus_table(repo) -> None:
     """Create the per-course syllabus pointer table on first use.
 
@@ -2271,6 +2282,9 @@ class AssignExamRequest(BaseModel):
     # later edits to the session's scope don't recategorize this exam (P-S-2.3).
     session_id: Optional[str] = None
     scope_concepts: Optional[List[str]] = None
+    # When true, create the assignment as a draft (student-invisible sandbox)
+    # so a professor can dry-run it before publishing. Default: publish live.
+    draft: bool = False
 
 
 def _register_questions(app: FastAPI, deps) -> None:
@@ -2687,8 +2701,9 @@ def _register_questions(app: FastAPI, deps) -> None:
                            (assignment_id, course_id, org_id, title, question_set_id, config,
                             status, created_by)
                            VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s::uuid, %s::jsonb,
-                                   'active', %s)""",
-                        (assignment_id, course_id, caller.org_id, req.title, qs_id, cfg, caller.user_id),
+                                   %s, %s)""",
+                        (assignment_id, course_id, caller.org_id, req.title, qs_id, cfg,
+                         "draft" if req.draft else "active", caller.user_id),
                     )
                     # Practice / assignment / exam — set only if the column exists
                     # (migration_008), so an un-migrated DB still assigns fine.
@@ -3115,7 +3130,8 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 query = """SELECT assignment_id, title, question_set_id, config,
                                   status, created_by, created_at
                            FROM assignment
-                           WHERE course_id = %s::uuid AND org_id = %s::uuid"""
+                           WHERE course_id = %s::uuid AND org_id = %s::uuid
+                                 AND status <> 'draft'"""
                 params: list = [course_id, caller.org_id]
                 if status:
                     query += " AND status = %s"
@@ -3325,7 +3341,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                                   g.final_score
                            FROM exam_session es
                            LEFT JOIN grade g ON g.session_id = es.session_id
-                           WHERE es.assignment_id = %s::uuid
+                           WHERE es.assignment_id = %s::uuid AND NOT es.is_preview
                            ORDER BY es.started_at DESC""",
                         (assignment_id,),
                     )
@@ -3358,6 +3374,195 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     })
 
                 return sessions
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/assignments/{assignment_id}/publish ─────────────────────
+    @app.post(R.ASSIGNMENT_PUBLISH)
+    def publish_assignment(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Flip a draft assignment to active and purge its preview sessions."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE assignment SET status = 'active'
+                           WHERE assignment_id = %s::uuid AND created_by = %s
+                           RETURNING assignment_id""",
+                        (assignment_id, caller.user_id),
+                    )
+                    if not cur.fetchone():
+                        raise AuthorizationError("draft not found")
+                    # Tear down preview-session children in dependency order before
+                    # purging exam_session (no ON DELETE CASCADE on this chain).
+                    # Scoped to this assignment's PREVIEW sessions only.
+                    # Delete evaluations for turns in preview sessions of this assignment
+                    cur.execute(
+                        """DELETE FROM evaluation
+                           WHERE turn_id IN (
+                               SELECT turn_id FROM session_turn
+                               WHERE session_id IN (
+                                   SELECT session_id FROM exam_session
+                                   WHERE assignment_id = %s::uuid AND is_preview
+                               )
+                           )""",
+                        (assignment_id,),
+                    )
+                    # Delete question_eds_aggregate rows for preview sessions
+                    cur.execute(
+                        """DELETE FROM question_eds_aggregate
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview
+                           )""",
+                        (assignment_id,),
+                    )
+                    # Delete grades for preview sessions
+                    cur.execute(
+                        """DELETE FROM grade
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview
+                           )""",
+                        (assignment_id,),
+                    )
+                    # Delete session turns for preview sessions
+                    cur.execute(
+                        """DELETE FROM session_turn
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview
+                           )""",
+                        (assignment_id,),
+                    )
+                    # Purge the preview sessions themselves
+                    cur.execute(
+                        "DELETE FROM exam_session WHERE assignment_id = %s::uuid AND is_preview",
+                        (assignment_id,),
+                    )
+                repo.conn.commit()
+                return {"status": "active", "assignment_id": assignment_id}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/assignments/{assignment_id}/discard ──────────────────────
+    @app.post(R.ASSIGNMENT_DISCARD)
+    def discard_draft(
+        assignment_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Delete a draft assignment and all related data, owner-only (mirrors delete_assignment)."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                # Verify draft exists, is owned by caller, and is still a draft
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT question_set_id FROM assignment
+                           WHERE assignment_id = %s::uuid AND org_id = %s::uuid
+                             AND created_by = %s AND status = 'draft'""",
+                        (assignment_id, caller.org_id, caller.user_id),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        raise AuthorizationError("draft not found")
+                    question_set_id = str(row[0])
+
+                with repo.conn.cursor() as cur:
+                    # Delete evaluations for turns in sessions of this assignment
+                    cur.execute(
+                        """DELETE FROM evaluation
+                           WHERE turn_id IN (
+                               SELECT turn_id FROM session_turn
+                               WHERE session_id IN (
+                                   SELECT session_id FROM exam_session
+                                   WHERE assignment_id = %s::uuid
+                               )
+                           )""",
+                        (assignment_id,),
+                    )
+                    # Delete question_eds_aggregate rows for sessions of this assignment
+                    try:
+                        cur.execute(
+                            """DELETE FROM question_eds_aggregate
+                               WHERE session_id IN (
+                                   SELECT session_id FROM exam_session
+                                   WHERE assignment_id = %s::uuid
+                               )""",
+                            (assignment_id,),
+                        )
+                    except Exception:
+                        repo.conn.rollback()
+                        # Table may not exist; continue
+
+                with repo.conn.cursor() as cur:
+                    # Delete grades for this assignment
+                    cur.execute(
+                        "DELETE FROM grade WHERE assignment_id = %s::uuid",
+                        (assignment_id,),
+                    )
+                    # Delete session turns
+                    cur.execute(
+                        """DELETE FROM session_turn
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid
+                           )""",
+                        (assignment_id,),
+                    )
+                    # Delete exam sessions
+                    cur.execute(
+                        "DELETE FROM exam_session WHERE assignment_id = %s::uuid",
+                        (assignment_id,),
+                    )
+                    # Delete question_set_membership
+                    cur.execute(
+                        "DELETE FROM question_set_membership WHERE question_set_id = %s::uuid",
+                        (question_set_id,),
+                    )
+                    # Assignment must go before its question_set: assignment.question_set_id
+                    # is a FK, so removing the set first violates the constraint.
+                    cur.execute(
+                        """DELETE FROM assignment
+                           WHERE assignment_id = %s::uuid AND created_by = %s AND status = 'draft'
+                           RETURNING assignment_id""",
+                        (assignment_id, caller.user_id),
+                    )
+                    if not cur.fetchone():
+                        raise AuthorizationError("draft not found")
+                    # Only drop the set once no assignment references it
+                    cur.execute(
+                        """DELETE FROM question_set
+                           WHERE question_set_id = %s::uuid
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM assignment
+                                 WHERE question_set_id = %s::uuid
+                             )""",
+                        (question_set_id, question_set_id),
+                    )
+                repo.conn.commit()
+
+                return {"status": "discarded", "assignment_id": assignment_id}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -3440,7 +3645,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
 
                 with repo.conn.cursor() as cur:
                     cur.execute(
-                        """SELECT assignment_id, course_id, question_set_id, config, status
+                        """SELECT assignment_id, course_id, question_set_id, config, status, created_by
                            FROM assignment WHERE assignment_id = %s::uuid""",
                         (assignment_id,),
                     )
@@ -3448,8 +3653,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
 
                 if not arow:
                     raise AuthorizationError("assignment not found")
-                if arow[4] != "active":
-                    raise AuthorizationError(f"assignment is not active (status: {arow[4]})")
+                is_preview = _start_is_preview(arow[4], arow[5], caller.role, caller.user_id)
 
                 course_id = str(arow[1])
                 question_set_id = str(arow[2])
@@ -3461,15 +3665,16 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     cur.execute(
                         """INSERT INTO exam_session
                            (session_id, assignment_id, student_id, org_id, course_id,
-                            status, current_turn_index, questions_delivered, concepts_covered)
+                            status, current_turn_index, questions_delivered, concepts_covered,
+                            is_preview)
                            VALUES (%s::uuid, %s::uuid, %s, %s::uuid, %s::uuid,
-                                   'active', 0, '[]'::jsonb, '[]'::jsonb)
+                                   'active', 0, '[]'::jsonb, '[]'::jsonb, %s)
                            ON CONFLICT (assignment_id, student_id)
                               WHERE status = 'active'
                            DO NOTHING
                            RETURNING session_id""",
                         (session_id, assignment_id, caller.user_id,
-                         caller.org_id, course_id),
+                         caller.org_id, course_id, is_preview),
                     )
                     inserted = cur.fetchone()
 

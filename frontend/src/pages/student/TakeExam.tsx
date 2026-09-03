@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen } from 'lucide-react';
 import { jsPDF } from 'jspdf';
-import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase } from '../../api/exam';
+import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft } from '../../api/exam';
 import type { CaseMaterial } from '../../api/exam';
 import { get } from '../../api/client';
 import { API_BASE_URL } from '../../config';
@@ -358,8 +358,10 @@ function speechFriendly(raw: string): string {
   return t;
 }
 
-export default function TakeExam() {
-  const { assignmentId } = useParams<{ assignmentId: string }>();
+export default function TakeExam(props: { assignmentId?: string; preview?: boolean; onExit?: () => void } = {}) {
+  const params = useParams<{ assignmentId: string }>();
+  const assignmentId = props.assignmentId ?? params.assignmentId;
+  const preview = !!props.preview;
   const navigate = useNavigate();
 
   // Session state
@@ -560,29 +562,31 @@ export default function TakeExam() {
         if (cancelled) return;
         setMeta(meta);
 
-        // Check for saved state first
-        const saved = loadExamState(assignmentId);
-        if (saved) {
-          // Verify session is still valid server-side
-          try {
-            const status = await getSessionStatus(saved.sessionId);
-            if (status.status === 'completed') {
+        // Check for saved state first — never resume/load in preview (start fresh).
+        if (!preview) {
+          const saved = loadExamState(assignmentId);
+          if (saved) {
+            // Verify session is still valid server-side
+            try {
+              const status = await getSessionStatus(saved.sessionId);
+              if (status.status === 'completed') {
+                clearExamState(assignmentId);
+                // Fall through to start fresh
+              } else {
+                if (cancelled) return;
+                setSessionId(saved.sessionId);
+                setQuestions(saved.questions);
+                setQData(saved.qData);
+                setCurrent(saved.current);
+                setStartTime(saved.startTime);
+                setDurationMinutes(saved.durationMinutes);
+                setPhase('taking');
+                return;
+              }
+            } catch {
+              // Session check failed (network error, 404, etc) - discard saved state
               clearExamState(assignmentId);
-              // Fall through to start fresh
-            } else {
-              if (cancelled) return;
-              setSessionId(saved.sessionId);
-              setQuestions(saved.questions);
-              setQData(saved.qData);
-              setCurrent(saved.current);
-              setStartTime(saved.startTime);
-              setDurationMinutes(saved.durationMinutes);
-              setPhase('taking');
-              return;
             }
-          } catch {
-            // Session check failed (network error, 404, etc) - discard saved state
-            clearExamState(assignmentId);
           }
         }
 
@@ -599,7 +603,7 @@ export default function TakeExam() {
     })();
 
     return () => { cancelled = true; };
-  }, [assignmentId]);
+  }, [assignmentId, preview]);
 
   // Start the exam for real: create the session, seed questions, and start the
   // clock (startTime = now). Only called from the readiness screen's Start button.
@@ -627,7 +631,7 @@ export default function TakeExam() {
       setStartTime(now);
       setDurationMinutes(dur);
       setPhase('taking');
-      saveExamState(assignmentId, {
+      if (!preview) saveExamState(assignmentId, {
         version: EXAM_STATE_VERSION,
         sessionId: res.session_id,
         questions: res.questions,
@@ -641,7 +645,7 @@ export default function TakeExam() {
     } finally {
       setStarting(false);
     }
-  }, [assignmentId, starting, meta, durationMinutes, isPractice, practiceTimed]);
+  }, [assignmentId, starting, meta, durationMinutes, isPractice, practiceTimed, preview]);
 
   // Pre-flight mic permission check on the readiness screen. Requests audio, then
   // immediately releases the stream — we only want to surface permission state so
@@ -663,7 +667,7 @@ export default function TakeExam() {
   // no longer blocks it (the active-session unique guard is partial).
   const retake = useCallback(() => {
     stopSpeech();
-    if (assignmentId) clearExamState(assignmentId);
+    if (assignmentId && !preview) clearExamState(assignmentId);
     setSessionId(null);
     setQuestions([]);
     setQData([]);
@@ -675,14 +679,14 @@ export default function TakeExam() {
     setMicNotice(null);
     spokenRef.current = '';
     setPhase('ready');
-  }, [assignmentId, stopSpeech]);
+  }, [assignmentId, stopSpeech, preview]);
 
   // ── Persist state on meaningful changes ─────────────────────────────────────
 
   const [persistWarning, setPersistWarning] = useState(false);
 
   useEffect(() => {
-    if (!assignmentId || !sessionId || phase !== 'taking') return;
+    if (preview || !assignmentId || !sessionId || phase !== 'taking') return;
     const ok = saveExamState(assignmentId, {
       version: EXAM_STATE_VERSION,
       sessionId,
@@ -693,7 +697,7 @@ export default function TakeExam() {
       durationMinutes,
     });
     if (!ok) setPersistWarning(true);
-  }, [assignmentId, sessionId, questions, qData, current, phase, startTime, durationMinutes]);
+  }, [assignmentId, sessionId, questions, qData, current, phase, startTime, durationMinutes, preview]);
 
   // ── Countdown timer ────────────────────────────────────────────────────────
 
@@ -847,7 +851,7 @@ export default function TakeExam() {
     if (sessionId) {
       try { await completeSession(sessionId); } catch { /* best-effort */ }
     }
-    if (assignmentId) clearExamState(assignmentId);
+    if (assignmentId && !preview) clearExamState(assignmentId);
     if (timerRef.current) clearInterval(timerRef.current);
     setPhase('done');
   };
@@ -1322,23 +1326,40 @@ export default function TakeExam() {
             </div>
           )}
 
-          <div className="flex gap-3 justify-center flex-wrap">
-            {isPractice && (
+          {preview ? (
+            <div className="flex gap-3 justify-center mt-6">
               <button
-                onClick={retake}
-                className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                onClick={async () => { try { await publishAssignment(assignmentId!); props.onExit?.(); } catch (err) { setError(err instanceof Error ? err.message : 'Failed to publish assignment'); } }}
+                className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
               >
-                Retake practice test
+                Publish to Students
               </button>
-            )}
-            <button
-              onClick={() => navigate('/student/dashboard')}
-              className={`px-5 py-2 rounded-lg text-sm font-medium ${isPractice ? 'border border-gray-300 text-gray-700 hover:bg-gray-50' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
-            >
-              <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
-              Back to Dashboard
-            </button>
-          </div>
+              <button
+                onClick={async () => { try { await discardDraft(assignmentId!); } finally { props.onExit?.(); } }}
+                className="px-5 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
+              >
+                Discard preview
+              </button>
+            </div>
+          ) : (
+            <div className="flex gap-3 justify-center flex-wrap">
+              {isPractice && (
+                <button
+                  onClick={retake}
+                  className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                >
+                  Retake practice test
+                </button>
+              )}
+              <button
+                onClick={() => navigate('/student/dashboard')}
+                className={`px-5 py-2 rounded-lg text-sm font-medium ${isPractice ? 'border border-gray-300 text-gray-700 hover:bg-gray-50' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+              >
+                <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
+                Back to Dashboard
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -1348,6 +1369,12 @@ export default function TakeExam() {
 
   return (
     <div className="max-w-5xl mx-auto flex flex-col min-h-[80vh]">
+      {preview && (
+        <div className="flex items-center gap-2 bg-purple-50 border border-purple-200 text-purple-800 rounded-xl px-4 py-2.5 mb-3 text-sm">
+          <span className="font-semibold">Preview</span>
+          <span>— real grading runs, but nothing is saved for students.</span>
+        </div>
+      )}
       {/* Header bar */}
       <div className="bg-blue-600 rounded-t-xl px-5 py-3 flex items-center justify-between">
         <div>

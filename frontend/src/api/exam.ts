@@ -190,7 +190,15 @@ export type AssignmentType = 'practice' | 'assignment' | 'exam';
 
 export async function assignExam(
   courseId: string,
-  body: { title: string; questions: ExamVariantQuestion[]; difficulty: string; duration_minutes?: number; assignment_type?: AssignmentType; include_case?: boolean; session_id?: string; scope_concepts?: string[] },
+  body: { title: string; questions: ExamVariantQuestion[]; difficulty: string; duration_minutes?: number; assignment_type?: AssignmentType; include_case?: boolean; session_id?: string; scope_concepts?: string[]; draft?: boolean },
 ): Promise<AssignExamResult> {
   return post<AssignExamResult>(`/api/courses/${courseId}/exams/assign`, body);
+}
+
+export async function publishAssignment(assignmentId: string): Promise<{ status: string; assignment_id: string }> {
+  return post<{ status: string; assignment_id: string }>(`/api/assignments/${assignmentId}/publish`);
+}
+
+export async function discardDraft(assignmentId: string): Promise<{ status: string; assignment_id: string }> {
+  return post<{ status: string; assignment_id: string }>(`/api/assignments/${assignmentId}/discard`);
 }
