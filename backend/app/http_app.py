@@ -43,7 +43,10 @@ from backend.app.exam_questions import (
     sanitize_bank as _sanitize_bank,
     DIFFICULTY_FOCUS,
 )
-from backend.app.concept_graph import write_document_concepts, recompute_course_graph, document_graph
+from backend.app.concept_graph import (
+    write_document_concepts, document_graph,
+    snapshot_course_graph, syllabus_version_ids,
+)
 from backend.app.graph_curation import apply_curation
 from backend.app.performance import aggregate_performance
 from backend.db.postgres import PostgresRepository
@@ -208,7 +211,6 @@ def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str 
     accumulate (fixes cross-course leaks) and a deleted document drops out cleanly.
     Runs synchronously — callers wrap it in a thread.
     """
-    import json as _json, uuid as _uuid
     conn = None
     with _INFLIGHT_LOCK:
         _INFLIGHT_REBUILDS[course_id] = org_id
@@ -221,6 +223,10 @@ def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str 
                 "SELECT DISTINCT material_version_id FROM chunk WHERE course_id = %s ORDER BY material_version_id",
                 (course_id,))
             mv_ids = [str(r[0]) for r in cur.fetchall()]
+            # The syllabus is excluded from the concept graph — don't extract from
+            # it (recompute drops it too, but skipping avoids a wasted LLM call).
+            syllabus_ids = set(syllabus_version_ids(cur, org_id, course_id))
+            mv_ids = [m for m in mv_ids if m not in syllabus_ids]
 
         if not mv_ids:
             # No materials remain: clear provenance and retire the graph.
@@ -250,16 +256,7 @@ def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str 
             conn.commit()
 
         with conn.cursor() as cur:
-            snapshot = recompute_course_graph(cur, org_id, course_id)
-            cur.execute("UPDATE graph_version SET is_active = false WHERE org_id = %s AND course_id = %s",
-                        (org_id, course_id))
-            cur.execute(
-                """INSERT INTO graph_version
-                   (version_id, org_id, course_id, graph_version, node_count,
-                    edge_count, validation_score, is_active, s3_key)
-                   VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
-                (str(_uuid.uuid4()), org_id, course_id, len(snapshot["concepts"]),
-                 len(snapshot["relations"]), 0.8, _json.dumps(snapshot)))
+            snapshot = snapshot_course_graph(cur, org_id, course_id)
         conn.commit()
         logger.info("Course graph rebuilt for %s from %d documents: %d concepts, %d relations",
                     course_id[:8], len(mv_ids), len(snapshot["concepts"]), len(snapshot["relations"]))
@@ -1020,6 +1017,18 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                                  req.material_id or None, req.material_version_id or None,
                                  req.file_name))
                 repo.conn.commit()
+                # The syllabus is excluded from the concept graph. Recompute now so
+                # a graph built while this file was still an unmarked material drops
+                # it — and a syllabus-only course shows no (premature) graph. Cheap:
+                # pure DB, no LLM. Non-fatal — the pointer is already saved.
+                try:
+                    with repo.conn.cursor() as cur:
+                        snapshot_course_graph(cur, caller.org_id, course_id)
+                    repo.conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    repo.conn.rollback()
+                    logger.warning("Post-syllabus graph recompute failed for %s: %s",
+                                   course_id[:8], exc)
                 return {"status": "ok", "file_name": req.file_name}
             finally:
                 _release_repo(d, repo)

@@ -1,8 +1,6 @@
 """Ingest pipeline (T7): extract -> chunk -> embed -> persist -> ready/flip -> graph build."""
 from __future__ import annotations
-import json
 import logging
-import uuid
 from typing import List
 
 from backend.models import (
@@ -17,7 +15,9 @@ from backend.chunking import Chunker
 from backend.config import Settings
 from backend.constants import MAX_CHUNKS_FOR_GRAPH, LLM_MAX_TOKENS_GENERATION
 from backend.app.exam_questions import sanitize_bank
-from backend.app.concept_graph import write_document_concepts, recompute_course_graph
+from backend.app.concept_graph import (
+    write_document_concepts, snapshot_course_graph, syllabus_version_ids,
+)
 from backend.bedrock_helper import call_bedrock
 
 logger = logging.getLogger(__name__)
@@ -121,6 +121,18 @@ class IngestPipeline:
                 )
                 conn.commit()
 
+                # The syllabus is a scaffold, not learning content, so it never
+                # contributes concepts. Skip extraction, but still recompute so the
+                # course graph reflects only its materials (and drops the syllabus
+                # if it had been ingested before being marked as the syllabus).
+                if str(msg.material_version_id) in syllabus_version_ids(cur, msg.org_id, msg.course_id):
+                    snapshot = snapshot_course_graph(cur, msg.org_id, msg.course_id)
+                    conn.commit()
+                    logger.info("Material %s is the course syllabus — excluded from the graph; "
+                                "course graph now %d concepts from materials only",
+                                msg.material_version_id[:8], len(snapshot["concepts"]))
+                    return
+
                 # Only fetch chunks from the newly ingested material
                 cur.execute(
                     "SELECT text FROM chunk WHERE material_version_id = %s ORDER BY chunk_index",
@@ -185,20 +197,7 @@ class IngestPipeline:
             with conn.cursor() as cur:
                 write_document_concepts(cur, msg.org_id, msg.course_id,
                                         msg.material_version_id, new_concepts, new_relations)
-                snapshot = recompute_course_graph(cur, msg.org_id, msg.course_id)
-                graph_json = json.dumps(snapshot)
-                cur.execute(
-                    "UPDATE graph_version SET is_active = false WHERE org_id = %s AND course_id = %s",
-                    (msg.org_id, msg.course_id),
-                )
-                cur.execute(
-                    """INSERT INTO graph_version
-                       (version_id, org_id, course_id, graph_version, node_count,
-                        edge_count, validation_score, is_active, s3_key)
-                       VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
-                    (str(uuid.uuid4()), msg.org_id, msg.course_id, len(snapshot["concepts"]),
-                     len(snapshot["relations"]), 0.8, graph_json),
-                )
+                snapshot = snapshot_course_graph(cur, msg.org_id, msg.course_id)
             conn.commit()
 
             logger.info("Graph build for course %s: document contributed %d concepts; "

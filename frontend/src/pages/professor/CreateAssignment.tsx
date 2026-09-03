@@ -563,7 +563,11 @@ export default function CreateAssignment() {
                 <option key={s.session_id} value={s.session_id}>
                   {s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'Undated session'}
                   {s.session_document ? ` — ${s.session_document.slice(0, 40)}` : ''}
-                  {` (${s.in_scope_concepts?.length || 0} topics in scope)`}
+                  {/* Empty scope means "no restriction" — draw from the whole
+                      course — not "no content". Only show a count when one is set. */}
+                  {s.in_scope_concepts?.length
+                    ? ` (${s.in_scope_concepts.length} topic${s.in_scope_concepts.length !== 1 ? 's' : ''} in scope)`
+                    : ' (whole course)'}
                 </option>
               ))}
             </select>
@@ -729,7 +733,10 @@ export default function CreateAssignment() {
         {courseId && graphReady && (
           <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
             <CheckCircle className="w-4 h-4 flex-shrink-0" />
-            <span>{conceptCount} concept{conceptCount !== 1 ? 's' : ''} ready — up to {maxQuestions} questions available.</span>
+            {/* "topics" here matches the scope picker's vocabulary — same units as
+                a week's "in scope" count — so the two figures don't read as a
+                concepts-vs-topics contradiction. */}
+            <span>{conceptCount} topic{conceptCount !== 1 ? 's' : ''} ready — up to {maxQuestions} questions available.</span>
           </div>
         )}
 

@@ -24,20 +24,44 @@ export default function FileUpload({ accept, multiple = false, maxFiles, onFiles
   // Validate count + format; the drag-drop path bypasses the input's accept
   // filter, so both handlers must gate here before emitting the files. Too many
   // files rejects the whole selection rather than silently truncating.
-  const accept_files = useCallback((files: File[]) => {
-    if (files.length === 0) return;
-    if (maxFiles && files.length > maxFiles) {
-      setFormatError(`Select at most ${maxFiles} files at a time (you chose ${files.length}).`);
+  //
+  // In multi-file mode, selections ACCUMULATE: picking files one at a time keeps
+  // the earlier cards on screen (deduped) instead of replacing them, so a prior
+  // document never appears to vanish. Only the newly-added files are emitted to
+  // the parent, so already-uploaded files aren't uploaded again. Single-file
+  // mode (e.g. syllabus) keeps replace semantics.
+  const fileKey = (f: File) => `${f.name}:${f.size}:${f.lastModified}`;
+  const accept_files = useCallback((incoming: File[]) => {
+    if (incoming.length === 0) return;
+
+    if (!multiple) {
+      const one = incoming.slice(0, 1);
+      if (unsupported(one)) {
+        setFormatError(`File format not supported. Supported formats: ${supportedLabel}.`);
+        return;
+      }
+      setFormatError('');
+      setSelectedFiles(one);
+      onFilesSelected(one);
       return;
     }
-    if (unsupported(files)) {
+
+    const existing = new Set(selectedFiles.map(fileKey));
+    const fresh = incoming.filter((f) => !existing.has(fileKey(f)));
+    if (fresh.length === 0) return; // all duplicates — nothing new to add
+    const merged = [...selectedFiles, ...fresh];
+    if (maxFiles && merged.length > maxFiles) {
+      setFormatError(`Select at most ${maxFiles} files (you now have ${merged.length}).`);
+      return;
+    }
+    if (unsupported(fresh)) {
       setFormatError(`File format not supported. Supported formats: ${supportedLabel}.`);
       return;
     }
     setFormatError('');
-    setSelectedFiles(files);
-    onFilesSelected(files);
-  }, [onFilesSelected, supportedLabel, maxFiles]);
+    setSelectedFiles(merged);
+    onFilesSelected(fresh);
+  }, [multiple, selectedFiles, onFilesSelected, supportedLabel, maxFiles]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -61,6 +85,9 @@ export default function FileUpload({ accept, multiple = false, maxFiles, onFiles
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       accept_files(Array.from(e.target.files || []));
+      // Clear the input so re-selecting the same file (e.g. after removing it)
+      // still fires onChange.
+      e.target.value = '';
     },
     [accept_files]
   );

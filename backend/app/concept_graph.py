@@ -97,6 +97,23 @@ def merge_document_concepts(concept_rows: List[dict], edge_rows: List[dict]) -> 
 
 # ── DB wrappers (take a psycopg2 cursor with app.org_id already bound) ─────────
 
+def syllabus_version_ids(cur, org_id, course_id) -> List[str]:
+    """material_version_ids marked as this course's syllabus (usually 0 or 1).
+
+    The syllabus is an administrative scaffold (schedule/policies/topic outline),
+    not learning content, so it is EXCLUDED from the concept graph — the graph is
+    built from course materials only. Guarded by to_regclass so it's safe in
+    environments where the syllabus pointer table doesn't exist yet."""
+    cur.execute("SELECT to_regclass('public.course_syllabus')")
+    if cur.fetchone()[0] is None:
+        return []
+    cur.execute(
+        "SELECT material_version_id FROM course_syllabus "
+        "WHERE course_id = %s::uuid AND org_id = %s::uuid AND material_version_id IS NOT NULL",
+        (course_id, org_id))
+    return [str(r[0]) for r in cur.fetchall()]
+
+
 def write_document_concepts(cur, org_id, course_id, material_version_id, concepts, relations) -> None:
     """Replace one document's concept list + edges (mapping 1)."""
     cur.execute("DELETE FROM document_concept WHERE material_version_id = %s::uuid AND org_id = %s::uuid",
@@ -162,14 +179,23 @@ def recompute_course_graph(cur, org_id, course_id) -> dict:
                    WHERE de.course_id = %s::uuid AND de.org_id = %s::uuid
                      AND NOT EXISTS (SELECT 1 FROM chunk c WHERE c.material_version_id = de.material_version_id)""",
                 (course_id, org_id))
+    # Build the course graph from MATERIALS only — the syllabus is excluded even
+    # if it was ingested and wrote provenance rows (it may have been extracted
+    # before being marked as the syllabus). `<> ALL('{}')` excludes nothing when
+    # there is no syllabus, so the empty case is a no-op.
+    excluded = syllabus_version_ids(cur, org_id, course_id)
     cur.execute("""SELECT material_version_id, label, definition, abstraction_level, questions
-                   FROM document_concept WHERE course_id = %s::uuid AND org_id = %s::uuid""",
-                (course_id, org_id))
+                   FROM document_concept
+                   WHERE course_id = %s::uuid AND org_id = %s::uuid
+                     AND material_version_id <> ALL(%s::uuid[])""",
+                (course_id, org_id, excluded))
     concept_rows = [{"material_version_id": r[0], "label": r[1], "definition": r[2],
                      "abstraction_level": r[3], "questions": r[4]} for r in cur.fetchall()]
     cur.execute("""SELECT src_label, dst_label, edge_type, confidence
-                   FROM document_concept_edge WHERE course_id = %s::uuid AND org_id = %s::uuid""",
-                (course_id, org_id))
+                   FROM document_concept_edge
+                   WHERE course_id = %s::uuid AND org_id = %s::uuid
+                     AND material_version_id <> ALL(%s::uuid[])""",
+                (course_id, org_id, excluded))
     edge_rows = [{"src_label": r[0], "dst_label": r[1], "edge_type": r[2], "confidence": r[3]}
                  for r in cur.fetchall()]
 
@@ -194,3 +220,22 @@ def recompute_course_graph(cur, org_id, course_id) -> dict:
     for c in graph["concepts"]:
         c.pop("sources", None)
     return graph
+
+
+def snapshot_course_graph(cur, org_id, course_id) -> dict:
+    """Recompute the course graph (materials only) and publish it as the active
+    `graph_version` snapshot. Shared by every code path that (re)builds a graph —
+    the ingest pipeline, the manual rebuild, and marking a material as syllabus —
+    so they stay consistent. Returns the {concepts, relations} snapshot."""
+    import uuid as _uuid
+    snapshot = recompute_course_graph(cur, org_id, course_id)
+    cur.execute("UPDATE graph_version SET is_active = false WHERE org_id = %s AND course_id = %s",
+                (org_id, course_id))
+    cur.execute(
+        """INSERT INTO graph_version
+           (version_id, org_id, course_id, graph_version, node_count,
+            edge_count, validation_score, is_active, s3_key)
+           VALUES (%s::uuid, %s::uuid, %s::uuid, 1, %s, %s, %s, true, %s)""",
+        (str(_uuid.uuid4()), org_id, course_id, len(snapshot["concepts"]),
+         len(snapshot["relations"]), 0.8, json.dumps(snapshot)))
+    return snapshot

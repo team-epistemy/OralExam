@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { CheckCircle, AlertCircle, Loader2, Network, Calendar } from 'lucide-react';
@@ -37,6 +37,14 @@ export default function UploadMaterial() {
   const [versions, setVersions] = useState<MaterialVersion[]>([]);
   const [stalled, setStalled] = useState('');
   const [pollInterval, setPollInterval] = useState<ReturnType<typeof setInterval> | null>(null);
+  const [uploaderKey, setUploaderKey] = useState(0);
+  // Every material uploaded on this page (across one-at-a-time selections), so
+  // the Pipeline Status list and polling cover them all — not just the latest.
+  const uploadedIdsRef = useRef<string[]>([]);
+  // Tracks the live poll interval so a new upload can reliably stop the previous
+  // poll before starting one over the full accumulated set (state can be stale
+  // inside the async handler's closure).
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Stop polling after this long if a version never reaches a terminal status,
   // so a stuck job shows a "still processing" notice instead of an infinite spinner.
@@ -45,7 +53,10 @@ export default function UploadMaterial() {
   const MAX_BATCH = 10; // upload up to 10 files at once; each becomes its own material
 
   // Poll every uploaded material until all are ready/failed (or we time out).
+  // Any in-flight poll is stopped first, so we never run two intervals that
+  // race to overwrite `versions` (which is what dropped earlier documents).
   const pollBatch = (materialIds: string[]) => {
+    if (pollRef.current) clearInterval(pollRef.current);
     const startedAt = Date.now();
     const interval = setInterval(async () => {
       try {
@@ -60,9 +71,11 @@ export default function UploadMaterial() {
           latest.every((v) => v.status === 'ready' || v.status === 'failed');
         if (allTerminal) {
           clearInterval(interval);
+          pollRef.current = null;
           setPollInterval(null);
         } else if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
           clearInterval(interval);
+          pollRef.current = null;
           setPollInterval(null);
           setStalled('Still processing — large files can take a few minutes. '
             + 'You can leave this page; the status will update on the course materials list when it finishes.');
@@ -71,6 +84,7 @@ export default function UploadMaterial() {
         // ignore polling errors
       }
     }, POLL_INTERVAL_MS);
+    pollRef.current = interval;
     setPollInterval(interval);
   };
 
@@ -83,7 +97,13 @@ export default function UploadMaterial() {
     setError('');
     setStalled('');
     setSuccess(false);
-    setVersions([]);
+    // A syllabus replaces its single file, so start fresh. Materials accumulate:
+    // keep the earlier documents' status rows on screen (they were uploaded and
+    // are still processing) instead of wiping them when the next file is picked.
+    if (isSyllabus) {
+      setVersions([]);
+      uploadedIdsRef.current = [];
+    }
 
     let batchSessionId = sessionChoice !== 'new' ? sessionChoice : undefined;
     const sessionDate = sessionChoice === 'new' ? (newSessionDate || undefined) : undefined;
@@ -128,10 +148,13 @@ export default function UploadMaterial() {
         : `${failures.length} of ${batch.length} files failed to upload: ${failures.join('; ')}`);
     }
     if (materialIds.length) {
-      setUploadResult(firstResult);
-      setUploadedCount(materialIds.length);
+      // Add this selection's materials to the running set and poll them all, so
+      // one-at-a-time uploads each stay visible in the Pipeline Status list.
+      uploadedIdsRef.current = [...uploadedIdsRef.current, ...materialIds];
+      setUploadResult((prev) => prev ?? firstResult);
+      setUploadedCount(uploadedIdsRef.current.length);
       setSuccess(true);
-      pollBatch(materialIds);
+      pollBatch(uploadedIdsRef.current);
     }
   };
 
@@ -233,6 +256,7 @@ export default function UploadMaterial() {
             </div>
           ) : (
             <FileUpload
+              key={uploaderKey}
               accept=".pdf,.docx,.doc,.rtf,.txt,.pptx,.md"
               multiple={!isSyllabus}
               maxFiles={isSyllabus ? 1 : MAX_BATCH}
@@ -344,7 +368,13 @@ export default function UploadMaterial() {
                 setUploadedCount(0);
                 setVersions([]);
                 setStalled('');
+                uploadedIdsRef.current = [];
+                if (pollRef.current) clearInterval(pollRef.current);
+                pollRef.current = null;
                 if (pollInterval) clearInterval(pollInterval);
+                setPollInterval(null);
+                // Remount FileUpload to clear its accumulated file cards.
+                setUploaderKey((k) => k + 1);
               }}
               className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             >
