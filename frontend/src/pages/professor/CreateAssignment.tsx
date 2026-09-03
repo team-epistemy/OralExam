@@ -600,7 +600,13 @@ export default function CreateAssignment() {
                     ) : (
                       <>
                         <div className="flex items-center justify-between mb-2">
-                          <span className="text-xs text-gray-500">{effectiveConcepts.length} of {allConcepts.length} topics selected</span>
+                          {/* None selected = whole course (see note below), so
+                              show that instead of a misleading "0 of N selected". */}
+                          <span className="text-xs text-gray-500">
+                            {effectiveConcepts.length === 0
+                              ? `Whole course — all ${allConcepts.length} topics`
+                              : `${effectiveConcepts.length} of ${allConcepts.length} topics selected`}
+                          </span>
                           <div className="flex gap-2">
                             <button type="button" onClick={() => setTopicOverride(allConcepts.map((c) => c.id))} className="text-xs text-blue-600 hover:underline">All</button>
                             <button type="button" onClick={() => setTopicOverride([])} className="text-xs text-blue-600 hover:underline">None</button>
