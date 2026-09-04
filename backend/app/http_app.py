@@ -37,6 +37,7 @@ from backend.questions.exam_builder import build_variants, assemble_questions
 from backend.app import factory, routes as R
 from backend.app.emails import parse_emails as _parse_emails
 from backend.app.syllabus_parser import parse_syllabus as _parse_syllabus, normalize_date as _normalize_date
+from backend.app.syllabus_mapper import map_pdf_bytes_to_sessions as _map_pdf_to_sessions
 from backend.app.exam_questions import (
     stored_concept_banks as _concept_banks,
     merge_generated_banks,
@@ -1057,22 +1058,6 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 _require_syllabus(repo, course_id)
 
-                # Source text: explicit paste wins; otherwise the syllabus's chunks.
-                text = (req.text or "").strip()
-                if not text:
-                    with repo.conn.cursor() as cur:
-                        cur.execute("SELECT material_version_id FROM course_syllabus WHERE course_id = %s::uuid",
-                                    (course_id,))
-                        row = cur.fetchone()
-                    vid = str(row[0]) if row and row[0] else None
-                    if vid:
-                        chunks = repo.list_chunks(vid)
-                        text = "\n".join(c.get("text", "") for c in chunks).strip()
-                if not text:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="The syllabus is still being processed. Try again in a moment, or paste its schedule.")
-
                 # Don't duplicate: if sessions already exist, return them untouched.
                 has_scope = None
                 with repo.conn.cursor() as cur:
@@ -1083,7 +1068,43 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                                 "message": "This course already has sessions — clear them to regenerate."}
                     has_scope = _session_scope_col(cur)
 
-                parsed = _parse_syllabus(text)
+                # Resolve the schedule. A pasted schedule always uses the text
+                # parser. Otherwise prefer the layout/table-aware PDF mapper on the
+                # stored syllabus file, falling back to the text parser on the
+                # extracted chunks (non-PDF syllabi, or when the mapper finds none).
+                pasted = (req.text or "").strip()
+                parsed = None
+                if pasted:
+                    parsed = _parse_syllabus(pasted)
+                else:
+                    with repo.conn.cursor() as cur:
+                        cur.execute("SELECT material_version_id FROM course_syllabus WHERE course_id = %s::uuid",
+                                    (course_id,))
+                        row = cur.fetchone()
+                    vid = str(row[0]) if row and row[0] else None
+                    version = repo.get_version(vid) if vid else None
+                    if version and getattr(version.source_type, "value", str(version.source_type)) == "pdf":
+                        try:
+                            pdf_bytes = d["storage"].get_bytes(version.s3_key)
+                            parsed = _map_pdf_to_sessions(pdf_bytes)
+                            if parsed:
+                                logger.info("Syllabus %s parsed via PDF mapper: %d sessions",
+                                            course_id[:8], len(parsed))
+                        except Exception as exc:  # noqa: BLE001 - fall back to text
+                            logger.warning("PDF syllabus mapper failed for %s: %s — falling back to text",
+                                           course_id[:8], exc)
+                            parsed = None
+                    if not parsed:
+                        text = ""
+                        if vid:
+                            chunks = repo.list_chunks(vid)
+                            text = "\n".join(c.get("text", "") for c in chunks).strip()
+                        if not text:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="The syllabus is still being processed. Try again in a moment, or paste its schedule.")
+                        parsed = _parse_syllabus(text)
+
                 if not parsed:
                     raise HTTPException(
                         status_code=422,

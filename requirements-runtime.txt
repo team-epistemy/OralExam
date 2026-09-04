@@ -9,6 +9,7 @@ python-docx>=1.1.0
 striprtf>=0.0.26
 pypdf>=4.0
 openpyxl>=3.1
+pdfplumber>=0.11
 psycopg2-binary>=2.9
 # M4 — graph, vector search, embeddings
 kuzu>=0.4
