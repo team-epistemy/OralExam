@@ -25,7 +25,7 @@ from backend.constants import (
     LLM_MAX_TOKENS_EVALUATION,
     EDS_ALPHA, EDS_BETA, EDS_GAMMA,
 )
-from backend.models import Role, IngestRequest
+from backend.models import Role, IngestRequest, NON_GRAPH_SOURCE_TYPES
 from backend.api.service import AuthorizationError
 from backend.tools.materials_tools import MaterialsTools
 from backend.tools.search_tools import SearchTools
@@ -219,10 +219,15 @@ def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str 
         with conn.cursor() as cur:
             cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
             conn.commit()
+            # Join material_version so we can drop tabular/data uploads (CSV, XLSX),
+            # which are ingested but never contribute to the concept graph.
             cur.execute(
-                "SELECT DISTINCT material_version_id FROM chunk WHERE course_id = %s ORDER BY material_version_id",
+                """SELECT DISTINCT c.material_version_id, mv.source_type
+                   FROM chunk c JOIN material_version mv ON mv.material_version_id = c.material_version_id
+                   WHERE c.course_id = %s ORDER BY c.material_version_id""",
                 (course_id,))
-            mv_ids = [str(r[0]) for r in cur.fetchall()]
+            _non_graph = {s.value for s in NON_GRAPH_SOURCE_TYPES}
+            mv_ids = [str(r[0]) for r in cur.fetchall() if r[1] not in _non_graph]
             # The syllabus is excluded from the concept graph — don't extract from
             # it (recompute drops it too, but skipping avoids a wasted LLM call).
             syllabus_ids = set(syllabus_version_ids(cur, org_id, course_id))

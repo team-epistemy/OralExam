@@ -257,7 +257,11 @@ export default function UploadMaterial() {
           ) : (
             <FileUpload
               key={uploaderKey}
-              accept=".pdf,.docx,.doc,.rtf,.txt,.pptx,.md"
+              // Materials accept spreadsheets/CSV too (stored + searchable, but not
+              // graphed); a syllabus stays prose-only since it seeds sessions.
+              accept={isSyllabus
+                ? '.pdf,.docx,.doc,.rtf,.txt,.pptx,.md'
+                : '.pdf,.docx,.doc,.rtf,.txt,.pptx,.md,.csv,.xlsx'}
               multiple={!isSyllabus}
               maxFiles={isSyllabus ? 1 : MAX_BATCH}
               onFilesSelected={handleFilesSelected}

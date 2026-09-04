@@ -103,6 +103,14 @@ class IngestPipeline:
             logger.info("No settings provided — skipping graph build")
             return
 
+        # Tabular/data uploads (CSV, XLSX) are ingested and searchable but never
+        # contribute to the concept graph — a spreadsheet has no conceptual prose.
+        from backend.models import NON_GRAPH_SOURCE_TYPES
+        if msg.source_type in NON_GRAPH_SOURCE_TYPES:
+            logger.info("Material %s is a %s data file — skipping concept-graph build",
+                        msg.material_version_id[:8], getattr(msg.source_type, "value", msg.source_type))
+            return
+
         try:
             logger.info("Graph auto-trigger starting for course %s", msg.course_id[:8])
             self._do_graph_build(msg)

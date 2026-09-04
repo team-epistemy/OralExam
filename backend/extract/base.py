@@ -21,6 +21,8 @@ def get_extractor(source_type: SourceType) -> Extractor:
     from backend.extract.doc import DocExtractor
     from backend.extract.rtf import RtfExtractor
     from backend.extract.pdf import PdfExtractor
+    from backend.extract.csv_ext import CsvExtractor
+    from backend.extract.xlsx_ext import XlsxExtractor
     table = {
         SourceType.MARKDOWN: MarkdownExtractor(),
         # Plain text is structurally valid markdown, so same extractor works
@@ -30,6 +32,8 @@ def get_extractor(source_type: SourceType) -> Extractor:
         SourceType.DOC: DocExtractor(),
         SourceType.RTF: RtfExtractor(),
         SourceType.PDF: PdfExtractor(),
+        SourceType.CSV: CsvExtractor(),
+        SourceType.XLSX: XlsxExtractor(),
     }
     if source_type not in table:
         raise ValueError(f"no extractor for source_type={source_type}")

@@ -36,6 +36,10 @@ def detect_source_type(file_name: str) -> SourceType:
         return SourceType.PDF
     if lower.endswith(".txt"):
         return SourceType.TEXT
+    if lower.endswith(".csv"):
+        return SourceType.CSV
+    if lower.endswith(".xlsx"):
+        return SourceType.XLSX
     raise AuthorizationError(f"unsupported file type: {file_name}")
 
 

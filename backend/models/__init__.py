@@ -26,6 +26,14 @@ class SourceType(str, Enum):
     DOCX = "docx"
     DOC = "doc"
     RTF = "rtf"
+    CSV = "csv"
+    XLSX = "xlsx"
+
+
+# Tabular/data uploads: still ingested (extracted, chunked, embedded, searchable
+# and viewable), but EXCLUDED from concept-graph generation — a spreadsheet is
+# data, not the conceptual prose a knowledge graph is built from.
+NON_GRAPH_SOURCE_TYPES = frozenset({SourceType.CSV, SourceType.XLSX})
 
 
 class VersionStatus(str, Enum):
