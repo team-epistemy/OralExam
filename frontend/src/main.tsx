@@ -9,7 +9,14 @@ import './index.css'
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 30_000,
+      // Keep views fresh: treat data as immediately stale so navigating to a
+      // tab/page (or refocusing the window) refetches, and any create/edit/
+      // delete/update shows up promptly across views — not up to 30s later.
+      // Mutations still invalidate their keys for instant same-view updates;
+      // this is the cross-view safety net.
+      staleTime: 0,
+      refetchOnMount: 'always',
+      refetchOnWindowFocus: true,
       retry: 1,
     },
   },
