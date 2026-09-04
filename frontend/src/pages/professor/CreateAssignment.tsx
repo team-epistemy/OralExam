@@ -73,7 +73,6 @@ export default function CreateAssignment() {
   });
   const conceptCount = graph?.node_count || 0;
   const graphReady = conceptCount > 0;
-  const maxQuestions = Math.min(50, conceptCount * 4);
   // Concept nodes (id + label) for the topic picker.
   const allConcepts = (graph?.concepts ?? [])
     .map((c) => ({ id: c.id || c.label || '', label: c.label || c.id || '' }))
@@ -734,15 +733,6 @@ export default function CreateAssignment() {
             <span>
               Preparing this course's concept graph — questions become available once it's built. This runs automatically after you upload materials and can take a minute. If you haven't added materials yet, upload them from the course's <span className="font-medium">Materials</span> tab.
             </span>
-          </div>
-        )}
-        {courseId && graphReady && (
-          <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
-            <CheckCircle className="w-4 h-4 flex-shrink-0" />
-            {/* "topics" here matches the scope picker's vocabulary — same units as
-                a week's "in scope" count — so the two figures don't read as a
-                concepts-vs-topics contradiction. */}
-            <span>{conceptCount} topic{conceptCount !== 1 ? 's' : ''} ready — up to {maxQuestions} questions available.</span>
           </div>
         )}
 
