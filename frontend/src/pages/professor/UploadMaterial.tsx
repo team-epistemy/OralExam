@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { CheckCircle, AlertCircle, Loader2, Calendar } from 'lucide-react';
+import { CheckCircle, AlertCircle, Loader2, Calendar, Home } from 'lucide-react';
 import { uploadMaterial, listVersions } from '../../api/materials';
 import type { MaterialVersion } from '../../api/materials';
 import { setSyllabus } from '../../api/courses';
@@ -335,51 +335,56 @@ export default function UploadMaterial() {
         )}
 
         {/* Next steps */}
-        {success && (
-          <div className="flex flex-wrap gap-3">
-            {(() => {
-              // Prefer the course id resolved by the upload itself (covers standalone
-              // uploads where the URL only carried the course name); fall back to the
-              // URL's courseId, then the dashboard.
-              const gid = uploadResult?.course_id || syllabusCourseId;
-              // After a syllabus upload the course is now unlocked — send the
-              // professor to the Sessions tab where they can auto-create sessions
-              // from it. Material uploads offer no next-step link (the concept
-              // graph builds in the background and lives on the course's Graph tab).
-              if (isSyllabus) {
-                return (
-                  <Link
-                    to={gid ? `/professor/courses/${gid}?tab=sessions` : '/professor/dashboard'}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-                  >
-                    <Calendar className="w-4 h-4" /> Continue — create sessions →
-                  </Link>
-                );
-              }
-              return null;
-            })()}
-            <button
-              onClick={() => {
-                setSuccess(false);
-                setProgress(0);
-                setUploadResult(null);
-                setUploadedCount(0);
-                setVersions([]);
-                setStalled('');
-                uploadedIdsRef.current = [];
-                if (pollRef.current) clearInterval(pollRef.current);
-                pollRef.current = null;
-                if (pollInterval) clearInterval(pollInterval);
-                setPollInterval(null);
-                // Remount FileUpload to clear its accumulated file cards.
-                setUploaderKey((k) => k + 1);
-              }}
-              className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-            >
-              Upload Another
-            </button>
-          </div>
-        )}
+        {success && (() => {
+          // Prefer the course id resolved by the upload itself (covers standalone
+          // uploads where the URL only carried the course name); fall back to the
+          // URL's courseId, then the dashboard.
+          const gid = uploadResult?.course_id || syllabusCourseId;
+          const courseHome = gid ? `/professor/courses/${gid}` : '/professor/dashboard';
+          return (
+            <div className="flex flex-wrap gap-3">
+              {/* After a syllabus upload the course is now unlocked — send the
+                  professor to the Sessions tab to auto-create sessions from it. */}
+              {isSyllabus && (
+                <Link
+                  to={gid ? `/professor/courses/${gid}?tab=sessions` : '/professor/dashboard'}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                >
+                  <Calendar className="w-4 h-4" /> Continue — create sessions →
+                </Link>
+              )}
+              <button
+                onClick={() => {
+                  setSuccess(false);
+                  setProgress(0);
+                  setUploadResult(null);
+                  setUploadedCount(0);
+                  setVersions([]);
+                  setStalled('');
+                  uploadedIdsRef.current = [];
+                  if (pollRef.current) clearInterval(pollRef.current);
+                  pollRef.current = null;
+                  if (pollInterval) clearInterval(pollInterval);
+                  setPollInterval(null);
+                  // Remount FileUpload to clear its accumulated file cards.
+                  setUploaderKey((k) => k + 1);
+                }}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Upload Another
+              </button>
+              {/* Back to the course dashboard. */}
+              {!isSyllabus && (
+                <Link
+                  to={courseHome}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                >
+                  <Home className="w-4 h-4" /> Course Home
+                </Link>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* How it works */}
