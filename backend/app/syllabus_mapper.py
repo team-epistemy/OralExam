@@ -51,7 +51,11 @@ class Line:
 
 @dataclass
 class SessionTuple:
-    date: Optional[str] = None
+    session_number: Optional[int] = None   # assigned after same-date merging —
+                                            # the primary identifier; not something
+                                            # the line-based parser tracks directly
+    date: Optional[str] = None             # the date/label as written, kept for
+                                            # reference and the chronological check
     topic: Optional[str] = None
     reading: Optional[str] = None          # textbook / lecture-note references
     case_study: Optional[str] = None       # items explicitly marked "(Case)"
@@ -477,7 +481,20 @@ def _parse_table_schedule(table: list) -> list[SessionTuple]:
             continue
         flat_date_cell = (row[date_col] or "").replace("\n", " ")
         date_match = _date_re.search(flat_date_cell) or _session_re.search(flat_date_cell)
-        date_str = date_match.group(0) if date_match else _clean_cell(row[date_col])
+        if date_match:
+            # Use the FULL cleaned cell as the date label, not just the
+            # narrowly-matched date substring. A dedicated "Date" column
+            # cell is always self-contained (unlike a marker line, it's
+            # never mixed with topic prose), so there's no risk in keeping
+            # all of it — and doing so is what correctly preserves both a
+            # genuine date RANGE ("8/15-8/21", which a narrow match would
+            # truncate to just "8/15") and a distinguishing time
+            # ("March 8th (12:15-3:15pm)" vs the next row's "(3:30-6:30pm)"
+            # — needed so two sessions on the same calendar day don't
+            # collapse to an identical label and get wrongly merged).
+            date_str = _clean_cell(flat_date_cell)
+        else:
+            date_str = _clean_cell(row[date_col])
 
         t = SessionTuple(date=date_str, source_lines=[])
         # Process the topic column FIRST (not as a direct blob assignment):
@@ -506,15 +523,42 @@ def extract_table_schedule(pdf_path: str) -> list[SessionTuple]:
     """Scan every table on every page; keep whichever produces the most
     tuples. A syllabus with both a narrative schedule and a clean summary
     table (common — the table is usually written to be more parseable)
-    should prefer the table."""
+    should prefer the table.
+
+    A table spanning a page break is frequently returned by pdfplumber as
+    TWO separate table objects, with the header row repeated at the top of
+    the second — e.g. 15 weeks on one page, then the header row again
+    followed by just week 16 on the next. Treating those as unrelated and
+    keeping only the larger one silently drops the final week(s). Adjacent
+    tables whose header row matches exactly are merged into one before
+    parsing."""
     import pdfplumber
-    best: list[SessionTuple] = []
+    all_tables: list[list] = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             for table in page.extract_tables():
-                tuples = _parse_table_schedule(table)
-                if len(tuples) > len(best):
-                    best = tuples
+                if table:
+                    all_tables.append(table)
+    if not all_tables:
+        return []
+
+    merged: list[list] = []
+    current: Optional[list] = None
+    for table in all_tables:
+        if current is not None and table and table[0] == current[0]:
+            current.extend(table[1:])
+        else:
+            if current is not None:
+                merged.append(current)
+            current = list(table)
+    if current is not None:
+        merged.append(current)
+
+    best: list[SessionTuple] = []
+    for table in merged:
+        tuples = _parse_table_schedule(table)
+        if len(tuples) > len(best):
+            best = tuples
     return best
 
 
@@ -611,11 +655,27 @@ _ARTICLE_PUBLICATIONS = [
 _ARTICLE_RE = re.compile("|".join(re.escape(p) for p in _ARTICLE_PUBLICATIONS), re.IGNORECASE)
 
 _NEW_ITEM_START_RE = re.compile(
-    r"^([\u2022\-\*]\s+|read:|reading:|prepare:|case\s*\d*\s*:|guest speaker:|due:|ch\.?\s*\d+)",
+    r"^([\u2022\-\*]\s+|read:|reading:|prepare:|case\s*\d*\s*:|guest speaker:|due:|"
+    r"ch\.?\s*\d+|chapters?\s*\d+)",
     re.IGNORECASE,
 )
 
 _TIME_JUNK_RE = re.compile(r"\d{1,2}[.:]\d{2}\s*(am|pm)|\b(am|pm)\b", re.IGNORECASE)
+
+
+def _looks_like_pure_date_line(text: str, date_matches: list[str]) -> bool:
+    """After removing the matched date substring(s), is what's left just
+    more date/time debris (parenthesized clock times, separators) — or is
+    it a real sentence that merely happens to mention a date in passing
+    ('No Class on Friday 9/1')? The latter must never be mistaken for a
+    marker's own date line: it's ordinary topic content."""
+    residual = text
+    for d in date_matches:
+        residual = residual.replace(d, "", 1)
+    if _TIME_JUNK_RE.search(residual):
+        return True
+    residual_clean = re.sub(r"[\s()\-:;,]+", " ", residual).strip()
+    return len(residual_clean.split()) <= 2
 
 
 def _is_page_number_artifact(text: str) -> bool:
@@ -716,6 +776,35 @@ def _classify_into(t: SessionTuple, item: str) -> None:
         t.misc = (t.misc + " " + item) if t.misc else item
 
 
+def _extract_dates_with_context(text: str) -> list[str]:
+    """Find every date match in `text`, each extended with any trailing
+    TIME-shaped text (matched by _TIME_JUNK_RE — a clock time or am/pm
+    marker) up to the next date match or end of string. Two sessions
+    sharing a calendar date but different times ('November 14th, 2025
+    8:30-11:30am' vs '...12:15-3:15pm') must NOT collapse to an identical
+    bare-date label — that would make them indistinguishable from a
+    genuine repeat and get them wrongly treated as one session downstream.
+    Gating on an actual time-pattern match (rather than just capping the
+    tail's length) matters: 'Class 2 (1/10) topic Decision rules' has a
+    short trailing string too, but it's the START of the real topic, not
+    date context, and must never be folded into the date."""
+    matches = list(_date_re.finditer(text))
+    if not matches:
+        return []
+    results = []
+    for idx, m in enumerate(matches):
+        span_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        tail_raw = text[m.end():span_end]
+        time_match = _TIME_JUNK_RE.search(tail_raw)
+        label = m.group(0)
+        if time_match:
+            tail = re.sub(r"^[\s(),:;-]+", "", tail_raw[:time_match.end()]).rstrip(" ,;-")
+            if tail:
+                label = f"{label} {tail}"
+        results.append(label)
+    return results
+
+
 def _find_markers(lines: list[Line], start: int, end: int) -> list[tuple[int, int, Optional[str], Optional[str]]]:
     """Locate every marker and its inline topic remainder (if any).
 
@@ -748,7 +837,7 @@ def _find_markers(lines: list[Line], start: int, end: int) -> list[tuple[int, in
         if session_match:
             marker_start = i
             inline_remainder_raw = stripped[session_match.end():].strip(" -:\u2013\u2014")
-            date_strs = [m.group(0) for m in _date_re.finditer(text)]
+            date_strs = _extract_dates_with_context(text)
             content_start = i
             extra_topic_lines: list[str] = []
 
@@ -761,17 +850,25 @@ def _find_markers(lines: list[Line], start: int, end: int) -> list[tuple[int, in
                 # Friends/Family Capital,' / 'Crowdfunding, Convertible
                 # Debt and SAFEs' / 'September 5th, 2025 8:30-11:30am').
                 # Scan a small bounded window ahead for the date, treating
-                # any intervening lines as continuation of the topic.
+                # any intervening lines as continuation of the topic. A
+                # candidate line only counts as the marker's real date line
+                # if it's MOSTLY date/time content — an ordinary topic
+                # sentence that happens to mention a date in passing (e.g.
+                # a 'Week 2' entry noting 'No Class on Friday 9/1' among
+                # its topics) must NOT be mistaken for the marker's own
+                # date; it's just topic content that happens to reference
+                # a date.
                 lookahead_limit = min(end, i + 4)
                 j = i + 1
                 found_date_line = None
                 while j <= lookahead_limit:
-                    j_dates = [m.group(0) for m in _date_re.finditer(lines[j].text)]
-                    if j_dates:
+                    j_text = lines[j].text
+                    j_dates_bare = [m.group(0) for m in _date_re.finditer(j_text)]
+                    if j_dates_bare and _looks_like_pure_date_line(j_text, j_dates_bare):
                         found_date_line = j
-                        date_strs = j_dates
+                        date_strs = _extract_dates_with_context(j_text)
                         break
-                    extra_topic_lines.append(lines[j].text)
+                    extra_topic_lines.append(j_text)
                     j += 1
                 if found_date_line is not None:
                     content_start = found_date_line
@@ -788,14 +885,24 @@ def _find_markers(lines: list[Line], start: int, end: int) -> list[tuple[int, in
                 i += 1
 
             if not date_strs:
-                # No date anywhere nearby — this is very likely a wrapped
-                # sentence that just happens to START with 'Block 2' or
-                # 'Class 3' by coincidence of where the line broke, not a
-                # real schedule marker. A genuine marker always has a date
-                # attached, either inline, on the next line, or within a
-                # short lookahead window past a wrapping title.
+                # No date anywhere nearby. If the marker's own line was
+                # NOTHING but the keyword itself (e.g. a standalone 'Week
+                # 2' line with no trailing text at all), that's too strong
+                # a structural signal to be a coincidental prose match —
+                # some syllabi genuinely never attach a calendar date to
+                # 'Week N' at all (the meeting pattern is implied by a
+                # fixed weekly schedule instead). Accept it, using the
+                # session label itself as the date. But if there WAS
+                # trailing text on the marker's own line with no date
+                # anywhere nearby, this is very likely a wrapped sentence
+                # that just happens to start with 'Block 2' or 'Class 3'
+                # by coincidence of where the line broke — reject it.
+                if not inline_remainder_raw:
+                    date_str = session_match.group(0)
+                    markers.append((marker_start, marker_start, date_str, None))
                 i += 1
                 continue
+
 
             # Whatever followed the session keyword on its own line MIGHT
             # be the real topic ('Class 1 (1/9) topic Intro, present
@@ -863,6 +970,62 @@ def parse_tuples(lines: list[Line], start: int, end: int) -> list[SessionTuple]:
     return tuples
 
 
+# ---------------------------------------------------------------------------
+# Session grouping: topics under the same date/label are part of the same
+# SESSION, not separate ones — e.g. 'Part I' and 'Part II' both listed
+# under one date must collapse into a single session entry. This runs on
+# whichever strategy produced the tuples (line-based or table-based)
+# before validation, since the document's true session count is the
+# number of distinct dates, not the number of topic-sized chunks the
+# parser happened to produce. session_number (assigned after merging) is
+# the primary identifier callers should key on — `date` stays as the
+# human-readable label rather than something to parse or sort by.
+# ---------------------------------------------------------------------------
+
+def _normalize_date_key(date: Optional[str]) -> Optional[str]:
+    if not date:
+        return None
+    return re.sub(r"\s+", " ", date.strip().lower())
+
+
+def _merge_text_field(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    if a and b:
+        return a if a == b else f"{a} / {b}"
+    return a or b
+
+
+def merge_same_date_tuples(tuples: list[SessionTuple]) -> list[SessionTuple]:
+    """Collapse tuples sharing the same date/label into one session,
+    combining their fields and unioning their source lines. Tuples with no
+    date at all (key is None) are never merged into each other — only a
+    genuinely shared, non-empty date/label counts as 'the same session'."""
+    merged: list[SessionTuple] = []
+    index_by_key: dict[str, int] = {}
+    for t in tuples:
+        key = _normalize_date_key(t.date)
+        if key and key in index_by_key:
+            existing = merged[index_by_key[key]]
+            existing.topic = _merge_text_field(existing.topic, t.topic)
+            existing.reading = _merge_text_field(existing.reading, t.reading)
+            existing.case_study = _merge_text_field(existing.case_study, t.case_study)
+            existing.article = _merge_text_field(existing.article, t.article)
+            existing.documents = _merge_text_field(existing.documents, t.documents)
+            existing.misc = _merge_text_field(existing.misc, t.misc)
+            existing.source_lines = sorted(set(existing.source_lines + t.source_lines))
+        else:
+            if key:
+                index_by_key[key] = len(merged)
+            merged.append(t)
+    return merged
+
+
+def assign_session_numbers(tuples: list[SessionTuple]) -> None:
+    """Sequential 1..N over the (already merged) sessions, in document
+    order. Mutates in place since callers typically already hold the list."""
+    for i, t in enumerate(tuples, start=1):
+        t.session_number = i
+
+
 def check_pattern_repeats(tuples: list[SessionTuple], min_repeats: int = 2) -> bool:
     hits = sum(1 for t in tuples if t.is_minimally_valid())
     return hits >= min_repeats
@@ -878,7 +1041,10 @@ def _per_tuple_errors(t: SessionTuple) -> list[str]:
         errs.append("missing date/session marker")
     if not t.topic:
         errs.append("missing topic")
-    elif len(t.topic) > 200:
+    elif len(t.topic) > 400:
+        # Threshold raised from 200: a legitimate same-date merge (e.g.
+        # "Part I" + "Part II" combined into one session) can produce a
+        # genuinely longer topic field without that being a mis-parse.
         errs.append("topic implausibly long — likely mis-parsed content")
     return errs
 
@@ -913,9 +1079,18 @@ def validate_tuples(tuples: list[SessionTuple], min_repeats: int = 2,
 
     numeric_dates = []
     for t in valid:
-        if t.date and re.match(r"^\d{1,2}/\d{1,2}", t.date):
-            m, d = t.date.split("/")[:2]
-            numeric_dates.append((int(m), int(d)))
+        if not t.date:
+            continue
+        m_match = re.match(r"^(\d{1,2})/(\d{1,2})\b", t.date)
+        if m_match:
+            # Use a match on just the leading "M/D" rather than split("/"),
+            # which breaks the moment the date field legitimately carries
+            # more than a bare date — a range ("8/15-8/21") or an appended
+            # distinguishing time ("March 8th 8:30-11:30am") both still
+            # start with a clean M/D prefix worth checking chronologically,
+            # but naive splitting on every "/" in the string would choke
+            # on the extra text instead of just ignoring it.
+            numeric_dates.append((int(m_match.group(1)), int(m_match.group(2))))
     if len(numeric_dates) >= 2:
         out_of_order = sum(
             1 for a, b in zip(numeric_dates, numeric_dates[1:])
@@ -977,6 +1152,13 @@ def run_pipeline(pdf_path: str, max_attempts: int = 3) -> ParseResult:
                 )
                 continue
             tuples = parse_tuples(lines, start, end)
+
+        # Same date/label -> same session, regardless of which strategy
+        # produced the tuples. Must happen before validation and before
+        # session numbers are assigned, since the real session count is
+        # the number of distinct dates, not the number of topic chunks.
+        tuples = merge_same_date_tuples(tuples)
+        assign_session_numbers(tuples)
 
         report = validate_tuples(tuples)
         if report.ok:
@@ -1057,7 +1239,10 @@ def map_pdf_bytes_to_sessions(pdf_bytes: bytes) -> list[dict]:
     Returns [] when nothing parses, so the caller can fall back to the
     text-based parser. Each tuple's topic becomes the session title and is split
     into concept labels for in_scope_concepts (same splitter the text parser
-    uses); the raw date string is passed through for the caller to normalize.
+    uses). session_number (assigned after same-date merging) is the session
+    identifier. The date field can now carry a range/time for disambiguation
+    ("Nov 14th 8:30-11:30am"); we hand the caller just the leading date token so
+    its normalizer can resolve it to an ISO date (session_date stores one day).
     """
     import os
     import tempfile
@@ -1084,12 +1269,16 @@ def map_pdf_bytes_to_sessions(pdf_bytes: bytes) -> list[dict]:
         topic = (t.get("topic") or "").strip()
         if not topic:
             continue
+        n = t.get("session_number") or (i + 1)
+        raw_date = (t.get("date") or "").strip()
+        dm = _date_re.search(raw_date)          # leading calendar date, if any
+        clean_date = dm.group(0) if dm else raw_date
         topics = _split_header_topics(topic) or [topic]
         sessions.append({
-            "index": i + 1,
-            "week": "Session %d" % (i + 1),
+            "index": n,
+            "week": "Session %d" % n,
             "title": topic,
-            "date": (t.get("date") or "").strip(),
+            "date": clean_date,
             "topics": topics,
         })
     return sessions

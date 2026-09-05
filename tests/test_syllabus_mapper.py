@@ -60,3 +60,34 @@ def test_map_pdf_bytes_to_sessions_skips_topicless_tuples(monkeypatch):
     monkeypatch.setattr(M, "run_pipeline", lambda path, **kw: _fake_result(tuples))
     sessions = M.map_pdf_bytes_to_sessions(b"%PDF")
     assert [s["title"] for s in sessions] == ["Forecasting"]
+
+
+def test_adapter_uses_session_number_and_cleans_rich_date(monkeypatch):
+    # New mapper: tuples carry session_number and a date that may include a time
+    # range for disambiguation. The adapter should key on session_number and hand
+    # the caller just the leading calendar date.
+    tuples = [{"session_number": 5, "date": "November 14th, 2025 8:30-11:30am",
+               "topic": "Capital Structure"}]
+    monkeypatch.setattr(M, "run_pipeline", lambda path, **kw: _fake_result(tuples))
+    s = M.map_pdf_bytes_to_sessions(b"%PDF")[0]
+    assert s["index"] == 5 and s["week"] == "Session 5"
+    assert s["date"] == "November 14th"          # time range stripped for normalizing
+    assert s["title"] == "Capital Structure"
+
+
+def test_merge_same_date_tuples_collapses_and_numbers():
+    tuples = [
+        M.SessionTuple(date="9/3", topic="Part I"),
+        M.SessionTuple(date="9/3", topic="Part II"),
+        M.SessionTuple(date="9/10", topic="Forecasting"),
+    ]
+    merged = M.merge_same_date_tuples(tuples)
+    assert len(merged) == 2
+    assert merged[0].topic == "Part I / Part II"    # same-date topics combined
+    M.assign_session_numbers(merged)
+    assert [t.session_number for t in merged] == [1, 2]
+
+
+def test_undated_tuples_never_merge():
+    tuples = [M.SessionTuple(date=None, topic="A"), M.SessionTuple(date=None, topic="B")]
+    assert len(M.merge_same_date_tuples(tuples)) == 2
