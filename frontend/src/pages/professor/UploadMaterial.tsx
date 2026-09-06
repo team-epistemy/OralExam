@@ -219,9 +219,11 @@ export default function UploadMaterial() {
           </div>
         )}
 
-        {/* Topic / Class Session — only when creating/choosing a session, not when
-            a specific session was already selected. */}
-        {!fromSession && (
+        {/* Topic / Class Session — only for the standalone upload with no course
+            context. When a course is known the class-session dropdown below is the
+            single place to choose/create the session, so this box is redundant; and
+            when a specific session was already selected it's hidden entirely. */}
+        {!fromSession && !syllabusCourseId && (
         <div>
           <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-1">
             Topic / Class Session
@@ -234,7 +236,7 @@ export default function UploadMaterial() {
             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             placeholder="e.g. Week 3 — Supervised Learning"
           />
-          <p className="text-xs text-gray-400 mt-1">Titles the class session (the heading files are grouped under). Files keep their own names. Ignored if you pick an existing session below.</p>
+          <p className="text-xs text-gray-400 mt-1">Titles the class session this material is grouped under. Files keep their own names.</p>
         </div>
         )}
 
