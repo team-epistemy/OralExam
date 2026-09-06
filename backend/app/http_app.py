@@ -1058,6 +1058,19 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                 caller = _pro(x_user_id, x_role, x_org_name, repo, d)
                 _require_syllabus(repo, course_id)
 
+                # Serialize concurrent processing for THIS course. Two overlapping
+                # requests (e.g. the auto-run after a syllabus upload racing a
+                # manual "Generate sessions" click) would otherwise both pass the
+                # "already has sessions?" check below and each insert the full set —
+                # the exact-duplicate bug. A transaction-scoped advisory lock makes
+                # the check-then-insert atomic per course; it's released when this
+                # request's transaction ends (the create path commits; every other
+                # path is rolled back on connection release), so the loser sees the
+                # winner's sessions and returns "exists". No commits run between the
+                # lock and the final insert, so the lock is held across the section.
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)", (course_id,))
+
                 # Don't duplicate: if sessions already exist, return them untouched.
                 has_scope = None
                 with repo.conn.cursor() as cur:

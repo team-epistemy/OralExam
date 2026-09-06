@@ -1087,8 +1087,6 @@ function SyllabusGate({ courseId, courseName }: { courseId: string; courseName: 
       await setSyllabus(courseId, {
         material_id: res.material_id, material_version_id: res.material_version_id, file_name: file.name,
       });
-      // The syllabus is attached now — unlock the course tabs.
-      queryClient.invalidateQueries({ queryKey: ['syllabus', courseId] });
       // Wait for the text to be extracted, then create sessions.
       setPhase('reading');
       let status = '';
@@ -1111,6 +1109,14 @@ function SyllabusGate({ courseId, courseName }: { courseId: string; courseName: 
     } catch (e) {
       setError((e as Error).message || 'Upload failed. Please try again.');
       setPhase('error');
+    } finally {
+      // Unlock the course only AFTER processing has resolved. Unlocking earlier
+      // reveals the Sessions tab's "Generate sessions" button while this gate's
+      // auto-run is still in flight, which could fire a second, concurrent
+      // create — the source of duplicate sessions. By now sessions already
+      // exist (success) so that button is hidden, or processing failed and the
+      // user retries there with a single call.
+      queryClient.invalidateQueries({ queryKey: ['syllabus', courseId] });
     }
   };
 

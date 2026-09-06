@@ -124,6 +124,12 @@ def migrate() -> None:
             print(f"applying {migration_015.name} ...")
             cur.execute(migration_015.read_text())
 
+        # Always apply migration_016 (dedupe class sessions + unique backstop; idempotent)
+        migration_016 = db_dir / "migration_016_class_session_unique.sql"
+        if migration_016.exists():
+            print(f"applying {migration_016.name} ...")
+            cur.execute(migration_016.read_text())
+
     conn.commit()
     print("all schemas applied")
 
