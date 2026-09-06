@@ -20,6 +20,10 @@ export default function UploadMaterial() {
   // let the professor pick an existing session or create one; otherwise the
   // backend instantiates a session automatically.
   const preselectedSession = params.get('sessionId') || '';
+  // Reached via "Upload file to this session": the target session is already
+  // fixed, so we hide the topic/session-picker chrome (only relevant when
+  // creating/choosing a session) and just upload into that session.
+  const fromSession = !!preselectedSession;
   const [sessionChoice, setSessionChoice] = useState(preselectedSession || 'new');
   const [newSessionDate, setNewSessionDate] = useState('');
   const { data: sessionsData } = useQuery({
@@ -28,6 +32,7 @@ export default function UploadMaterial() {
     enabled: !!syllabusCourseId,
   });
   const sessions = sessionsData?.sessions ?? [];
+  const targetSession = sessions.find((s) => s.session_id === preselectedSession);
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -198,7 +203,25 @@ export default function UploadMaterial() {
           </p>
         </div>
 
-        {/* Topic / Class Session */}
+        {/* Uploading into a specific session (from "Upload file to this session"):
+            the session is already chosen, so the topic + picker are unnecessary. */}
+        {fromSession && (
+          <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
+            <p className="text-xs font-medium text-blue-800">Uploading to this class session</p>
+            {targetSession && (
+              <p className="text-sm text-blue-900 mt-0.5">
+                {targetSession.session_date
+                  ? new Date(targetSession.session_date + 'T00:00:00').toLocaleDateString()
+                  : 'Undated session'}
+                {targetSession.session_document ? ` — ${targetSession.session_document}` : ''}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Topic / Class Session — only when creating/choosing a session, not when
+            a specific session was already selected. */}
+        {!fromSession && (
         <div>
           <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-1">
             Topic / Class Session
@@ -213,9 +236,10 @@ export default function UploadMaterial() {
           />
           <p className="text-xs text-gray-400 mt-1">Titles the class session (the heading files are grouped under). Files keep their own names. Ignored if you pick an existing session below.</p>
         </div>
+        )}
 
         {/* Class session — a material is always attached to a session */}
-        {syllabusCourseId && (
+        {syllabusCourseId && !fromSession && (
           <div>
             <label htmlFor="session" className="block text-sm font-medium text-gray-700 mb-1">Class Session</label>
             <select
