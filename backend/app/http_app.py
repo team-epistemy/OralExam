@@ -587,15 +587,14 @@ def _course_has_syllabus(repo, course_id: str) -> bool:
 
 
 def _require_syllabus(repo, course_id: str) -> None:
-    """Gate a course action behind an uploaded syllabus (409 if missing).
+    """No-op: the syllabus is now OPTIONAL and no longer gates course actions.
 
-    Every substantive course action (build the graph, generate/assign exams,
-    create sessions) requires the syllabus first — only enrollment is exempt.
-    Returns a 409 so the client can prompt "Add the syllabus to continue"."""
-    if not _course_has_syllabus(repo, course_id):
-        raise HTTPException(
-            status_code=409,
-            detail="Add the course syllabus before this action.")
+    Previously every substantive action (build the graph, generate/assign exams,
+    create sessions) required a syllabus first. With the move to
+    Course → Material[Topics] → Assignment, a course is fully usable without a
+    syllabus, so this gate is intentionally disabled. Kept as a no-op (rather
+    than removed) so the call sites and the re-enable path stay intact."""
+    return
 
 
 def _require_unique_session_topic(cur, course_id: str, org_id: str,

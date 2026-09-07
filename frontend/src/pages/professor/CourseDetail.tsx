@@ -1,16 +1,14 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
-import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, CheckCircle2, Save, KeyRound, ChevronLeft, BarChart3, Calendar, Plus, Lock, BookOpen, Sparkles } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, BarChart3, BookOpen } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
-import { listMaterials, uploadMaterial, listVersions } from '../../api/materials';
+import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
-import { listStudents, deleteCourse, getSyllabus, setSyllabus, processSyllabus, type ProcessedSession } from '../../api/courses';
+import { listStudents, deleteCourse, getSyllabus, type Syllabus } from '../../api/courses';
 import { DEFAULT_ORG } from '../../config';
-import FileUpload from '../../components/FileUpload';
 import { getCoursePerformance } from '../../api/performance';
-import { listSessions, createSession, deleteSession, updateSession, type ClassSession } from '../../api/sessions';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 import DocumentGraphModal from '../../components/DocumentGraphModal';
 
@@ -30,16 +28,16 @@ interface Course {
   join_code?: string;
 }
 
-type Tab = 'materials' | 'graph' | 'assignments' | 'students' | 'sessions' | 'performance';
+type Tab = 'materials' | 'graph' | 'assignments' | 'students' | 'performance';
+
+const TABS: Tab[] = ['materials', 'assignments', 'students', 'performance', 'graph'];
 
 export default function CourseDetail() {
   const { courseId } = useParams<{ courseId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const [activeTab, setActiveTab] = useState<Tab>(
-    (['materials', 'graph', 'assignments', 'students', 'sessions', 'performance'].includes(tabParam || '')
-      ? (tabParam as Tab)
-      : 'sessions'),
+    (TABS.includes((tabParam || '') as Tab) ? (tabParam as Tab) : 'materials'),
   );
 
   // Selecting a tab also writes ?tab= to the URL (replace, no history spam) so a
@@ -57,7 +55,7 @@ export default function CourseDetail() {
   // switches to the Students tab even when the course page is already mounted.
   useEffect(() => {
     const t = searchParams.get('tab');
-    if (t && ['materials', 'graph', 'assignments', 'students', 'sessions', 'performance'].includes(t)) {
+    if (t && TABS.includes(t as Tab)) {
       setActiveTab(t as Tab);
     }
   }, [searchParams]);
@@ -83,18 +81,15 @@ export default function CourseDetail() {
     enabled: !!courseId,
   });
 
-  // Syllabus gate: until a syllabus is attached, every course action except
-  // managing students is locked (mirrors the backend 409). Re-check on mount so
-  // the course unlocks as soon as the professor returns from uploading it.
-  const { data: syllabus, isLoading: syllabusLoading } = useQuery({
+  // The syllabus is now OPTIONAL — it no longer gates the course. It's kept as a
+  // viewable document (shown on the Materials tab); a course with no syllabus is
+  // fully usable.
+  const { data: syllabus } = useQuery({
     queryKey: ['syllabus', courseId],
     queryFn: () => getSyllabus(courseId!),
     enabled: !!courseId,
     refetchOnMount: 'always',
   });
-  const hasSyllabus = !!syllabus;
-  const locked = !syllabusLoading && !hasSyllabus;   // don't lock until we know
-
 
   const handleRemoveCourse = async () => {
     if (!confirm(`Remove course "${course?.name || 'this course'}"? This deletes its materials, questions, exams, and results. This cannot be undone.`)) return;
@@ -109,7 +104,6 @@ export default function CourseDetail() {
   };
 
   const tabs = [
-    { id: 'sessions' as Tab, label: 'Sessions', icon: Calendar },
     { id: 'materials' as Tab, label: 'Materials', icon: FileText },
     { id: 'assignments' as Tab, label: 'Assignments', icon: ClipboardList },
     { id: 'students' as Tab, label: 'Students', icon: Users },
@@ -158,58 +152,43 @@ export default function CourseDetail() {
       {/* Tabs */}
       <div className="border-b border-gray-200">
         <nav className="flex gap-6">
-          {tabs.map((tab) => {
-            const tabLocked = locked && tab.id !== 'students';
-            return (
-              <button
-                key={tab.id}
-                onClick={() => { if (!tabLocked) selectTab(tab.id); }}
-                disabled={tabLocked}
-                title={tabLocked ? 'Add the course syllabus to unlock this' : undefined}
-                className={`flex items-center gap-2 pb-3 px-1 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === tab.id && !tabLocked
-                    ? 'border-blue-600 text-blue-600'
-                    : tabLocked
-                      ? 'border-transparent text-gray-300 cursor-not-allowed'
-                      : 'border-transparent text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {tabLocked ? <Lock className="w-3.5 h-3.5" /> : <tab.icon className="w-4 h-4" />}
-                {tab.label}
-              </button>
-            );
-          })}
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => selectTab(tab.id)}
+              className={`flex items-center gap-2 pb-3 px-1 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === tab.id
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <tab.icon className="w-4 h-4" />
+              {tab.label}
+            </button>
+          ))}
         </nav>
       </div>
 
-      {/* Tab content — gated behind the syllabus for everything but Students */}
-      {locked && activeTab !== 'students' ? (
-        <SyllabusGate courseId={courseId!} courseName={course?.name || ''} />
-      ) : (
-        <>
-          {activeTab === 'materials' && (
-            <MaterialsTab materials={materials} courseId={courseId!} courseName={course?.name || ''} queryClient={queryClient} />
-          )}
-          {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
-          {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
-          {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
-          {activeTab === 'sessions' && <SessionsTab courseId={courseId!} courseName={course?.name || ''} hasSyllabus={hasSyllabus} />}
-          {activeTab === 'performance' && <PerformanceTab courseId={courseId!} />}
-        </>
+      {/* Tab content */}
+      {activeTab === 'materials' && (
+        <MaterialsTab materials={materials} courseId={courseId!} courseName={course?.name || ''}
+          syllabus={syllabus} queryClient={queryClient} />
       )}
+      {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
+      {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
+      {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
+      {activeTab === 'performance' && <PerformanceTab courseId={courseId!} />}
     </div>
   );
 }
 
-function MaterialsTab({ materials, courseId, courseName, queryClient }: { materials: Material[]; courseId: string; courseName: string; queryClient: ReturnType<typeof useQueryClient> }) {
+function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }: {
+  materials: Material[]; courseId: string; courseName: string;
+  syllabus?: Syllabus | null;
+  queryClient: ReturnType<typeof useQueryClient>;
+}) {
   const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
   const [graphViewing, setGraphViewing] = useState<{ id: string; name: string } | null>(null);
-  // Sessions carry which materials belong to them; use that to group the list.
-  const { data: sessionsData } = useQuery({
-    queryKey: ['course-sessions', courseId],
-    queryFn: () => listSessions(courseId),
-  });
-  const sessions = sessionsData?.sessions ?? [];
 
   // Which documents have a per-document concept graph (mapping 1) → material_version_id -> concept_count.
   const { data: docGraphData } = useQuery({
@@ -232,26 +211,6 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
   };
 
   const materialId = (m: any) => m.material_id || m.id;
-  const sessionLabel = (s: ClassSession) =>
-    s.session_document?.trim() ||
-    (s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'Untitled session');
-
-  // Build session-ordered groups (by date, nulls last), then an "unassigned" bucket.
-  const byMaterial = new Map<string, ClassSession>();
-  sessions.forEach((s) => s.materials?.forEach((m) => byMaterial.set(m.material_id, s)));
-  const ordered = [...sessions].sort((a, b) =>
-    (a.session_date || '9999').localeCompare(b.session_date || '9999'));
-  const groups = ordered
-    .map((s) => ({
-      key: s.session_id,
-      title: sessionLabel(s),
-      subtitle: s.session_document?.trim() && s.session_date
-        ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : '',
-      items: materials.filter((m) => byMaterial.get(materialId(m))?.session_id === s.session_id),
-    }))
-    .filter((g) => g.items.length > 0);
-  const unassigned = materials.filter((m) => !byMaterial.has(materialId(m)));
-  if (unassigned.length) groups.push({ key: '__none__', title: 'Not assigned to a session', subtitle: '', items: unassigned });
 
   const renderRow = (material: any, i: number) => {
     const mvid = materialId(material);
@@ -298,6 +257,35 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
 
   return (
     <div className="space-y-4">
+      {/* Syllabus — optional, viewable. Upload if absent; view if present. */}
+      <div className="flex items-center justify-between bg-white rounded-xl border border-gray-200 px-5 py-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <BookOpen className="w-4 h-4 text-gray-400 shrink-0" />
+          {syllabus ? (
+            <span className="text-sm text-gray-700 truncate">
+              Syllabus: <span className="font-medium">{syllabus.file_name || 'document'}</span>
+            </span>
+          ) : (
+            <span className="text-sm text-gray-500">No syllabus uploaded (optional)</span>
+          )}
+        </div>
+        {syllabus && syllabus.version_id ? (
+          <button
+            onClick={() => setViewing({ id: syllabus.version_id!, name: syllabus.file_name || 'Syllabus' })}
+            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline shrink-0"
+          >
+            <Eye className="w-4 h-4" /> View
+          </button>
+        ) : (
+          <Link
+            to={`/professor/upload?syllabus=1&course=${encodeURIComponent(courseName)}&courseId=${courseId}`}
+            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline shrink-0"
+          >
+            <Upload className="w-4 h-4" /> Upload syllabus
+          </Link>
+        )}
+      </div>
+
       <div className="flex justify-end">
         <Link
           to={`/professor/upload?course=${encodeURIComponent(courseName)}&courseId=${courseId}`}
@@ -313,16 +301,8 @@ function MaterialsTab({ materials, courseId, courseName, queryClient }: { materi
           <p className="text-sm text-gray-500">No materials uploaded yet</p>
         </div>
       ) : (
-        <div className="space-y-4">
-          {groups.map((g) => (
-            <div key={g.key} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-              <div className="px-5 py-2.5 bg-gray-50 border-b border-gray-100">
-                <p className="text-sm font-semibold text-gray-800">{g.title}</p>
-                {g.subtitle && <p className="text-xs text-gray-500">{g.subtitle}</p>}
-              </div>
-              <div className="divide-y divide-gray-100">{g.items.map(renderRow)}</div>
-            </div>
-          ))}
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="divide-y divide-gray-100">{materials.map(renderRow)}</div>
         </div>
       )}
       {viewing && (
@@ -1042,452 +1022,6 @@ function PerformanceTab({ courseId }: { courseId: string }) {
         <span className="font-medium"> Authenticity</span> = genuine reasoning. Mastery bar = {_pct(data.bar)}. All figures
         are aggregated across students — no individual results are shown.
       </p>
-    </div>
-  );
-}
-
-// Dedicated, simple "Upload Syllabus" shown in place of a locked tab until the
-// course has a syllabus. Drop a document -> it's stored, its text is read, and
-// class sessions with their topics are created from it. No material-upload chrome.
-function SyllabusGate({ courseId, courseName }: { courseId: string; courseName: string }) {
-  const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  type Phase = 'idle' | 'uploading' | 'reading' | 'creating' | 'done' | 'error';
-  const [phase, setPhase] = useState<Phase>('idle');
-  const [progress, setProgress] = useState(0);
-  const [error, setError] = useState('');
-  const [created, setCreated] = useState<ProcessedSession[]>([]);
-  const [showPaste, setShowPaste] = useState(false);
-  const [paste, setPaste] = useState('');
-
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-  const runProcess = async (text?: string) => {
-    setPhase('creating');
-    setError('');
-    try {
-      const res = await processSyllabus(courseId, text);
-      setCreated(res.sessions || []);
-      setPhase('done');
-      queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] });
-    } catch (e) {
-      setError((e as Error).message || 'Could not create sessions from the syllabus.');
-      setShowPaste(true);
-      setPhase('error');
-    }
-  };
-
-  const handleFiles = async (files: File[]) => {
-    const file = files[0];
-    if (!file) return;
-    setError(''); setProgress(0); setPhase('uploading'); setShowPaste(false);
-    try {
-      const res = await uploadMaterial(DEFAULT_ORG, courseName, file, setProgress,
-        undefined, undefined, undefined, true /* isSyllabus */);
-      await setSyllabus(courseId, {
-        material_id: res.material_id, material_version_id: res.material_version_id, file_name: file.name,
-      });
-      // Wait for the text to be extracted, then create sessions.
-      setPhase('reading');
-      let status = '';
-      for (let i = 0; i < 40; i++) {
-        const vers = await listVersions(DEFAULT_ORG, res.material_id);
-        const v = vers.find((x) => x.material_version_id === res.material_version_id);
-        status = v?.status || '';
-        if (status === 'ready' || status === 'failed') break;
-        await sleep(2000);
-      }
-      if (status === 'ready') {
-        await runProcess();
-      } else {
-        setError(status === 'failed'
-          ? "We couldn't read text from that file (it may be a scanned/image-only PDF). Paste the schedule below to create sessions."
-          : "Your syllabus is uploaded, but reading it is taking a while. Paste the schedule below, or come back and use “Auto-create sessions” on the Sessions tab.");
-        setShowPaste(true);
-        setPhase('error');
-      }
-    } catch (e) {
-      setError((e as Error).message || 'Upload failed. Please try again.');
-      setPhase('error');
-    } finally {
-      // Unlock the course only AFTER processing has resolved. Unlocking earlier
-      // reveals the Sessions tab's "Generate sessions" button while this gate's
-      // auto-run is still in flight, which could fire a second, concurrent
-      // create — the source of duplicate sessions. By now sessions already
-      // exist (success) so that button is hidden, or processing failed and the
-      // user retries there with a single call.
-      queryClient.invalidateQueries({ queryKey: ['syllabus', courseId] });
-    }
-  };
-
-  const busy = phase === 'uploading' || phase === 'reading' || phase === 'creating';
-  const statusText = phase === 'uploading' ? 'Uploading syllabus…'
-    : phase === 'reading' ? 'Reading your syllabus…'
-    : phase === 'creating' ? 'Creating class sessions…' : '';
-
-  if (phase === 'done') {
-    return (
-      <div className="bg-white rounded-xl border border-gray-200 p-8 max-w-2xl mx-auto">
-        <div className="text-center">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-green-100 rounded-full mb-4">
-            <CheckCircle2 className="w-7 h-7 text-green-600" />
-          </div>
-          <h2 className="text-xl font-bold text-gray-900">Syllabus processed</h2>
-          <p className="text-sm text-gray-500 mt-1">Created {created.length} class session{created.length !== 1 ? 's' : ''} with their topics. Your course is unlocked.</p>
-        </div>
-        <div className="mt-5 space-y-2 max-h-72 overflow-y-auto">
-          {created.map((s) => (
-            <div key={s.session_id} className="border border-gray-100 rounded-lg p-3">
-              <div className="flex items-baseline gap-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-blue-600">{s.week}</span>
-                {s.session_date && <span className="text-xs text-gray-400 font-mono">{s.session_date}</span>}
-              </div>
-              <p className="text-sm font-medium text-gray-800">{s.title}</p>
-              {s.in_scope_concepts?.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {s.in_scope_concepts.map((t, i) => (
-                    <span key={i} className="text-xs bg-blue-50 text-blue-700 border border-blue-100 rounded px-2 py-0.5">{t}</span>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-        <div className="mt-6 text-center">
-          <button
-            onClick={() => { queryClient.invalidateQueries({ queryKey: ['syllabus', courseId] }); navigate(`/professor/courses/${courseId}?tab=sessions`); }}
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-          >
-            Go to your course →
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 p-8 max-w-2xl mx-auto">
-      <div className="text-center">
-        <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-100 rounded-full mb-4">
-          <BookOpen className="w-7 h-7 text-blue-600" />
-        </div>
-        <h2 className="text-xl font-bold text-gray-900">Upload your course syllabus</h2>
-        <p className="text-sm text-gray-500 mt-2 max-w-md mx-auto">
-          Drop your syllabus and we'll read its weekly schedule and create your class sessions with their topics. Everything else unlocks once it's added.
-        </p>
-      </div>
-
-      <div className="mt-6">
-        {busy ? (
-          <div className="flex flex-col items-center justify-center gap-3 border-2 border-dashed border-blue-200 rounded-xl p-8 bg-blue-50/40">
-            <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
-            <p className="text-sm font-medium text-gray-700">{statusText}</p>
-            {phase === 'uploading' && (
-              <div className="w-56 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                <div className="h-full bg-blue-600 transition-all" style={{ width: `${progress}%` }} />
-              </div>
-            )}
-          </div>
-        ) : (
-          <FileUpload accept=".pdf,.docx,.doc,.rtf,.txt,.pptx,.md" onFilesSelected={handleFiles} />
-        )}
-      </div>
-
-      {error && (
-        <div className="mt-4 flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800">
-          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{error}</span>
-        </div>
-      )}
-
-      {showPaste && (
-        <div className="mt-3">
-          <textarea
-            value={paste}
-            onChange={(e) => setPaste(e.target.value)}
-            rows={6}
-            placeholder={'Paste your class schedule, e.g.\nWeek 1 (Sep 3): Intro; supervised learning\nWeek 2 (Sep 10): Linear models; loss; gradient descent'}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <button
-            onClick={() => runProcess(paste.trim())}
-            disabled={!paste.trim() || phase === 'creating'}
-            className="mt-2 inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-          >
-            {phase === 'creating' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-            Create sessions from pasted schedule
-          </button>
-        </div>
-      )}
-
-      <p className="text-xs text-gray-400 mt-5 text-center">PDF, DOCX, TXT, or PPTX. You can manage students while the syllabus is being set up.</p>
-    </div>
-  );
-}
-
-// Per-session in-scope topic picker (P-S-2.1). Selection persists via updateSession.
-function SessionScopeEditor({
-  session, concepts, saving, onSave,
-}: {
-  session: ClassSession;
-  concepts: Array<{ id: string; label: string }>;
-  saving: boolean;
-  onSave: (ids: string[]) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [sel, setSel] = useState<Set<string>>(new Set(session.in_scope_concepts ?? []));
-  const count = session.in_scope_concepts?.length ?? 0;
-
-  // Re-seed from server state whenever it changes (e.g. after a save refetch).
-  useEffect(() => { setSel(new Set(session.in_scope_concepts ?? [])); }, [session.in_scope_concepts]);
-
-  const toggle = (id: string) =>
-    setSel((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-
-  return (
-    <div className="mt-2">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-gray-900 font-medium"
-      >
-        <Network className="w-3.5 h-3.5" />
-        Topics in scope{count > 0 ? ` (${count})` : ' — not set'}
-      </button>
-      {open && (
-        <div className="mt-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
-          {concepts.length === 0 ? (
-            <p className="text-xs text-gray-400">No concept graph yet — upload materials and let the graph build first.</p>
-          ) : (
-            <>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-gray-500">{sel.size} of {concepts.length} topics selected</span>
-                <div className="flex gap-2">
-                  <button onClick={() => setSel(new Set(concepts.map((c) => c.id)))} className="text-xs text-blue-600 hover:underline">All</button>
-                  <button onClick={() => setSel(new Set())} className="text-xs text-blue-600 hover:underline">None</button>
-                </div>
-              </div>
-              <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1 pr-1">
-                {concepts.map((c) => (
-                  <label key={c.id} className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer py-0.5">
-                    <input
-                      type="checkbox"
-                      checked={sel.has(c.id)}
-                      onChange={() => toggle(c.id)}
-                      className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="truncate">{c.label}</span>
-                  </label>
-                ))}
-              </div>
-              <div className="flex items-center gap-2 mt-3">
-                <button
-                  onClick={() => onSave([...sel])}
-                  disabled={saving}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {saving && <Loader2 className="w-3 h-3 animate-spin" />}
-                  Save scope
-                </button>
-                <span className="text-[11px] text-gray-400">Exams generated for this week draw only from the selected topics.</span>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Sessions tab: a course maps to N class sessions ──────────────────────────
-function SessionsTab({ courseId, courseName, hasSyllabus }: { courseId: string; courseName: string; hasSyllabus?: boolean }) {
-  const queryClient = useQueryClient();
-  const [date, setDate] = useState('');
-  const [doc, setDoc] = useState('');
-  const [error, setError] = useState('');
-  const [paste, setPaste] = useState('');
-  const [showPaste, setShowPaste] = useState(false);
-  const [genError, setGenError] = useState('');
-
-  const { data, isLoading } = useQuery({
-    queryKey: ['course-sessions', courseId],
-    queryFn: () => listSessions(courseId),
-    enabled: !!courseId,
-  });
-  const sessions: ClassSession[] = data?.sessions ?? [];
-
-  // Concept-graph nodes for the in-scope topic picker (P-S-2.1).
-  const { data: graph } = useQuery<{ concepts?: Array<{ id?: string; label?: string }> }>({
-    queryKey: ['course-graph-concepts', courseId],
-    queryFn: () => get(`/api/courses/${courseId}/graph`),
-    enabled: !!courseId,
-  });
-  const concepts = (graph?.concepts ?? [])
-    .map((c) => ({ id: c.id || c.label || '', label: c.label || c.id || '' }))
-    .filter((c) => c.id);
-
-  const addMutation = useMutation({
-    mutationFn: () => createSession(courseId, { session_date: date || null, session_document: doc.trim() || null }),
-    onSuccess: () => {
-      setDate(''); setDoc(''); setError('');
-      queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] });
-    },
-    onError: (e: Error) => setError(e.message || 'Could not add the session. Please try again.'),
-  });
-
-  const removeMutation = useMutation({
-    mutationFn: (sessionId: string) => deleteSession(courseId, sessionId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] }),
-  });
-
-  const scopeMutation = useMutation({
-    mutationFn: ({ s, ids }: { s: ClassSession; ids: string[] }) =>
-      updateSession(courseId, s.session_id, {
-        session_date: s.session_date, session_document: s.session_document, in_scope_concepts: ids,
-      }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] }),
-  });
-
-  // Auto-create sessions from the syllabus. Tries the stored syllabus text; if
-  // that isn't ready (or has no schedule) it reveals a paste box as a fallback.
-  const genMutation = useMutation({
-    mutationFn: (text?: string) => processSyllabus(courseId, text),
-    onSuccess: (res) => {
-      setGenError(''); setShowPaste(false); setPaste('');
-      if (res.status === 'exists') setGenError(res.message || 'This course already has sessions.');
-      queryClient.invalidateQueries({ queryKey: ['course-sessions', courseId] });
-    },
-    onError: (e: Error) => { setGenError(e.message || 'Could not generate sessions.'); setShowPaste(true); },
-  });
-
-  return (
-    <div className="space-y-4">
-      {/* Auto-create from syllabus — the ingestion engine, wired into the flow */}
-      {hasSyllabus && sessions.length === 0 && (
-        <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl border border-blue-100 p-5">
-          <div className="flex items-start gap-3">
-            <div className="w-9 h-9 rounded-lg bg-blue-600 text-white grid place-items-center flex-shrink-0">
-              <Sparkles className="w-4 h-4" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="text-sm font-semibold text-gray-900">Auto-create sessions from your syllabus</h3>
-              <p className="text-xs text-gray-600 mt-0.5">The engine reads your syllabus's weekly schedule and creates one class session per week with its topics mapped as the in-scope set.</p>
-              {genError && <p className="text-xs text-amber-700 mt-2">{genError}</p>}
-              {showPaste && (
-                <textarea
-                  value={paste}
-                  onChange={(e) => setPaste(e.target.value)}
-                  rows={5}
-                  placeholder={'Paste your class schedule, e.g.\nWeek 1 (Sep 3): Intro; supervised learning\nWeek 2 (Sep 10): Linear models; loss; gradient descent'}
-                  className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              )}
-              <div className="mt-3">
-                <button
-                  onClick={() => genMutation.mutate(showPaste ? paste.trim() : undefined)}
-                  disabled={genMutation.isPending || (showPaste && !paste.trim())}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                >
-                  {genMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                  {showPaste ? 'Generate from pasted schedule' : 'Generate sessions'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add a session */}
-      <div className="bg-white rounded-xl border border-gray-200 p-5">
-        <h3 className="text-sm font-medium text-gray-700 mb-1">Add a class session</h3>
-        <p className="text-xs text-gray-500 mb-4">A session has an optional date and a document (paste notes, an outline, or a link).</p>
-        <div className="grid grid-cols-1 sm:grid-cols-[160px_1fr] gap-3">
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Date (optional)</label>
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Session document</label>
-            <textarea
-              value={doc}
-              onChange={(e) => setDoc(e.target.value)}
-              rows={3}
-              placeholder="Session notes, outline, or a link…"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-        </div>
-        {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
-        <div className="mt-3">
-          <button
-            onClick={() => addMutation.mutate()}
-            disabled={addMutation.isPending || (!date && !doc.trim())}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-          >
-            {addMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-            Add session
-          </button>
-        </div>
-      </div>
-
-      {/* Existing sessions */}
-      <div className="bg-white rounded-xl border border-gray-200 p-5">
-        <h3 className="text-sm font-medium text-gray-700 mb-3">Sessions ({sessions.length})</h3>
-        {isLoading ? (
-          <p className="text-sm text-gray-400">Loading…</p>
-        ) : sessions.length === 0 ? (
-          <p className="text-sm text-gray-400">No sessions yet.</p>
-        ) : (
-          <div className="divide-y divide-gray-100">
-            {sessions.map((s) => (
-              <div key={s.session_id} className="flex items-start gap-3 py-3">
-                <Calendar className="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900">
-                    {s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'No date'}
-                  </p>
-                  {s.session_document && (
-                    <p className="text-sm text-gray-600 mt-0.5 whitespace-pre-wrap break-words line-clamp-3">{s.session_document}</p>
-                  )}
-                  {(s.materials?.length ?? 0) > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {s.materials!.map((m) => (
-                        <span key={m.material_id} className="inline-flex items-center gap-1 text-xs bg-gray-100 text-gray-700 rounded px-2 py-0.5">
-                          <FileText className="w-3 h-3 flex-shrink-0" /> <span className="truncate max-w-[180px]">{m.display_name}</span>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <Link
-                    to={`/professor/upload?course=${encodeURIComponent(courseName)}&courseId=${courseId}&sessionId=${s.session_id}`}
-                    className="mt-2 inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-medium"
-                  >
-                    <Upload className="w-3.5 h-3.5" /> Upload file to this session
-                  </Link>
-                  <SessionScopeEditor
-                    session={s}
-                    concepts={concepts}
-                    saving={scopeMutation.isPending}
-                    onSave={(ids) => scopeMutation.mutate({ s, ids })}
-                  />
-                </div>
-                <button
-                  onClick={() => { if (confirm('Delete this session? Its attached files are detached, not deleted.')) removeMutation.mutate(s.session_id); }}
-                  disabled={removeMutation.isPending}
-                  className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
-                  title="Delete session"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
