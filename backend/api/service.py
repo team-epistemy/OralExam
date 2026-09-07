@@ -81,13 +81,11 @@ class MaterialsApi:
         self.repo.set_tenant(org_id)  # RLS is FORCEd: bind tenant before course create
         # user_id owns the course on first creation (existing courses keep their owner).
         course = self.repo.get_or_create_course(org_id, req.course_name, user_id)
-        # A material is normally mapped to a class session — reuse the chosen one,
-        # or instantiate one now, titled with the topic. The syllabus is
-        # course-level, so it skips this (avoids a stray empty session).
-        title = (req.session_title or "").strip() or None
-        session_id = None if req.is_syllabus else self.repo.get_or_create_session(
-            org_id, course.course_id, req.session_id, req.session_date, user_id,
-            session_document=title)
+        # Materials no longer map to a class session — they stand alone under the
+        # course, identified by their topics (concept-graph labels). The
+        # material.session_id column is kept (stashed) but left NULL. If a legacy
+        # client still sends session_id, honor it so nothing breaks mid-migration.
+        session_id = req.session_id or None
         caller = Caller(user_id=user_id, org_id=org_id, role=Role(role))
         inner = PresignRequest(file_name=req.file_name, mime_type=req.mime_type,
                                bytes=req.bytes, material_id=req.material_id,

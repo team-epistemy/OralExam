@@ -1,38 +1,21 @@
 import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { CheckCircle, AlertCircle, Loader2, Calendar, Home } from 'lucide-react';
+import { CheckCircle, AlertCircle, Loader2, Home } from 'lucide-react';
 import { uploadMaterial, listVersions } from '../../api/materials';
 import type { MaterialVersion } from '../../api/materials';
 import { setSyllabus } from '../../api/courses';
-import { listSessions } from '../../api/sessions';
 import FileUpload from '../../components/FileUpload';
 import { DEFAULT_ORG } from '../../config';
 
 export default function UploadMaterial() {
   const [params] = useSearchParams();
   const isSyllabus = params.get('syllabus') === '1';
-  const syllabusCourseId = params.get('courseId') || '';
+  // `courseId` in the URL is the course context (from the Materials tab link).
+  const courseIdParam = params.get('courseId') || '';
   const coursePrefilled = !!params.get('course');
   const [courseName, setCourseName] = useState(params.get('course') || '');
-  const [topic, setTopic] = useState('');
-  // A material is always mapped to a class session. When the course is known we
-  // let the professor pick an existing session or create one; otherwise the
-  // backend instantiates a session automatically.
-  const preselectedSession = params.get('sessionId') || '';
-  // Reached via "Upload file to this session": the target session is already
-  // fixed, so we hide the topic/session-picker chrome (only relevant when
-  // creating/choosing a session) and just upload into that session.
-  const fromSession = !!preselectedSession;
-  const [sessionChoice, setSessionChoice] = useState(preselectedSession || 'new');
-  const [newSessionDate, setNewSessionDate] = useState('');
-  const { data: sessionsData } = useQuery({
-    queryKey: ['course-sessions', syllabusCourseId],
-    queryFn: () => listSessions(syllabusCourseId),
-    enabled: !!syllabusCourseId,
-  });
-  const sessions = sessionsData?.sessions ?? [];
-  const targetSession = sessions.find((s) => s.session_id === preselectedSession);
+  // Materials stand alone under the course, identified by their topics (extracted
+  // into the concept graph) — no class session is chosen or created at upload.
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -110,16 +93,12 @@ export default function UploadMaterial() {
       uploadedIdsRef.current = [];
     }
 
-    let batchSessionId = sessionChoice !== 'new' ? sessionChoice : undefined;
-    const sessionDate = sessionChoice === 'new' ? (newSessionDate || undefined) : undefined;
     const materialIds: string[] = [];
     const failures: string[] = [];
     let firstResult: typeof uploadResult = null;
 
     // Upload sequentially so progress is monotonic and one bad file doesn't abort
-    // the rest; each file shares the batch's topic + session. For a "+ New session"
-    // batch the first upload creates the session; the rest reuse its id so all
-    // files land under ONE session (not one per file).
+    // the rest. Materials are not attached to any class session.
     for (let i = 0; i < batch.length; i++) {
       const file = batch[i];
       const base = Math.round((i / batch.length) * 100);
@@ -127,13 +106,12 @@ export default function UploadMaterial() {
         const result = await uploadMaterial(
           DEFAULT_ORG, courseName, file,
           (pct) => setProgress(base + Math.round(pct / batch.length)),
-          topic, batchSessionId, sessionDate, isSyllabus);
-        if (!batchSessionId && result.session_id) batchSessionId = result.session_id;
+          undefined, undefined, undefined, isSyllabus);
         materialIds.push(result.material_id);
         if (!firstResult) firstResult = result;
-        if (isSyllabus && syllabusCourseId) {
+        if (isSyllabus && courseIdParam) {
           try {
-            await setSyllabus(syllabusCourseId, {
+            await setSyllabus(courseIdParam, {
               material_id: result.material_id,
               material_version_id: result.material_version_id,
               file_name: file.name,
@@ -178,8 +156,8 @@ export default function UploadMaterial() {
         <h1 className="text-2xl font-bold text-gray-900">{isSyllabus ? 'Upload Syllabus' : 'Upload Course Materials'}</h1>
         <p className="text-sm text-gray-500 mt-1">
           {isSyllabus
-            ? 'Upload the course syllabus. It is stored as a viewable document (and can inform the concept graph).'
-            : 'Upload course materials for your class session. The pipeline extracts, chunks, and embeds them automatically.'}
+            ? 'Upload the course syllabus. It is stored as a viewable document.'
+            : 'Upload course materials. The pipeline extracts, chunks, and embeds them, and maps their topics automatically.'}
         </p>
       </div>
 
@@ -203,74 +181,6 @@ export default function UploadMaterial() {
           </p>
         </div>
 
-        {/* Uploading into a specific session (from "Upload file to this session"):
-            the session is already chosen, so the topic + picker are unnecessary. */}
-        {fromSession && (
-          <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
-            <p className="text-xs font-medium text-blue-800">Uploading to this class session</p>
-            {targetSession && (
-              <p className="text-sm text-blue-900 mt-0.5">
-                {targetSession.session_date
-                  ? new Date(targetSession.session_date + 'T00:00:00').toLocaleDateString()
-                  : 'Undated session'}
-                {targetSession.session_document ? ` — ${targetSession.session_document}` : ''}
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* Topic / Class Session — only for the standalone upload with no course
-            context. When a course is known the class-session dropdown below is the
-            single place to choose/create the session, so this box is redundant; and
-            when a specific session was already selected it's hidden entirely. */}
-        {!fromSession && !syllabusCourseId && (
-        <div>
-          <label htmlFor="topic" className="block text-sm font-medium text-gray-700 mb-1">
-            Topic / Class Session
-          </label>
-          <input
-            id="topic"
-            type="text"
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            placeholder="e.g. Week 3 — Supervised Learning"
-          />
-          <p className="text-xs text-gray-400 mt-1">Titles the class session this material is grouped under. Files keep their own names.</p>
-        </div>
-        )}
-
-        {/* Class session — a material is always attached to a session */}
-        {syllabusCourseId && !fromSession && (
-          <div>
-            <label htmlFor="session" className="block text-sm font-medium text-gray-700 mb-1">Class Session</label>
-            <select
-              id="session"
-              value={sessionChoice}
-              onChange={(e) => setSessionChoice(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="new">+ New session</option>
-              {sessions.map((s) => (
-                <option key={s.session_id} value={s.session_id}>
-                  {s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'Undated session'}
-                  {s.session_document ? ` — ${s.session_document.slice(0, 40)}` : ''}
-                </option>
-              ))}
-            </select>
-            {sessionChoice === 'new' && (
-              <input
-                type="date"
-                value={newSessionDate}
-                onChange={(e) => setNewSessionDate(e.target.value)}
-                className="mt-2 w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                aria-label="New session date (optional)"
-              />
-            )}
-            <p className="text-xs text-gray-400 mt-1">This material is attached to a class session — pick an existing one or create a new session (optional date).</p>
-          </div>
-        )}
-
         {/* File upload */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -284,7 +194,7 @@ export default function UploadMaterial() {
             <FileUpload
               key={uploaderKey}
               // Materials accept spreadsheets/CSV too (stored + searchable, but not
-              // graphed); a syllabus stays prose-only since it seeds sessions.
+              // graphed); a syllabus stays prose-only (viewable document).
               accept={isSyllabus
                 ? '.pdf,.docx,.doc,.rtf,.txt,.pptx,.md'
                 : '.pdf,.docx,.doc,.rtf,.txt,.pptx,.md,.csv,.xlsx'}
@@ -365,20 +275,10 @@ export default function UploadMaterial() {
           // Prefer the course id resolved by the upload itself (covers standalone
           // uploads where the URL only carried the course name); fall back to the
           // URL's courseId, then the dashboard.
-          const gid = uploadResult?.course_id || syllabusCourseId;
+          const gid = uploadResult?.course_id || courseIdParam;
           const courseHome = gid ? `/professor/courses/${gid}` : '/professor/dashboard';
           return (
             <div className="flex flex-wrap gap-3">
-              {/* After a syllabus upload the course is now unlocked — send the
-                  professor to the Sessions tab to auto-create sessions from it. */}
-              {isSyllabus && (
-                <Link
-                  to={gid ? `/professor/courses/${gid}?tab=sessions` : '/professor/dashboard'}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-                >
-                  <Calendar className="w-4 h-4" /> Continue — create sessions →
-                </Link>
-              )}
               <button
                 onClick={() => {
                   setSuccess(false);
@@ -400,14 +300,12 @@ export default function UploadMaterial() {
                 Upload Another
               </button>
               {/* Back to the course dashboard. */}
-              {!isSyllabus && (
-                <Link
-                  to={courseHome}
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-                >
-                  <Home className="w-4 h-4" /> Course Home
-                </Link>
-              )}
+              <Link
+                to={courseHome}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+              >
+                <Home className="w-4 h-4" /> Course Home
+              </Link>
             </div>
           );
         })()}

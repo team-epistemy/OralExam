@@ -1,4 +1,7 @@
-"""Tests: a material is always mapped to a class session (created if absent)."""
+"""Tests: material uploads no longer create/attach a class session (the material
+stands alone under the course, identified by its topics). The repo-level
+get_or_create_session method is retained (stashed) but the upload path no longer
+calls it; an explicitly-supplied session_id is still honored for legacy clients."""
 from backend.db.memory import InMemoryRepository
 from backend.api.service import MaterialsApi
 from backend.async_jobs.queue import InMemoryQueue
@@ -43,15 +46,15 @@ def test_get_or_create_session_ignores_a_foreign_courses_session():
 
 # ── end-to-end through the upload service ─────────────────────────────────────
 
-def test_upload_creates_a_session_and_maps_the_material_to_it():
+def test_upload_does_not_create_a_session():
     repo = _repo()
     req = IngestRequest(org_name="org_a", course_name="Ops", file_name="l1.md",
                         mime_type="text/markdown", bytes=1024)
     resp = _api(repo).presign_by_name("prof_1", "professor", "org_a", req)
-    assert resp.session_id                    # a session was instantiated
-    assert resp.session_id in repo._sessions
+    assert not resp.session_id                # no session instantiated
+    assert len(repo._sessions) == 0           # no stray class session
     mat = repo.get_material(resp.material_id)
-    assert mat.session_id == resp.session_id  # the material is mapped to it
+    assert not mat.session_id                 # material stands alone
 
 
 def test_syllabus_upload_does_not_create_a_session():
@@ -65,23 +68,16 @@ def test_syllabus_upload_does_not_create_a_session():
     assert not mat.session_id
 
 
-def test_upload_titles_a_new_session_and_keeps_the_file_name():
+def test_session_title_ignored_creates_no_session():
     repo = _repo()
+    # A legacy client may still send session_title; it no longer creates a session.
     req = IngestRequest(org_name="org_a", course_name="Ops", file_name="reading.pdf",
                         mime_type="application/pdf", bytes=1024,
                         session_title="Week 1 — Intro")
     resp = _api(repo).presign_by_name("prof_1", "professor", "org_a", req)
-    # The topic titles the session; the material keeps its file name.
-    assert repo._sessions[resp.session_id]["session_document"] == "Week 1 — Intro"
+    assert not resp.session_id
+    assert len(repo._sessions) == 0
     assert repo.get_material(resp.material_id).display_name == "reading.pdf"
-
-
-def test_blank_session_title_leaves_session_untitled():
-    repo = _repo()
-    req = IngestRequest(org_name="org_a", course_name="Ops", file_name="l1.md",
-                        mime_type="text/markdown", bytes=512, session_title="   ")
-    resp = _api(repo).presign_by_name("prof_1", "professor", "org_a", req)
-    assert repo._sessions[resp.session_id]["session_document"] is None
 
 
 def test_session_title_ignored_for_existing_session():
