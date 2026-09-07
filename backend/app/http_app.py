@@ -1023,10 +1023,12 @@ def _register_course_ops(app: FastAPI, deps) -> None:
                                  req.material_id or None, req.material_version_id or None,
                                  req.file_name))
                 repo.conn.commit()
-                # The syllabus is excluded from the concept graph. Recompute now so
-                # a graph built while this file was still an unmarked material drops
-                # it — and a syllabus-only course shows no (premature) graph. Cheap:
-                # pure DB, no LLM. Non-fatal — the pointer is already saved.
+                # The syllabus is excluded from the concept graph. Its per-document
+                # concepts are KEPT (so unmarking restores them) but excluded from
+                # every view and from the course-level computation by version id.
+                # Recompute the course snapshot now (materials only) so a graph built
+                # while this file was an unmarked material drops it. Cheap: pure DB,
+                # no LLM. Non-fatal — the pointer is already saved.
                 try:
                     with repo.conn.cursor() as cur:
                         snapshot_course_graph(cur, caller.org_id, course_id)
@@ -1952,14 +1954,18 @@ def _register_graph(app: FastAPI, deps) -> None:
                     cur.execute("SELECT to_regclass('public.document_concept')")
                     if cur.fetchone()[0] is None:
                         return {"documents": []}
+                    # Exclude the syllabus: its per-document concepts are kept in the
+                    # table but never surfaced as a document graph (materials only).
+                    excluded = syllabus_version_ids(cur, caller.org_id, course_id)
                     cur.execute(
                         """SELECT mv.material_version_id, mv.file_name, count(*)
                            FROM document_concept dc
                            JOIN material_version mv ON mv.material_version_id = dc.material_version_id
                            WHERE dc.course_id = %s::uuid AND dc.org_id = %s::uuid
+                             AND dc.material_version_id <> ALL(%s::uuid[])
                            GROUP BY mv.material_version_id, mv.file_name
                            ORDER BY mv.file_name""",
-                        (course_id, caller.org_id))
+                        (course_id, caller.org_id, excluded))
                     docs = [{"material_version_id": str(r[0]), "file_name": r[1], "concept_count": r[2]}
                             for r in cur.fetchall()]
                 return {"documents": docs}

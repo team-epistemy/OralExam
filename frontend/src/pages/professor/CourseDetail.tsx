@@ -212,6 +212,18 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
 
   const materialId = (m: any) => m.material_id || m.id;
 
+  // The syllabus is a material too, but it's shown only in the strip above — keep
+  // it out of the documents list (and it never contributes concepts).
+  const isSyllabusMaterial = (m: any) => {
+    const mid = materialId(m);
+    const vid = m.current_version_id || mid;
+    return !!syllabus && (
+      (!!syllabus.material_id && mid === syllabus.material_id) ||
+      (!!syllabus.version_id && (vid === syllabus.version_id || mid === syllabus.version_id))
+    );
+  };
+  const listedMaterials = materials.filter((m) => !isSyllabusMaterial(m));
+
   const renderRow = (material: any, i: number) => {
     const mvid = materialId(material);
     // The graph is keyed by material_version_id; the name-based list returns it as
@@ -295,14 +307,14 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
           Upload Material
         </Link>
       </div>
-      {materials.length === 0 ? (
+      {listedMaterials.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
           <FileText className="w-8 h-8 text-gray-300 mx-auto mb-3" />
           <p className="text-sm text-gray-500">No materials uploaded yet</p>
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="divide-y divide-gray-100">{materials.map(renderRow)}</div>
+          <div className="divide-y divide-gray-100">{listedMaterials.map(renderRow)}</div>
         </div>
       )}
       {viewing && (
