@@ -4,7 +4,6 @@ import { useQuery } from '@tanstack/react-query';
 import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network } from 'lucide-react';
 import { get, post } from '../../api/client';
 import { buildExam, regenerateExam, assignExam, discardDraft, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
-import { listSessions } from '../../api/sessions';
 import TakeExam from '../student/TakeExam';
 
 interface Course {
@@ -31,10 +30,10 @@ export default function CreateAssignment() {
   const [duration, setDuration] = useState(30);
   const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
   const [assignmentType, setAssignmentType] = useState<AssignmentType>('assignment');
-  const [weekSessionId, setWeekSessionId] = useState('');   // scope to a class session (week)
-  // Per-assignment topic override: null = follow the week's saved scope; an
-  // array = this assignment's own picks (does NOT write back to the session).
-  const [topicOverride, setTopicOverride] = useState<string[] | null>(null);
+  // Topics (concept-graph labels) this assignment draws from. Empty = whole
+  // course (all topics). This is the ONLY scoping control — class sessions/weeks
+  // are no longer part of assignment creation.
+  const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
   const [scopeOpen, setScopeOpen] = useState(false);
   const [includeCase, setIncludeCase] = useState(false);
   const [building, setBuilding] = useState(false);
@@ -78,29 +77,17 @@ export default function CreateAssignment() {
     .map((c) => ({ id: c.id || c.label || '', label: c.label || c.id || '' }))
     .filter((c) => c.id);
 
-  // Class sessions (weeks) for optional scoping. A session with an in-scope
-  // concept set constrains generation to just those topics (P-S-2.2).
-  const { data: sessionsData } = useQuery({
-    queryKey: ['course-sessions', courseId],
-    queryFn: () => listSessions(courseId),
-    enabled: !!courseId && !created,
-  });
-  const sessions = sessionsData?.sessions ?? [];
-  const selectedWeek = sessions.find((s) => s.session_id === weekSessionId);
-  const weekConcepts = selectedWeek?.in_scope_concepts ?? [];
-  // Effective scope for THIS assignment: the professor's override if they made
-  // one, else the selected week's saved scope. Empty ⇒ whole graph.
-  const effectiveConcepts = topicOverride ?? weekConcepts;
+  // Effective scope for THIS assignment: the selected topics. Empty ⇒ whole graph.
+  const effectiveConcepts = selectedTopics;
   const hasScope = effectiveConcepts.length > 0;
-  const isOverridden = topicOverride !== null;
 
-  // A new week starts from that week's saved scope — drop any prior override.
-  useEffect(() => { setTopicOverride(null); }, [weekSessionId]);
+  // Reset the topic selection when the course changes (its topics differ).
+  useEffect(() => { setSelectedTopics([]); }, [courseId]);
 
   const toggleConcept = (id: string) => {
     const next = new Set(effectiveConcepts);
     next.has(id) ? next.delete(id) : next.add(id);
-    setTopicOverride([...next]);
+    setSelectedTopics([...next]);
   };
 
   const courseName = courses.find((c) => c.course_id === courseId)?.course_name || '';
@@ -155,9 +142,8 @@ export default function CreateAssignment() {
         duration_minutes: duration,
         assignment_type: assignmentType,
         include_case: includeCase,
-        // Snapshot the week + this assignment's effective scope so the exam stays
-        // attributed to the scope in effect now, even if the week changes later (P-S-2.3).
-        session_id: weekSessionId || undefined,
+        // Snapshot the selected topics so the exam stays attributed to the scope
+        // chosen now. Empty ⇒ whole course.
         scope_concepts: hasScope ? effectiveConcepts : undefined,
       });
       if (res.status !== 'completed' || !res.assignment_id) {
@@ -187,7 +173,6 @@ export default function CreateAssignment() {
         duration_minutes: duration,
         assignment_type: assignmentType,
         include_case: includeCase,
-        session_id: weekSessionId || undefined,
         scope_concepts: hasScope ? effectiveConcepts : undefined,
         draft: true,
       });
@@ -548,91 +533,57 @@ export default function CreateAssignment() {
           </select>
         </div>
 
-        {/* Class session (week) scope — optional */}
-        {courseId && (
+        {/* Topics — the only scoping control. Pick which topics (concept-graph
+            labels from the uploaded documents) this assignment draws from;
+            selecting none uses the whole course. */}
+        {courseId && graphReady && (
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Class session (week) <span className="text-gray-400 font-normal">— optional scope</span></label>
-            <select
-              value={weekSessionId}
-              onChange={(e) => setWeekSessionId(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Topics <span className="text-gray-400 font-normal">— optional; leave empty for the whole course</span>
+            </label>
+            <button
+              type="button"
+              onClick={() => setScopeOpen((v) => !v)}
+              className="inline-flex items-center gap-1.5 text-sm text-gray-700 hover:text-gray-900 font-medium"
             >
-              <option value="">Whole course — all topics</option>
-              {sessions.map((s) => (
-                <option key={s.session_id} value={s.session_id}>
-                  {s.session_date ? new Date(s.session_date + 'T00:00:00').toLocaleDateString() : 'Undated session'}
-                  {s.session_document ? ` — ${s.session_document.slice(0, 40)}` : ''}
-                  {/* Empty scope means "no restriction" — draw from the whole
-                      course — not "no content". Only show a count when one is set. */}
-                  {s.in_scope_concepts?.length
-                    ? ` (${s.in_scope_concepts.length} topic${s.in_scope_concepts.length !== 1 ? 's' : ''} in scope)`
-                    : ' (whole course)'}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-gray-400 mt-1">
-              {isOverridden
-                ? `Custom scope for this assignment — ${effectiveConcepts.length} topic${effectiveConcepts.length !== 1 ? 's' : ''} selected below.`
-                : weekSessionId
-                ? weekConcepts.length > 0
-                  ? `Pre-filled from this week's ${weekConcepts.length} in-scope topic${weekConcepts.length !== 1 ? 's' : ''} — adjust below for this assignment only.`
-                  : 'This week has no in-scope topics set — pick a subset below, or leave scope to the whole course.'
-                : 'Leave as-is to draw from the whole concept graph, or pick a week / a subset of topics below.'}
-            </p>
-
-            {/* Per-assignment topic picker — edits this assignment only; the
-                week's saved scope is untouched. */}
-            {graphReady && (
-              <div className="mt-2">
-                <button
-                  type="button"
-                  onClick={() => setScopeOpen((v) => !v)}
-                  className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-gray-900 font-medium"
-                >
-                  <Network className="w-3.5 h-3.5" />
-                  Topics for this assignment{hasScope ? ` (${effectiveConcepts.length})` : ' — all topics'}
-                </button>
-                {scopeOpen && (
-                  <div className="mt-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
-                    {allConcepts.length === 0 ? (
-                      <p className="text-xs text-gray-400">No concept graph yet — upload materials and let the graph build first.</p>
-                    ) : (
-                      <>
-                        <div className="flex items-center justify-between mb-2">
-                          {/* None selected = whole course (see note below), so
-                              show that instead of a misleading "0 of N selected". */}
-                          <span className="text-xs text-gray-500">
-                            {effectiveConcepts.length === 0
-                              ? `Whole course — all ${allConcepts.length} topics`
-                              : `${effectiveConcepts.length} of ${allConcepts.length} topics selected`}
-                          </span>
-                          <div className="flex gap-2">
-                            <button type="button" onClick={() => setTopicOverride(allConcepts.map((c) => c.id))} className="text-xs text-blue-600 hover:underline">All</button>
-                            <button type="button" onClick={() => setTopicOverride([])} className="text-xs text-blue-600 hover:underline">None</button>
-                            {isOverridden && (
-                              <button type="button" onClick={() => setTopicOverride(null)} className="text-xs text-blue-600 hover:underline">Reset to week</button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1 pr-1">
-                          {allConcepts.map((c) => (
-                            <label key={c.id} className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer py-0.5">
-                              <input
-                                type="checkbox"
-                                checked={effectiveConcepts.includes(c.id)}
-                                onChange={() => toggleConcept(c.id)}
-                                className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                              />
-                              <span className="truncate">{c.label}</span>
-                            </label>
-                          ))}
-                        </div>
-                        <p className="text-[11px] text-gray-400 mt-2">
-                          Applies to this assignment only. Selecting none draws from the whole course. The week's saved scope stays unchanged.
-                        </p>
-                      </>
-                    )}
-                  </div>
+              <Network className="w-4 h-4" />
+              {hasScope ? `${effectiveConcepts.length} topic${effectiveConcepts.length !== 1 ? 's' : ''} selected` : 'Whole course — all topics'}
+              <span className="text-xs text-blue-600">{scopeOpen ? 'Hide' : 'Choose topics'}</span>
+            </button>
+            {scopeOpen && (
+              <div className="mt-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
+                {allConcepts.length === 0 ? (
+                  <p className="text-xs text-gray-400">No topics yet — upload materials and let the concept graph build first.</p>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-gray-500">
+                        {effectiveConcepts.length === 0
+                          ? `Whole course — all ${allConcepts.length} topics`
+                          : `${effectiveConcepts.length} of ${allConcepts.length} topics selected`}
+                      </span>
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => setSelectedTopics(allConcepts.map((c) => c.id))} className="text-xs text-blue-600 hover:underline">All</button>
+                        <button type="button" onClick={() => setSelectedTopics([])} className="text-xs text-blue-600 hover:underline">None</button>
+                      </div>
+                    </div>
+                    <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1 pr-1">
+                      {allConcepts.map((c) => (
+                        <label key={c.id} className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer py-0.5">
+                          <input
+                            type="checkbox"
+                            checked={effectiveConcepts.includes(c.id)}
+                            onChange={() => toggleConcept(c.id)}
+                            className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <span className="truncate">{c.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-gray-400 mt-2">
+                      Selecting none draws questions from the whole course's topics.
+                    </p>
+                  </>
                 )}
               </div>
             )}
