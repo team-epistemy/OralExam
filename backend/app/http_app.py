@@ -3144,6 +3144,72 @@ class CreateAssignmentRequest(BaseModel):
     config: Optional[dict] = None
 
 
+def _purge_draft_assignment(conn, assignment_id: str, question_set_id: str) -> None:
+    """Tear down a draft assignment and all its (preview) children in FK-safe
+    order. Shared by the discard endpoint and the abandoned-draft cleanup. The
+    caller has already verified ownership + draft status."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """DELETE FROM evaluation WHERE turn_id IN (
+                   SELECT turn_id FROM session_turn WHERE session_id IN (
+                       SELECT session_id FROM exam_session WHERE assignment_id = %s::uuid))""",
+            (assignment_id,))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """DELETE FROM question_eds_aggregate WHERE session_id IN (
+                       SELECT session_id FROM exam_session WHERE assignment_id = %s::uuid)""",
+                (assignment_id,))
+    except Exception:  # noqa: BLE001 - table may not exist
+        conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM grade WHERE assignment_id = %s::uuid", (assignment_id,))
+        cur.execute(
+            """DELETE FROM session_turn WHERE session_id IN (
+                   SELECT session_id FROM exam_session WHERE assignment_id = %s::uuid)""",
+            (assignment_id,))
+        cur.execute("DELETE FROM exam_session WHERE assignment_id = %s::uuid", (assignment_id,))
+        cur.execute("DELETE FROM question_set_membership WHERE question_set_id = %s::uuid",
+                    (question_set_id,))
+        # Assignment before its question_set (FK), then the set once unreferenced.
+        cur.execute("DELETE FROM assignment WHERE assignment_id = %s::uuid AND status = 'draft'",
+                    (assignment_id,))
+        cur.execute(
+            """DELETE FROM question_set WHERE question_set_id = %s::uuid
+               AND NOT EXISTS (SELECT 1 FROM assignment WHERE question_set_id = %s::uuid)""",
+            (question_set_id, question_set_id))
+    conn.commit()
+
+
+# A draft older than this with no publish is treated as abandoned (dry-run/
+# preview the professor navigated away from) and cleaned up opportunistically.
+_ABANDONED_DRAFT_AGE = "2 hours"
+
+
+def _cleanup_abandoned_drafts(repo, course_id: str, org_id: str, user_id: str) -> None:
+    """Purge the caller's own stale draft assignments for this course. Runs
+    opportunistically on list; non-fatal so a cleanup hiccup never breaks the
+    list. Recent drafts (in-progress dry-runs) are kept and shown with a badge."""
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                """SELECT assignment_id::text, question_set_id::text FROM assignment
+                   WHERE course_id = %%s::uuid AND org_id = %%s::uuid AND created_by = %%s
+                     AND status = 'draft' AND created_at < now() - interval '%s'""" % _ABANDONED_DRAFT_AGE,
+                (course_id, org_id, user_id))
+            stale = cur.fetchall()
+        for aid, qsid in stale:
+            _purge_draft_assignment(repo.conn, aid, qsid)
+        if stale:
+            logger.info("Cleaned %d abandoned draft(s) for course %s", len(stale), course_id[:8])
+    except Exception as exc:  # noqa: BLE001
+        try:
+            repo.conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning("Abandoned-draft cleanup failed for %s: %s", course_id[:8], exc)
+
+
 class SubmitAnswerRequest(BaseModel):
     """POST body for submitting an answer."""
     question_index: int = Field(..., ge=0)
@@ -3271,11 +3337,15 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 caller = api.caller_for_org(x_user_id, x_role, x_org_name)
                 repo.set_tenant(caller.org_id)
 
+                # Opportunistically purge the caller's abandoned (stale) drafts,
+                # then return the rest INCLUDING recent drafts — the UI shows them
+                # with a "Draft" badge so an unpublished assignment isn't invisible.
+                _cleanup_abandoned_drafts(repo, course_id, caller.org_id, caller.user_id)
+
                 query = """SELECT assignment_id, title, question_set_id, config,
                                   status, created_by, created_at
                            FROM assignment
-                           WHERE course_id = %s::uuid AND org_id = %s::uuid
-                                 AND status <> 'draft'"""
+                           WHERE course_id = %s::uuid AND org_id = %s::uuid"""
                 params: list = [course_id, caller.org_id]
                 if status:
                     query += " AND status = %s"
