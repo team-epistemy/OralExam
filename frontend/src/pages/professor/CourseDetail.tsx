@@ -610,21 +610,6 @@ function GraphTab({ courseId }: { courseId: string }) {
         </div>
         )}
 
-        {/* Relationships (reflects the active view — course or document) */}
-        {viewEdges.length > 0 && (
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
-            <h3 className="text-sm font-medium text-gray-700 mb-3">Relationships</h3>
-            <div className="space-y-1.5 max-h-48 overflow-y-auto">
-              {viewEdges.slice(0, 15).map((edge: any, i: number) => (
-                <div key={i} className="flex items-center gap-2 text-xs text-gray-600">
-                  <span className="font-medium text-gray-900">{edge.src || '?'}</span>
-                  <span className="text-purple-600 font-medium">{edge.edge_type}</span>
-                  <span className="font-medium text-gray-900">{edge.dst || '?'}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     );
   }
