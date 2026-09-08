@@ -4,6 +4,9 @@ import { useQuery } from '@tanstack/react-query';
 import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network } from 'lucide-react';
 import { get, post } from '../../api/client';
 import { buildExam, regenerateExam, assignExam, discardDraft, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
+import { listMaterials } from '../../api/materials';
+import { getSyllabus } from '../../api/courses';
+import { DEFAULT_ORG } from '../../config';
 import TakeExam from '../student/TakeExam';
 
 interface Course {
@@ -91,8 +94,33 @@ export default function CreateAssignment() {
   };
 
   const courseName = courses.find((c) => c.course_id === courseId)?.course_name || '';
+
+  // Gate assignment creation on the course actually having (non-syllabus)
+  // material — you can't generate questions from nothing. Distinct from
+  // "graph still building" so we can show the right message.
+  const { data: syllabus } = useQuery({
+    queryKey: ['syllabus', courseId],
+    queryFn: () => getSyllabus(courseId!),
+    enabled: !!courseId && !created,
+  });
+  const { data: materials = [], isSuccess: materialsLoaded } = useQuery({
+    queryKey: ['materials', courseId, courseName],
+    queryFn: () => listMaterials(DEFAULT_ORG, courseName),
+    enabled: !!courseId && !!courseName && !created,
+  });
+  const nonSyllabusMaterials = (materials as any[]).filter((m) => {
+    const mid = m.material_id || m.id;
+    const vid = m.current_version_id || mid;
+    return !(syllabus && (
+      (syllabus.material_id && mid === syllabus.material_id) ||
+      (syllabus.version_id && (vid === syllabus.version_id || mid === syllabus.version_id))
+    ));
+  });
+  const hasMaterials = nonSyllabusMaterials.length > 0;
+  const noMaterials = materialsLoaded && !hasMaterials;
+
   const backTo = courseId ? `/professor/courses/${courseId}?tab=assignments` : '/professor/dashboard';
-  const canSubmit = !!courseId && !!title.trim() && qCount >= 1 && graphReady;
+  const canSubmit = !!courseId && !!title.trim() && qCount >= 1 && hasMaterials && graphReady;
 
   // Step 1: assemble questions from the concept graph and show them for review —
   // nothing is published to students yet (P-S-3.1: preview before publishing).
@@ -518,20 +546,36 @@ export default function CreateAssignment() {
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-6">
-        {/* Course */}
+        {/* Assignment Title — first field. The course is fixed (this page is
+            reached from a course), so no course picker is shown; only when
+            there's no course context do we fall back to a selector below. */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Course</label>
-          <select
-            value={courseId}
-            onChange={(e) => setCourseId(e.target.value)}
+          <label className="block text-sm font-medium text-gray-700 mb-1">Assignment Title</label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="">Select a course...</option>
-            {courses.map((c) => (
-              <option key={c.course_id} value={c.course_id}>{c.course_name}</option>
-            ))}
-          </select>
+            placeholder="e.g., Operations Midterm — Oral Exam"
+          />
         </div>
+
+        {/* Course — only when arrived without a course context (fallback). */}
+        {!preselectedCourse && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Course</label>
+            <select
+              value={courseId}
+              onChange={(e) => setCourseId(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">Select a course...</option>
+              {courses.map((c) => (
+                <option key={c.course_id} value={c.course_id}>{c.course_name}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Topics — the only scoping control. Pick which topics (concept-graph
             labels from the uploaded documents) this assignment draws from;
@@ -589,18 +633,6 @@ export default function CreateAssignment() {
             )}
           </div>
         )}
-
-        {/* Title */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Assignment Title</label>
-          <input
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="e.g., Operations Midterm — Oral Exam"
-          />
-        </div>
 
         {/* Type — determines which section students see it under */}
         <div>
@@ -677,12 +709,23 @@ export default function CreateAssignment() {
           </div>
         </div>
 
-        {/* Concept-graph readiness — questions come from it */}
-        {courseId && !graphReady && (
+        {/* No material → can't generate. Distinct, explicit message. */}
+        {courseId && noMaterials && (
+          <div className="flex items-start gap-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>
+              No Material is uploaded for Assignment generation. Upload course materials from the
+              course's <span className="font-medium">Materials</span> tab, then come back.
+            </span>
+          </div>
+        )}
+
+        {/* Concept-graph readiness — only relevant once material exists. */}
+        {courseId && hasMaterials && !graphReady && (
           <div className="flex items-start gap-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
             <Loader2 className="w-4 h-4 animate-spin flex-shrink-0 mt-0.5" />
             <span>
-              Preparing this course's concept graph — questions become available once it's built. This runs automatically after you upload materials and can take a minute. If you haven't added materials yet, upload them from the course's <span className="font-medium">Materials</span> tab.
+              Preparing this course's concept graph — questions become available once it's built. This runs automatically after you upload materials and can take a minute.
             </span>
           </div>
         )}
@@ -698,6 +741,7 @@ export default function CreateAssignment() {
         >
           {building && <Loader2 className="w-4 h-4 animate-spin" />}
           {building ? 'Generating preview…'
+            : courseId && noMaterials ? 'No material uploaded'
             : courseId && !graphReady ? 'Waiting for concept graph…'
             : 'Generate Preview'}
         </button>
