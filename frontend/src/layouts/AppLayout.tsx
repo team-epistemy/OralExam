@@ -37,6 +37,7 @@ function AdminNav() {
   const items = [
     { to: '/admin/professors', label: 'Professors' },
     { to: '/admin/simulations', label: 'Simulations' },
+    { to: '/admin/tasks', label: 'Tasks' },
   ];
   return (
     <nav className="flex items-center gap-1 ml-2">

@@ -5490,6 +5490,93 @@ def _run_simulation_bg(settings, org_id, simulation_id, assignment_id,
             conn.close()
 
 
+def _active_app_jobs(repo, org_id: str) -> list:
+    """Active app background work for this org: in-flight ingest jobs (async_job)
+    and running agent simulations, newest first, with human-readable text."""
+    import json as _json
+    jobs: list = []
+    with repo.conn.cursor() as cur:
+        # Ingest pipeline jobs still in flight.
+        cur.execute(
+            """SELECT j.job_id, j.type, j.status, j.step_name, j.progress_pct,
+                      j.updated_at, c.course_name,
+                      (SELECT mv.file_name FROM material_version mv
+                       WHERE mv.ingest_job_id = j.job_id ORDER BY mv.created_at DESC LIMIT 1)
+               FROM async_job j LEFT JOIN course c ON c.course_id = j.course_id
+               WHERE j.org_id = %s::uuid AND j.status NOT IN ('succeeded','failed')
+               ORDER BY j.updated_at DESC LIMIT 25""",
+            (org_id,))
+        for r in cur.fetchall():
+            fname = r[7]
+            jobs.append({
+                "kind": r[1] or "ingest", "status": r[2], "progress_pct": r[4] or 0,
+                "detail": "%s%s%s" % (r[3] or r[2],
+                                      " · " + r[6] if r[6] else "",
+                                      " · " + fname if fname else ""),
+                "updated_at": r[5].isoformat() if r[5] else None,
+            })
+        # Running agent simulations.
+        cur.execute("SELECT to_regclass('public.agent_simulation')")
+        if cur.fetchone()[0] is not None:
+            cur.execute(
+                """SELECT simulation_id, num_agents, curve, progress, created_at
+                   FROM agent_simulation
+                   WHERE org_id = %s::uuid AND status = 'running'
+                   ORDER BY created_at DESC LIMIT 25""",
+                (org_id,))
+            for r in cur.fetchall():
+                prog = r[3] if isinstance(r[3], dict) else (_json.loads(r[3]) if r[3] else {})
+                done, total = prog.get("agents_done", 0), prog.get("agents_total", r[1])
+                jobs.append({
+                    "kind": "simulation", "status": "running",
+                    "progress_pct": round(100 * done / total) if total else 0,
+                    "detail": "agent cohort · %s curve · %s/%s agents" % (r[2], done, total),
+                    "updated_at": r[4].isoformat() if r[4] else None,
+                })
+    return jobs
+
+
+def _ecs_deployment_status(settings) -> dict:
+    """Current ECS rollout + running-image-vs-ECR-latest check. Returns an
+    {available: false, reason} shape if the task role lacks ECS/ECR describe
+    (so the panel degrades instead of erroring)."""
+    try:
+        import boto3
+        sess = boto3.Session(region_name=settings.region)
+        ecs = sess.client("ecs")
+        svc = ecs.describe_services(cluster=settings.cluster_name,
+                                    services=[settings.service_name])["services"][0]
+        primary = next((dep for dep in svc.get("deployments", []) if dep["status"] == "PRIMARY"), {})
+        out = {
+            "available": True,
+            "service": settings.service_name,
+            "desired": svc.get("desiredCount"), "running": svc.get("runningCount"),
+            "pending": svc.get("pendingCount"),
+            "rollout_state": primary.get("rolloutState"),
+            "rollout_started": primary.get("createdAt").isoformat() if primary.get("createdAt") else None,
+            "deployments": len(svc.get("deployments", [])),
+        }
+        # Running task image digest vs ECR :latest → is the newest image live?
+        try:
+            tasks = ecs.list_tasks(cluster=settings.cluster_name,
+                                   serviceName=settings.service_name).get("taskArns", [])
+            if tasks:
+                td = ecs.describe_tasks(cluster=settings.cluster_name, tasks=tasks[:1])["tasks"][0]
+                out["running_image_digest"] = td["containers"][0].get("imageDigest")
+            latest = sess.client("ecr").describe_images(
+                repositoryName=settings.ecr_repo, imageIds=[{"imageTag": "latest"}]
+            )["imageDetails"][0]
+            out["ecr_latest_digest"] = latest.get("imageDigest")
+            out["latest_pushed_at"] = latest.get("imagePushedAt").isoformat() if latest.get("imagePushedAt") else None
+            out["on_latest"] = (out.get("running_image_digest") == out.get("ecr_latest_digest")
+                                and out.get("running_image_digest") is not None)
+        except Exception as exc:  # noqa: BLE001 - image detail is best-effort
+            out["image_check_error"] = str(exc)[:160]
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": str(exc)[:200]}
+
+
 def _register_admin_simulations(app: FastAPI, deps) -> None:
     """platform_admin: launch agent-cohort exam simulations and read their reports."""
 
@@ -5498,6 +5585,26 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
         if caller.role != Role.PLATFORM_ADMIN:
             raise AuthorizationError("platform_admin role required")
         return caller
+
+    @app.get(R.ADMIN_ACTIVE_TASKS)
+    def admin_active_tasks(x_org_name: str = Header(...),
+                           x_user_id: str = Header("operator"),
+                           x_role: str = Header("platform_admin")):
+        """Active app background jobs + current ECS deployment status, for the
+        admin 'Active Deployment Tasks' panel."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                jobs = _active_app_jobs(repo, caller.org_id)
+                deployment = _ecs_deployment_status(d["settings"])
+                return {"jobs": jobs, "deployment": deployment}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
     @app.get(R.ADMIN_ASSIGNMENTS)
     def list_admin_assignments(x_org_name: str = Header(...),

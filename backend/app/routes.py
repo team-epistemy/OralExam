@@ -83,6 +83,7 @@ GRADES_RELEASE = "/api/assignments/{assignment_id}/grades/release"
 GRADE_OVERRIDE = "/api/grades/{grade_id}/override"
 
 # ── Admin: agent-cohort exam simulations ────────────────────────────────────
+ADMIN_ACTIVE_TASKS = "/api/admin/active-tasks"                  # GET app background jobs + ECS deploy status
 ADMIN_ASSIGNMENTS = "/api/admin/assignments"                    # GET org assignments (picker)
 ADMIN_SIMULATIONS = "/api/admin/simulations"                    # POST create, GET list
 ADMIN_SIMULATION = "/api/admin/simulations/{simulation_id}"     # GET status + report

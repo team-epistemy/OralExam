@@ -46,10 +46,21 @@ def task_permission_policy(bucket: str, queue_arn: str, key_arn: str) -> str:
         _kms_statement(key_arn),
         _bedrock_statement(),
         _cognito_statement(),
+        _deploy_read_statement(),
         {"Effect": "Allow", "Action": ["secretsmanager:GetSecretValue"],
          "Resource": "*"},
     ]
     return json.dumps({"Version": "2012-10-17", "Statement": statements})
+
+
+def _deploy_read_statement() -> Dict:
+    """Read-only ECS/ECR describe for the admin 'Active Deployment Tasks' panel
+    (rollout state, running task image digest vs ECR :latest). Describe-only."""
+    return {"Effect": "Allow",
+            "Action": ["ecs:DescribeServices", "ecs:ListTasks",
+                       "ecs:DescribeTasks", "ecs:DescribeTaskDefinition",
+                       "ecr:DescribeImages"],
+            "Resource": "*"}
 
 
 def _s3_statement(bucket: str) -> Dict:
