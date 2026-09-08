@@ -189,6 +189,7 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
 }) {
   const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
   const [graphViewing, setGraphViewing] = useState<{ id: string; name: string } | null>(null);
+  const [buildingIds, setBuildingIds] = useState<Set<string>>(new Set());
 
   // Which documents have a per-document concept graph (mapping 1) → material_version_id -> concept_count.
   const { data: docGraphData } = useQuery({
@@ -207,6 +208,32 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
       queryClient.invalidateQueries({ queryKey: ['materials', courseId] });
     } catch (err: any) {
       alert('Failed to delete material: ' + (err?.message || 'Unknown error'));
+    }
+  };
+
+  // Manually (re)build a document's concept graph — for materials that finished
+  // ingest but have no graph (inline build produced nothing). Async on the
+  // backend; poll graph-documents until the concept count appears.
+  const buildGraph = async (versionId: string) => {
+    setBuildingIds((prev) => new Set(prev).add(versionId));
+    try {
+      const res = await post<{ status?: string; message?: string }>(
+        `/api/courses/${courseId}/materials/${versionId}/graph/build`, {});
+      if (res?.status && res.status !== 'building') {
+        alert(res.message || 'Could not build the concept graph.');
+        return;
+      }
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        await queryClient.invalidateQueries({ queryKey: ['graph-documents', courseId] });
+        const data = queryClient.getQueryData<{ documents: Array<{ material_version_id: string; concept_count: number }> }>(['graph-documents', courseId]);
+        const found = data?.documents?.find((doc) => doc.material_version_id === versionId);
+        if (found && found.concept_count > 0) break;
+      }
+    } catch (err: any) {
+      alert('Failed to build the concept graph: ' + (err?.message || 'Unknown error'));
+    } finally {
+      setBuildingIds((prev) => { const n = new Set(prev); n.delete(versionId); return n; });
     }
   };
 
@@ -247,6 +274,17 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
         >
           <Network className="w-4 h-4" />
           <span className="text-xs">{conceptCount}</span>
+        </button>
+      ) : (material.status || 'ready') === 'ready' ? (
+        // Ingested but no concept graph — offer to build it on demand.
+        <button
+          onClick={() => buildGraph(versionId)}
+          disabled={buildingIds.has(versionId)}
+          className="inline-flex items-center gap-1 p-1.5 text-purple-600 hover:bg-purple-50 rounded transition-colors disabled:opacity-50"
+          title="Build the concept graph for this document"
+        >
+          {buildingIds.has(versionId) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Network className="w-4 h-4" />}
+          <span className="text-xs">{buildingIds.has(versionId) ? 'Building…' : 'Build graph'}</span>
         </button>
       ) : null}
       <button

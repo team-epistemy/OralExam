@@ -326,6 +326,46 @@ def _build_graph_async(settings, org_id: str, course_id: str, domain: str = "gen
                      args=(settings, org_id, course_id, domain), daemon=True).start()
 
 
+def _build_one_document_graph_bg(settings, org_id: str, course_id: str,
+                                 material_version_id: str) -> None:
+    """Extract the concept graph for a SINGLE document, then recompute the course
+    snapshot. Used to (re)build a document's graph on demand — e.g. when the
+    inline build after upload produced nothing (truncated/failed extraction).
+    Runs in a background thread; LLM calls are slow. Non-fatal on error."""
+    conn = None
+    try:
+        conn = factory.db_connection(settings)
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
+            conn.commit()
+            cur.execute("SELECT text FROM chunk WHERE material_version_id = %s ORDER BY chunk_index",
+                        (material_version_id,))
+            chunks = [r[0] for r in cur.fetchall()]
+        if not chunks:
+            logger.warning("Doc graph build: no chunks for %s", material_version_id[:8])
+            return
+        data = call_bedrock(settings, _GRAPH_EXTRACTION_PROMPT,
+                            "Domain: general\n\n" + "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH]),
+                            max_tokens=LLM_MAX_TOKENS_GRAPH, temperature=0.2)
+        with conn.cursor() as cur:
+            write_document_concepts(cur, org_id, course_id, material_version_id,
+                                    data.get("concepts", []), data.get("relations", []))
+            snapshot = snapshot_course_graph(cur, org_id, course_id)
+        conn.commit()
+        logger.info("Doc graph built for %s: %d concepts; course now %d",
+                    material_version_id[:8], len(data.get("concepts", [])), len(snapshot["concepts"]))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Doc graph build failed for %s: %s", material_version_id[:8], exc, exc_info=True)
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _is_public(path: str) -> bool:
     """True when a route may be reached without a verified token."""
     return path == "/" or path.startswith(_PUBLIC_PATH_PREFIXES)
@@ -1969,6 +2009,43 @@ def _register_graph(app: FastAPI, deps) -> None:
                     docs = [{"material_version_id": str(r[0]), "file_name": r[1], "concept_count": r[2]}
                             for r in cur.fetchall()]
                 return {"documents": docs}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.MATERIAL_GRAPH_BUILD)
+    def build_material_graph(
+        course_id: str,
+        material_version_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """(Re)build one document's concept graph on demand — for a material that
+        finished ingest but has no graph (the inline build produced nothing).
+        Runs in the background; poll GRAPH_DOCUMENTS for the updated count."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                # Don't rebuild the syllabus (excluded from the graph by design).
+                with repo.conn.cursor() as cur:
+                    if str(material_version_id) in syllabus_version_ids(cur, caller.org_id, course_id):
+                        return {"status": "skipped", "message": "The syllabus is excluded from the concept graph."}
+                    cur.execute("SELECT count(*) FROM chunk WHERE material_version_id = %s::uuid",
+                                (material_version_id,))
+                    if cur.fetchone()[0] == 0:
+                        return {"status": "error", "message": "This document isn't ingested yet — wait for it to finish, then try again."}
+                threading.Thread(
+                    target=_build_one_document_graph_bg,
+                    args=(d["settings"], caller.org_id, course_id, material_version_id),
+                    daemon=True).start()
+                return {"status": "building"}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
