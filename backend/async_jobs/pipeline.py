@@ -13,7 +13,7 @@ from backend.embedding.persist import stamp_tenant, embed_chunks, persist_chunks
 from backend.extract.base import get_extractor
 from backend.chunking import Chunker
 from backend.config import Settings
-from backend.constants import MAX_CHUNKS_FOR_GRAPH, LLM_MAX_TOKENS_GENERATION
+from backend.constants import MAX_CHUNKS_FOR_GRAPH, LLM_MAX_TOKENS_GENERATION, LLM_MAX_TOKENS_GRAPH
 from backend.app.exam_questions import sanitize_bank
 from backend.app.concept_graph import (
     write_document_concepts, snapshot_course_graph, syllabus_version_ids,
@@ -92,12 +92,15 @@ class IngestPipeline:
         self._trigger_graph_build(msg)
 
     def _trigger_graph_build(self, msg: IngestMessage) -> None:
-        """After ingest completes, build the concept graph inline.
+        """After ingest reaches 'ready', build the concept graph in a BACKGROUND
+        thread so it never blocks the ingest worker.
 
-        Uses a fresh DB connection to avoid conflicts with the pipeline's
-        connection. Calls Bedrock Qwen3 directly (same approach as the HTTP
-        rebuild endpoint). Non-fatal: if anything fails, we log a warning and
-        the material remains "ready".
+        The graph build makes slow Bedrock calls; running it inline held the
+        worker thread and stalled the next queued upload (its Pipeline Status
+        spinner never resolved). Now ingest completes → the version is 'ready'
+        immediately, the worker moves on to the next message, and the graph
+        builds concurrently on its own DB connection. Non-fatal: failures are
+        logged and the material stays 'ready'.
         """
         if not self.settings:
             logger.info("No settings provided — skipping graph build")
@@ -111,11 +114,17 @@ class IngestPipeline:
                         msg.material_version_id[:8], getattr(msg.source_type, "value", msg.source_type))
             return
 
-        try:
-            logger.info("Graph auto-trigger starting for course %s", msg.course_id[:8])
-            self._do_graph_build(msg)
-        except Exception as exc:
-            logger.warning("Graph build failed (non-fatal): %s", exc, exc_info=True)
+        import threading
+
+        def _run():
+            try:
+                logger.info("Graph auto-trigger starting for course %s", msg.course_id[:8])
+                self._do_graph_build(msg)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Graph build failed (non-fatal): %s", exc, exc_info=True)
+
+        threading.Thread(target=_run, daemon=True,
+                         name=f"graphbuild-{msg.material_version_id[:8]}").start()
 
     def _do_graph_build(self, msg: IngestMessage) -> None:
         """Incremental graph build: extract topics from new material only, merge into existing graph."""
@@ -191,10 +200,15 @@ class IngestPipeline:
                 "Extract 5-20 NEW concepts from this material. Only return JSON."
                 + existing_context
             )
+            # Generous token ceiling so the whole JSON (concepts + per-concept
+            # question banks) returns in one non-truncated call — an 8000 cap
+            # truncated it for large docs, failing the JSON parse and yielding
+            # zero concepts. Runs in a background thread now, so the extra latency
+            # doesn't block ingest.
             data = call_bedrock(
                 self.settings, system_prompt,
                 f"Domain: general\n\n{combined}",
-                max_tokens=8000, temperature=0.1,
+                max_tokens=LLM_MAX_TOKENS_GRAPH, temperature=0.1,
             )
             new_concepts = data.get("concepts", [])
             new_relations = data.get("relations", [])

@@ -22,7 +22,7 @@ from backend.config import load_settings
 from backend.constants import (
     MAX_CHUNKS_FOR_GRAPH, MAX_CHUNKS_FOR_GENERATION,
     MAX_QUESTION_COUNT, MAX_ANSWER_LENGTH, LLM_MAX_TOKENS_GENERATION,
-    LLM_MAX_TOKENS_EVALUATION,
+    LLM_MAX_TOKENS_EVALUATION, LLM_MAX_TOKENS_GRAPH,
     EDS_ALPHA, EDS_BETA, EDS_GAMMA,
 )
 from backend.models import Role, IngestRequest, NON_GRAPH_SOURCE_TYPES
@@ -255,7 +255,7 @@ def _rebuild_course_graph_bg(settings, org_id: str, course_id: str, domain: str 
                 continue
             data = call_bedrock(settings, _GRAPH_EXTRACTION_PROMPT,
                                 f"Domain: {domain}\n\n" + "\n\n".join(chunks[:MAX_CHUNKS_FOR_GRAPH]),
-                                max_tokens=8000, temperature=0.2)
+                                max_tokens=LLM_MAX_TOKENS_GRAPH, temperature=0.2)
             with conn.cursor() as cur:
                 write_document_concepts(cur, org_id, course_id, mv,
                                         data.get("concepts", []), data.get("relations", []))

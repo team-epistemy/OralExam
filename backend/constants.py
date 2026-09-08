@@ -34,6 +34,13 @@ MAX_ANSWER_LENGTH = 10000
 # Max tokens returned by the LLM for graph/question generation calls.
 LLM_MAX_TOKENS_GENERATION = 4000
 
+# Max tokens for the concept-graph extraction call. This packs concepts +
+# per-concept depth-tagged question banks (up to ~7 questions each) into one
+# JSON response, which for a large doc overflowed an 8000-token cap and
+# truncated mid-JSON — the parse then failed and the doc got NO concepts. Sized
+# well above that so the JSON completes for a full 5-20 concept extraction.
+LLM_MAX_TOKENS_GRAPH = 16000
+
 # Max tokens for short evaluation calls (Socratic answer grading).
 LLM_MAX_TOKENS_EVALUATION = 500
 
