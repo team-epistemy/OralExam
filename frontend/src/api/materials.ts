@@ -25,6 +25,8 @@ export interface Material {
   material_id: string;
   display_name: string;
   current_version_id: string | null;
+  status?: string;
+  source_type?: string;
 }
 
 export async function presignUpload(

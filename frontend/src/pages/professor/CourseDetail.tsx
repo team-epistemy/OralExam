@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, BarChart3, BookOpen } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, ChevronDown, ChevronRight, BarChart3, BookOpen } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
@@ -189,6 +189,7 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
   const [viewing, setViewing] = useState<{ id: string; name: string } | null>(null);
   const [graphViewing, setGraphViewing] = useState<{ id: string; name: string } | null>(null);
   const [buildingIds, setBuildingIds] = useState<Set<string>>(new Set());
+  const [listOpen, setListOpen] = useState(true);   // uploaded-materials list is collapsible
 
   // Which documents have a per-document concept graph (mapping 1) → material_version_id -> concept_count.
   const { data: docGraphData } = useQuery({
@@ -250,6 +251,9 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
   };
   const listedMaterials = materials.filter((m) => !isSyllabusMaterial(m));
 
+  // CSV/XLSX are ingested but never graphed, so "ready" is their final state.
+  const graphEligible = (m: any) => !['csv', 'xlsx'].includes((m.source_type || '').toLowerCase());
+
   const renderRow = (material: any, i: number) => {
     const mvid = materialId(material);
     // The graph is keyed by material_version_id; the name-based list returns it as
@@ -257,6 +261,10 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
     const versionId = material.current_version_id || mvid;
     const name = material.display_name || material.filename || material.file_name || 'Document';
     const conceptCount = versionId ? conceptCounts.get(versionId) : undefined;
+    const raw = material.status || 'ready';
+    // Don't call it "Ready" until the concept graph is built (for graph-eligible
+    // docs). Ingest-done-but-no-graph shows "Building graph" instead.
+    const buildingGraph = raw === 'ready' && graphEligible(material) && !conceptCount;
     return (
     <div key={mvid || i} className="flex items-center gap-4 px-5 py-3">
       <FileText className="w-4 h-4 text-gray-400" />
@@ -264,7 +272,13 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
         <p className="text-sm font-medium text-gray-900 truncate">{name}</p>
         <p className="text-xs text-gray-500">{material.created_at ? new Date(material.created_at).toLocaleDateString() : ''}</p>
       </div>
-      <StatusBadge status={material.status || 'ready'} />
+      {buildingGraph ? (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+          <Loader2 className="w-3 h-3 animate-spin" /> Building graph
+        </span>
+      ) : (
+        <StatusBadge status={raw} />
+      )}
       {conceptCount ? (
         <button
           onClick={() => setGraphViewing({ id: versionId, name })}
@@ -351,7 +365,18 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="divide-y divide-gray-100">{listedMaterials.map(renderRow)}</div>
+          {/* Collapsible list of uploaded materials. */}
+          <button
+            type="button"
+            onClick={() => setListOpen((v) => !v)}
+            className="w-full flex items-center gap-2 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            {listOpen ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+            Uploaded materials ({listedMaterials.length})
+          </button>
+          {listOpen && (
+            <div className="divide-y divide-gray-100 border-t border-gray-100">{listedMaterials.map(renderRow)}</div>
+          )}
         </div>
       )}
       {viewing && (

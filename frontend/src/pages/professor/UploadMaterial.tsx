@@ -1,8 +1,7 @@
 import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { CheckCircle, AlertCircle, Loader2, Home } from 'lucide-react';
-import { uploadMaterial, listVersions } from '../../api/materials';
-import type { MaterialVersion } from '../../api/materials';
+import { CheckCircle, AlertCircle, Home } from 'lucide-react';
+import { uploadMaterial } from '../../api/materials';
 import { setSyllabus } from '../../api/courses';
 import FileUpload from '../../components/FileUpload';
 import { DEFAULT_ORG } from '../../config';
@@ -22,59 +21,13 @@ export default function UploadMaterial() {
   const [error, setError] = useState('');
   const [uploadResult, setUploadResult] = useState<{ material_id: string; version_no: number; course_id?: string } | null>(null);
   const [uploadedCount, setUploadedCount] = useState(0);
-  const [versions, setVersions] = useState<MaterialVersion[]>([]);
-  const [stalled, setStalled] = useState('');
-  const [pollInterval, setPollInterval] = useState<ReturnType<typeof setInterval> | null>(null);
   const [uploaderKey, setUploaderKey] = useState(0);
-  // Every material uploaded on this page (across one-at-a-time selections), so
-  // the Pipeline Status list and polling cover them all — not just the latest.
+  // Every material uploaded on this page (across one-at-a-time selections) — used
+  // for the uploaded count. Ingest + concept-graph build happen server-side; this
+  // view shows only the upload progress, not the pipeline status.
   const uploadedIdsRef = useRef<string[]>([]);
-  // Tracks the live poll interval so a new upload can reliably stop the previous
-  // poll before starting one over the full accumulated set (state can be stale
-  // inside the async handler's closure).
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Stop polling after this long if a version never reaches a terminal status,
-  // so a stuck job shows a "still processing" notice instead of an infinite spinner.
-  const POLL_INTERVAL_MS = 3000;
-  const POLL_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — covers a large (~200pg) reading
   const MAX_BATCH = 10; // upload up to 10 files at once; each becomes its own material
-
-  // Poll every uploaded material until all are ready/failed (or we time out).
-  // Any in-flight poll is stopped first, so we never run two intervals that
-  // race to overwrite `versions` (which is what dropped earlier documents).
-  const pollBatch = (materialIds: string[]) => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    const startedAt = Date.now();
-    const interval = setInterval(async () => {
-      try {
-        const perMaterial = await Promise.all(
-          materialIds.map((id) => listVersions(DEFAULT_ORG, id).catch(() => [])));
-        // One row per material: its latest version (highest version_no).
-        const latest = perMaterial
-          .map((vers) => vers.slice().sort((a, b) => b.version_no - a.version_no)[0])
-          .filter(Boolean) as MaterialVersion[];
-        setVersions(latest);
-        const allTerminal = latest.length === materialIds.length &&
-          latest.every((v) => v.status === 'ready' || v.status === 'failed');
-        if (allTerminal) {
-          clearInterval(interval);
-          pollRef.current = null;
-          setPollInterval(null);
-        } else if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-          clearInterval(interval);
-          pollRef.current = null;
-          setPollInterval(null);
-          setStalled('Still processing — large files can take a few minutes. '
-            + 'You can leave this page; the status will update on the course materials list when it finishes.');
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }, POLL_INTERVAL_MS);
-    pollRef.current = interval;
-    setPollInterval(interval);
-  };
 
   const handleFilesSelected = async (files: File[]) => {
     if (files.length === 0 || !courseName.trim()) return;
@@ -83,13 +36,8 @@ export default function UploadMaterial() {
 
     setUploading(true);
     setError('');
-    setStalled('');
     setSuccess(false);
-    // A syllabus replaces its single file, so start fresh. Materials accumulate:
-    // keep the earlier documents' status rows on screen (they were uploaded and
-    // are still processing) instead of wiping them when the next file is picked.
     if (isSyllabus) {
-      setVersions([]);
       uploadedIdsRef.current = [];
     }
 
@@ -131,22 +79,10 @@ export default function UploadMaterial() {
         : `${failures.length} of ${batch.length} files failed to upload: ${failures.join('; ')}`);
     }
     if (materialIds.length) {
-      // Add this selection's materials to the running set and poll them all, so
-      // one-at-a-time uploads each stay visible in the Pipeline Status list.
       uploadedIdsRef.current = [...uploadedIdsRef.current, ...materialIds];
       setUploadResult((prev) => prev ?? firstResult);
       setUploadedCount(uploadedIdsRef.current.length);
       setSuccess(true);
-      pollBatch(uploadedIdsRef.current);
-    }
-  };
-
-  const statusColor = (status: string) => {
-    switch (status) {
-      case 'ready': return 'text-green-700 bg-green-50 border-green-200';
-      case 'failed': return 'text-red-700 bg-red-50 border-red-200';
-      case 'pending': case 'uploaded': return 'text-yellow-700 bg-yellow-50 border-yellow-200';
-      default: return 'text-blue-700 bg-blue-50 border-blue-200';
     }
   };
 
@@ -235,41 +171,6 @@ export default function UploadMaterial() {
           </div>
         )}
 
-        {/* Stalled — polling gave up but the job may still finish server-side */}
-        {stalled && (
-          <div className="flex items-center gap-3 p-4 bg-amber-50 border border-amber-200 rounded-lg">
-            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
-            <p className="text-xs text-amber-700">{stalled}</p>
-          </div>
-        )}
-
-        {/* Pipeline status (polling) */}
-        {versions.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium text-gray-700">Pipeline Status</h3>
-            {versions.map((v) => (
-              <div key={v.material_version_id} className="space-y-1">
-                <div className="flex items-center gap-3 text-sm">
-                  <span className="font-mono text-gray-500">v{v.version_no}</span>
-                  <span className={`px-2 py-0.5 rounded border text-xs font-medium ${statusColor(v.status)}`}>
-                    {v.status}
-                  </span>
-                  <span className="text-gray-400">{v.file_name}</span>
-                  {v.status !== 'ready' && v.status !== 'failed' && (
-                    <Loader2 className="w-3 h-3 animate-spin text-blue-500" />
-                  )}
-                </div>
-                {v.status === 'failed' && (
-                  <div className="flex items-start gap-2 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
-                    <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                    <span>{v.error?.message || `Ingestion failed for "${v.file_name}". Please try a different file.`}</span>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-
         {/* Next steps */}
         {success && (() => {
           // Prefer the course id resolved by the upload itself (covers standalone
@@ -285,13 +186,7 @@ export default function UploadMaterial() {
                   setProgress(0);
                   setUploadResult(null);
                   setUploadedCount(0);
-                  setVersions([]);
-                  setStalled('');
                   uploadedIdsRef.current = [];
-                  if (pollRef.current) clearInterval(pollRef.current);
-                  pollRef.current = null;
-                  if (pollInterval) clearInterval(pollInterval);
-                  setPollInterval(null);
                   // Remount FileUpload to clear its accumulated file cards.
                   setUploaderKey((k) => k + 1);
                 }}

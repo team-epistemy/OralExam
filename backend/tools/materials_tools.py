@@ -56,10 +56,12 @@ class MaterialsTools:
     def _summary(self, material) -> MaterialSummary:
         """Build a summary, resolving the current version's status."""
         status = None
+        source_type = None
         if material.current_version_id:
             version = self.repo.get_version(material.current_version_id)
             status = version.status if version else None
+            source_type = version.source_type if version else None
         return MaterialSummary(material_id=material.material_id,
                                display_name=material.display_name,
                                current_version_id=material.current_version_id,
-                               status=status)
+                               status=status, source_type=source_type)

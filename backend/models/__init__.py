@@ -232,6 +232,7 @@ class MaterialSummary(BaseModel):
     display_name: str
     current_version_id: Optional[str]
     status: Optional[VersionStatus] = None
+    source_type: Optional[SourceType] = None
 
 
 class IngestMessage(BaseModel):
