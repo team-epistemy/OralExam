@@ -310,18 +310,6 @@ export default function UploadMaterial() {
           );
         })()}
       </div>
-
-      {/* How it works */}
-      <div className="bg-blue-50 border border-blue-100 rounded-xl p-5">
-        <h3 className="text-sm font-medium text-blue-900 mb-2">What happens after upload</h3>
-        <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
-          <li>File lands in S3 at <code className="text-xs">org/course/materials/id/v1/filename</code></li>
-          <li>Worker picks up the job from SQS</li>
-          <li>Extracts text → structure-aware chunking</li>
-          <li>Embeds chunks via Bedrock Titan v2 → pgvector</li>
-          <li>Status flips to <span className="font-medium">ready</span></li>
-        </ol>
-      </div>
     </div>
   );
 }
