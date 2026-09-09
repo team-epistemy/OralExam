@@ -309,6 +309,19 @@ export default function UploadMaterial() {
             </div>
           );
         })()}
+
+        {/* Always offer a way back to the course, even before any upload. The
+            success state above shows its own Course Home (next to Upload Another). */}
+        {!success && (
+          <div className="flex">
+            <Link
+              to={courseIdParam ? `/professor/courses/${courseIdParam}` : '/professor/dashboard'}
+              className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              <Home className="w-4 h-4" /> Course Home
+            </Link>
+          </div>
+        )}
       </div>
     </div>
   );
