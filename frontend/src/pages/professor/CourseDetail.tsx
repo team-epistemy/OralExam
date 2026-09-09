@@ -28,16 +28,17 @@ interface Course {
   join_code?: string;
 }
 
-type Tab = 'materials' | 'graph' | 'assignments' | 'students' | 'performance';
+type Tab = 'graph' | 'assignments' | 'students' | 'performance';
 
-const TABS: Tab[] = ['materials', 'assignments', 'students', 'performance', 'graph'];
+// Materials no longer has its own tab — it's Step 1 inside the Assignments tab.
+const TABS: Tab[] = ['assignments', 'students', 'performance', 'graph'];
 
 export default function CourseDetail() {
   const { courseId } = useParams<{ courseId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const [activeTab, setActiveTab] = useState<Tab>(
-    (TABS.includes((tabParam || '') as Tab) ? (tabParam as Tab) : 'materials'),
+    (TABS.includes((tabParam || '') as Tab) ? (tabParam as Tab) : 'assignments'),
   );
 
   // Selecting a tab also writes ?tab= to the URL (replace, no history spam) so a
@@ -104,7 +105,6 @@ export default function CourseDetail() {
   };
 
   const tabs = [
-    { id: 'materials' as Tab, label: 'Materials', icon: FileText },
     { id: 'assignments' as Tab, label: 'Assignments', icon: ClipboardList },
     { id: 'students' as Tab, label: 'Students', icon: Users },
     { id: 'performance' as Tab, label: 'Performance', icon: BarChart3 },
@@ -170,12 +170,11 @@ export default function CourseDetail() {
       </div>
 
       {/* Tab content */}
-      {activeTab === 'materials' && (
-        <MaterialsTab materials={materials} courseId={courseId!} courseName={course?.name || ''}
-          syllabus={syllabus} queryClient={queryClient} />
-      )}
       {activeTab === 'graph' && <GraphTab courseId={courseId!} />}
-      {activeTab === 'assignments' && <AssignmentsTab assignments={assignments} courseId={courseId!} queryClient={queryClient} />}
+      {activeTab === 'assignments' && (
+        <AssignmentsTab assignments={assignments} courseId={courseId!} courseName={course?.name || ''}
+          materials={materials} syllabus={syllabus} queryClient={queryClient} />
+      )}
       {activeTab === 'students' && <StudentsTab courseId={courseId!} />}
       {activeTab === 'performance' && <PerformanceTab courseId={courseId!} />}
     </div>
@@ -634,7 +633,11 @@ function GraphTab({ courseId }: { courseId: string }) {
   );
 }
 
-function AssignmentsTab({ assignments, courseId, queryClient }: { assignments: Assignment[]; courseId: string; queryClient: ReturnType<typeof useQueryClient> }) {
+function AssignmentsTab({ assignments, courseId, courseName, materials, syllabus, queryClient }: {
+  assignments: Assignment[]; courseId: string; courseName: string;
+  materials: Material[]; syllabus?: Syllabus | null;
+  queryClient: ReturnType<typeof useQueryClient>;
+}) {
   const handleClose = async (assignmentId: string) => {
     if (!confirm('Close this assignment? Students will no longer be able to start new exams.')) return;
     try {
@@ -658,16 +661,33 @@ function AssignmentsTab({ assignments, courseId, queryClient }: { assignments: A
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex justify-end">
-        <Link
-          to={`/professor/assignments/new?course=${courseId}`}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-        >
-          <ClipboardList className="w-4 h-4" />
-          Create Assignment
-        </Link>
-      </div>
+    <div className="space-y-6">
+      {/* Step 1 — course materials feed the concept graph that questions come from. */}
+      <section className="space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold">1</span>
+          <h2 className="text-sm font-semibold text-gray-900">Add course materials</h2>
+          <span className="text-xs text-gray-500">— questions are generated from these</span>
+        </div>
+        <MaterialsTab materials={materials} courseId={courseId} courseName={courseName}
+          syllabus={syllabus} queryClient={queryClient} />
+      </section>
+
+      {/* Step 2 — create the assignment from those materials' topics. */}
+      <section className="space-y-3 border-t border-gray-200 pt-6">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold">2</span>
+            <h2 className="text-sm font-semibold text-gray-900">Create an assignment</h2>
+          </div>
+          <Link
+            to={`/professor/assignments/new?course=${courseId}`}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+          >
+            <ClipboardList className="w-4 h-4" />
+            Create Assignment
+          </Link>
+        </div>
       {assignments.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
           <ClipboardList className="w-8 h-8 text-gray-300 mx-auto mb-3" />
@@ -719,6 +739,7 @@ function AssignmentsTab({ assignments, courseId, queryClient }: { assignments: A
           ))}
         </div>
       )}
+      </section>
     </div>
   );
 }
