@@ -272,34 +272,40 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
         <p className="text-sm font-medium text-gray-900 truncate">{name}</p>
         <p className="text-xs text-gray-500">{material.created_at ? new Date(material.created_at).toLocaleDateString() : ''}</p>
       </div>
-      {buildingGraph ? (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-          <Loader2 className="w-3 h-3 animate-spin" /> Building graph
-        </span>
+      {/* Status + graph action are mutually exclusive:
+          - graph built            → "Ready" badge + view-graph button
+          - build in progress      → "Building graph" chip only (no trigger)
+          - ingested, no graph      → "Build graph" button only
+          - still ingesting/failed → the raw status badge */}
+      {conceptCount ? (
+        <>
+          <StatusBadge status="ready" />
+          <button
+            onClick={() => setGraphViewing({ id: versionId, name })}
+            className="inline-flex items-center gap-1 p-1.5 text-purple-600 hover:bg-purple-50 rounded transition-colors"
+            title={`View concept graph (${conceptCount} concept${conceptCount === 1 ? '' : 's'})`}
+          >
+            <Network className="w-4 h-4" />
+            <span className="text-xs">{conceptCount}</span>
+          </button>
+        </>
+      ) : buildingGraph ? (
+        buildingIds.has(versionId) ? (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+            <Loader2 className="w-3 h-3 animate-spin" /> Building graph
+          </span>
+        ) : (
+          <button
+            onClick={() => buildGraph(versionId)}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-purple-600 hover:bg-purple-50 transition-colors"
+            title="Build the concept graph for this document"
+          >
+            <Network className="w-4 h-4" /> Build graph
+          </button>
+        )
       ) : (
         <StatusBadge status={raw} />
       )}
-      {conceptCount ? (
-        <button
-          onClick={() => setGraphViewing({ id: versionId, name })}
-          className="inline-flex items-center gap-1 p-1.5 text-purple-600 hover:bg-purple-50 rounded transition-colors"
-          title={`View concept graph (${conceptCount} concept${conceptCount === 1 ? '' : 's'})`}
-        >
-          <Network className="w-4 h-4" />
-          <span className="text-xs">{conceptCount}</span>
-        </button>
-      ) : (material.status || 'ready') === 'ready' ? (
-        // Ingested but no concept graph — offer to build it on demand.
-        <button
-          onClick={() => buildGraph(versionId)}
-          disabled={buildingIds.has(versionId)}
-          className="inline-flex items-center gap-1 p-1.5 text-purple-600 hover:bg-purple-50 rounded transition-colors disabled:opacity-50"
-          title="Build the concept graph for this document"
-        >
-          {buildingIds.has(versionId) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Network className="w-4 h-4" />}
-          <span className="text-xs">{buildingIds.has(versionId) ? 'Building…' : 'Build graph'}</span>
-        </button>
-      ) : null}
       <button
         onClick={() => setViewing({ id: mvid, name })}
         className="p-1.5 text-blue-600 hover:bg-blue-50 rounded transition-colors"
