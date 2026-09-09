@@ -5198,21 +5198,33 @@ def _register_delete_endpoints(app: FastAPI, deps) -> None:
                         "DELETE FROM material WHERE material_id = %s::uuid",
                         (target_id,),
                     )
-                    # Flag before the rebuild so a failed/killed thread leaves the
-                    # graph visibly stale rather than silently wrong.
-                    cur.execute(
-                        "UPDATE graph_version SET is_stale = true "
-                        "WHERE org_id = %s AND course_id = %s AND is_active = true",
-                        (caller.org_id, course_id),
-                    )
                 repo.conn.commit()
 
-                # Concepts from this material would otherwise persist in the active
-                # graph; rebuild off-request so delete stays fast.
-                _rebuild_graph_async(d["settings"], caller.org_id, course_id)
+                # Removing a document must drop its concepts from the graph.
+                # A pure recompute (no LLM) rebuilds the course snapshot from the
+                # REMAINING documents and purges the deleted doc's now-orphaned
+                # concept rows — instant and reliable, no stale window. Only if
+                # that fails do we fall back to the async LLM rebuild (marking the
+                # graph stale so the UI keeps polling).
+                graph_rebuild = "recomputed"
+                try:
+                    with repo.conn.cursor() as cur:
+                        snapshot_course_graph(cur, caller.org_id, course_id)
+                    repo.conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    repo.conn.rollback()
+                    logger.warning("Post-delete graph recompute failed for %s: %s — falling back to async rebuild",
+                                   course_id[:8], exc)
+                    with repo.conn.cursor() as cur:
+                        cur.execute("UPDATE graph_version SET is_stale = true "
+                                    "WHERE org_id = %s AND course_id = %s AND is_active = true",
+                                    (caller.org_id, course_id))
+                    repo.conn.commit()
+                    _rebuild_graph_async(d["settings"], caller.org_id, course_id)
+                    graph_rebuild = "started"
 
                 return {"deleted": True, "material_id": target_id,
-                        "graph_rebuild": "started"}
+                        "graph_rebuild": graph_rebuild}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
