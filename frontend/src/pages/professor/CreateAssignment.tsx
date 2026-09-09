@@ -31,7 +31,8 @@ export default function CreateAssignment() {
   const [title, setTitle] = useState('');
   const [qCount, setQCount] = useState(8);
   const [duration, setDuration] = useState(30);
-  const [difficulty, setDifficulty] = useState<Difficulty>('balanced');
+  // Difficulty is fixed to "balanced" (recall + reasoning) for now — no picker.
+  const difficulty: Difficulty = 'balanced';
   const [assignmentType, setAssignmentType] = useState<AssignmentType>('assignment');
   // Topics (concept-graph labels) this assignment draws from. Empty = whole
   // course (all topics). This is the ONLY scoping control — class sessions/weeks
@@ -672,8 +673,9 @@ export default function CreateAssignment() {
           </span>
         </label>
 
-        {/* Number of questions + Duration + Difficulty */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {/* Number of questions + Duration. Difficulty is hard-coded to
+            "balanced" (recall + reasoning) for now — no picker. */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Number of Questions</label>
             <input
@@ -694,18 +696,6 @@ export default function CreateAssignment() {
               min={5} max={180}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Difficulty Focus</label>
-            <select
-              value={difficulty}
-              onChange={(e) => setDifficulty(e.target.value as Difficulty)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="recall">Recall — definitions & facts</option>
-              <option value="balanced">Balanced — recall + reasoning</option>
-              <option value="deep">Deep — causal reasoning</option>
-            </select>
           </div>
         </div>
 
