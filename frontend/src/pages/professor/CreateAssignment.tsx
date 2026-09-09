@@ -38,7 +38,8 @@ export default function CreateAssignment() {
   // course (all topics). This is the ONLY scoping control — class sessions/weeks
   // are no longer part of assignment creation.
   const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
-  const [scopeOpen, setScopeOpen] = useState(false);
+  // Topics list is expanded by default; the professor can collapse it.
+  const [scopeOpen, setScopeOpen] = useState(true);
   const [includeCase, setIncludeCase] = useState(false);
   const [building, setBuilding] = useState(false);
   const [publishing, setPublishing] = useState(false);
