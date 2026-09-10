@@ -142,6 +142,12 @@ def migrate() -> None:
             print(f"applying {migration_018.name} ...")
             cur.execute(migration_018.read_text())
 
+        # Always apply migration_019 (qg_test_run bench history + grant; idempotent)
+        migration_019 = db_dir / "migration_019_qg_test_run.sql"
+        if migration_019.exists():
+            print(f"applying {migration_019.name} ...")
+            cur.execute(migration_019.read_text())
+
     conn.commit()
     print("all schemas applied")
 
