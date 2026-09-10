@@ -136,6 +136,12 @@ def migrate() -> None:
             print(f"applying {migration_017.name} ...")
             cur.execute(migration_017.read_text())
 
+        # Always apply migration_018 (agent_simulation_turn transcript; idempotent)
+        migration_018 = db_dir / "migration_018_agent_simulation_turn.sql"
+        if migration_018.exists():
+            print(f"applying {migration_018.name} ...")
+            cur.execute(migration_018.read_text())
+
     conn.commit()
     print("all schemas applied")
 

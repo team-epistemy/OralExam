@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Bot, Loader2, Play, AlertCircle, Users, BarChart3 } from 'lucide-react';
+import {
+  Bot, Loader2, Play, AlertCircle, Users, BarChart3,
+  ChevronDown, ChevronRight, MessageSquare, ClipboardCheck,
+} from 'lucide-react';
 import { ApiError } from '../../api/client';
 import {
   listAdminAssignments, createSimulation, getSimulation, listSimulations,
-  type SimReport,
+  type SimReport, type SimAgent, type SimPerQuestion,
 } from '../../api/simulations';
 
 const CURVES = [
@@ -24,6 +27,146 @@ function Bar({ value, className = '' }: { value: number; className?: string }) {
   return (
     <div className={`h-2 bg-gray-100 rounded-full overflow-hidden ${className}`}>
       <div className={`h-full rounded-full ${scoreColor(value)}`} style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+    </div>
+  );
+}
+
+function pill(text: string, tone: 'ok' | 'bad' | 'neutral' | 'gold') {
+  const tones = {
+    ok: 'bg-green-50 text-green-700 border-green-200',
+    bad: 'bg-red-50 text-red-600 border-red-200',
+    neutral: 'bg-gray-50 text-gray-600 border-gray-200',
+    gold: 'bg-amber-50 text-amber-700 border-amber-200',
+  } as const;
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded border text-[11px] leading-tight ${tones[tone]}`}>
+      {text}
+    </span>
+  );
+}
+
+// Detail for one question the agent took: rubric it was graded on, the turn-by-turn
+// transcript (question/probe → answer → grader verdict), and the score breakdown.
+function QuestionDetail({ pq }: { pq: SimPerQuestion }) {
+  const r = pq.rubric;
+  const b = pq.breakdown;
+  const demonstrated = new Set((b?.nodes_demonstrated ?? []).map((s) => s.toLowerCase()));
+  return (
+    <div className="border border-gray-200 rounded-lg overflow-hidden">
+      <div className="flex items-start gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200">
+        <span className="mt-0.5 text-xs font-medium text-gray-400 shrink-0">Q</span>
+        <p className="flex-1 text-sm text-gray-800">{pq.question || pq.topic}</p>
+        <span className="text-sm font-bold text-gray-900 tabular-nums">{pq.score}</span>
+      </div>
+
+      <div className="p-3 space-y-3">
+        {/* Rubric — what the answer was measured against */}
+        {r && (r.nodes.length > 0 || r.edges.length > 0) && (
+          <div>
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 mb-1.5">
+              <ClipboardCheck className="w-3.5 h-3.5" /> Rubric — expected reasoning path
+            </div>
+            {r.nodes.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-1.5">
+                {r.nodes.map((n) => pill(
+                  n, demonstrated.has(n.toLowerCase()) ? 'ok' : 'neutral',
+                ))}
+              </div>
+            )}
+            {r.edges.length > 0 && (
+              <ul className="space-y-0.5">
+                {r.edges.map((e, i) => (
+                  <li key={i} className="text-[11px] text-gray-500">
+                    <span className="text-gray-700">{e.src}</span>
+                    <span className="mx-1 text-amber-600">→[{e.link_type}]</span>
+                    <span className="text-gray-700">{e.dst}</span>
+                    {e.explanation && <span className="text-gray-400"> — {e.explanation}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-[11px] text-gray-400 mt-1">
+              Green = demonstrated with understanding · grey = expected but not shown.
+            </p>
+          </div>
+        )}
+
+        {/* Transcript */}
+        <div>
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 mb-1.5">
+            <MessageSquare className="w-3.5 h-3.5" /> Transcript
+          </div>
+          <div className="space-y-2">
+            {(pq.transcript ?? []).map((t, i) => (
+              <div key={i} className="rounded border border-gray-100 bg-white">
+                <div className="px-2.5 py-1.5 border-b border-gray-100 text-xs text-gray-600">
+                  <span className="font-medium text-gray-400">
+                    {t.is_probe ? `Probe (round ${t.round})` : 'Question'}:
+                  </span>{' '}
+                  {t.prompt}
+                </div>
+                <div className="px-2.5 py-1.5 text-sm text-gray-800">
+                  <span className="font-medium text-gray-400 text-xs">Answer:</span> {t.answer}
+                </div>
+                <div className="px-2.5 py-1.5 border-t border-gray-100 flex flex-wrap items-center gap-1.5">
+                  {pill(t.adequate ? 'adequate' : 'not adequate', t.adequate ? 'ok' : 'bad')}
+                  {t.recitation_score != null &&
+                    pill(`recitation ${t.recitation_score.toFixed(2)}`,
+                      t.recitation_score >= 0.6 ? 'bad' : 'neutral')}
+                  {t.nodes_demonstrated.map((n) => pill(n, 'ok'))}
+                  {t.novel_extensions.map((n) => pill(`+${n}`, 'gold'))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Score breakdown */}
+        {b && b.kind === 'eds' && (
+          <div className="text-[11px] text-gray-500 bg-gray-50 rounded p-2 space-y-0.5">
+            <div className="font-semibold text-gray-600 mb-0.5">Why this score</div>
+            <div>
+              node coverage <b className="text-gray-700">{b.node_score}</b> ·
+              edge coverage <b className="text-gray-700">{b.edge_score}</b> ·
+              authenticity R <b className="text-gray-700">{b.authenticity_R}</b> ·
+              generativity <b className="text-gray-700">{b.generativity}</b>
+            </div>
+            {(b.edges_demonstrated?.length ?? 0) > 0 && (
+              <div>causal links shown: {b.edges_demonstrated!.join(', ')}</div>
+            )}
+            <div className="text-gray-400 font-mono">{b.formula}</div>
+          </div>
+        )}
+        {b && b.kind === 'legacy' && (
+          <p className="text-[11px] text-gray-400">{b.note}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AgentRow({ agent }: { agent: SimAgent }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-b border-gray-100 last:border-0">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-3 py-2 text-sm text-left hover:bg-gray-50 rounded px-1"
+      >
+        {open ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+        <span className="w-8 text-gray-400 tabular-nums">#{agent.index}</span>
+        <span className="w-24 text-xs text-gray-500">skill {agent.skill.toFixed(2)}</span>
+        <div className="flex-1"><Bar value={agent.score} /></div>
+        <span className="w-10 text-right font-medium text-gray-900 tabular-nums">{agent.score}</span>
+        <span className="w-24 text-right text-xs text-gray-400">
+          {agent.adequate}/{agent.questions} adequate
+        </span>
+      </button>
+      {open && (
+        <div className="pl-8 pr-1 pb-3 space-y-2">
+          {agent.per_q.map((pq, i) => <QuestionDetail key={i} pq={pq} />)}
+        </div>
+      )}
     </div>
   );
 }
@@ -59,23 +202,14 @@ function Report({ report }: { report: SimReport }) {
         </div>
       </div>
 
-      {/* Per-agent table */}
+      {/* Per-agent table — expand a row for the full transcript + rubric + scoring */}
       <div className="bg-white border border-gray-200 rounded-lg p-4">
         <h3 className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-2">
           <Users className="w-4 h-4" /> Agents ({report.num_agents}) — competence vs. score
         </h3>
-        <div className="space-y-2">
-          {report.agents.map((a) => (
-            <div key={a.index} className="flex items-center gap-3 text-sm">
-              <span className="w-8 text-gray-400 tabular-nums">#{a.index}</span>
-              <span className="w-24 text-xs text-gray-500">skill {a.skill.toFixed(2)}</span>
-              <div className="flex-1"><Bar value={a.score} /></div>
-              <span className="w-10 text-right font-medium text-gray-900 tabular-nums">{a.score}</span>
-              <span className="w-24 text-right text-xs text-gray-400">
-                {a.adequate}/{a.questions} adequate
-              </span>
-            </div>
-          ))}
+        <p className="text-xs text-gray-400 -mt-2 mb-2">Click an agent to see every question, answer, the rubric, and why it scored what it did.</p>
+        <div>
+          {report.agents.map((a) => <AgentRow key={a.index} agent={a} />)}
         </div>
       </div>
 

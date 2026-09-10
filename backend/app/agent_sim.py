@@ -112,15 +112,43 @@ def _legacy_score(answered: bool, adequate: bool) -> float:
 
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
+def _node_label(n) -> str:
+    """A node in an expected path may be a {label, definition} dict or a bare
+    string; return its label either way."""
+    return (n.get("label", "") if isinstance(n, dict) else str(n)) or ""
+
+
+def _edge_descriptor(e) -> dict:
+    """Normalize an expected edge (dict or string) to {src, dst, link_type, explanation}."""
+    if isinstance(e, dict):
+        return {"src": e.get("src", ""), "dst": e.get("dst", ""),
+                "link_type": e.get("link_type", ""), "explanation": e.get("explanation", "")}
+    return {"src": str(e), "dst": "", "link_type": "", "explanation": ""}
+
+
+def _rubric_from_path(expected: dict) -> dict:
+    """Human-readable rubric (what the agent is measured against) from the
+    expected reasoning path: node labels, edge descriptors, and extensions."""
+    nodes = [lbl for lbl in (_node_label(n) for n in (expected.get("nodes") or [])) if lbl]
+    edges = [_edge_descriptor(e) for e in (expected.get("edges") or [])]
+    extensions = [lbl for lbl in (_node_label(x) for x in (expected.get("extensions") or [])) if lbl]
+    return {"nodes": nodes, "edges": edges, "extensions": extensions,
+            "has_eds": bool(nodes)}
+
+
 def take_question(question: dict, directive: str, answer_fn: Callable,
                   eval_fn: Callable, max_followups: int) -> dict:
     """Answer one question, following probes until adequate or the cap. Returns
-    {topic, turns, adequate, answered, score(0-100)}."""
+    {topic, turns, adequate, answered, score(0-100)} plus the full transcript
+    (question/probe → answer → grader verdict per turn), the rubric it was
+    graded against, and the EDS score breakdown — so the report can explain
+    every score, not just report it."""
     qtext = question.get("text", "")
     expected = question.get("expected_path") or {}
     has_eds = bool(expected.get("nodes"))
 
     prior, node_sets, edge_sets, recit, ext_sets = [], [], [], [], []
+    transcript = []
     probe = None
     answered = adequate = False
     turns = 0
@@ -131,25 +159,92 @@ def take_question(question: dict, directive: str, answer_fn: Callable,
         prior.append(ans)
         answered = bool(ev.get("answered", False)) or answered
         adequate = bool(ev.get("adequate", False))
+        nodes_dem = (ev.get("nodes_demonstrated", []) or []) if has_eds else []
+        edges_dem = (ev.get("edges_demonstrated", []) or []) if has_eds else []
+        exts = (ev.get("novel_extensions", []) or []) if has_eds else []
+        recit_s = float(ev.get("recitation_score", 0.5)) if has_eds else None
         if has_eds:
-            node_sets.append(ev.get("nodes_demonstrated", []) or [])
-            edge_sets.append(ev.get("edges_demonstrated", []) or [])
-            ext_sets.append(ev.get("novel_extensions", []) or [])
-            recit.append(float(ev.get("recitation_score", 0.5)))
-        probe = (ev.get("probe") or "").strip()
+            node_sets.append(nodes_dem)
+            edge_sets.append(edges_dem)
+            ext_sets.append(exts)
+            recit.append(recit_s)
+        next_probe = (ev.get("probe") or "").strip()
+        transcript.append({
+            "round": turns,
+            "prompt": probe if probe else qtext,
+            "is_probe": bool(probe),
+            "answer": ans,
+            "answered": answered,
+            "adequate": adequate,
+            "nodes_demonstrated": nodes_dem,
+            "edges_demonstrated": edges_dem,
+            "novel_extensions": exts,
+            "recitation_score": recit_s,
+            "probe": next_probe,
+        })
+        probe = next_probe
         if adequate or not probe:
             break
 
     if has_eds:
         score = eds_from_components(expected, node_sets, edge_sets, recit, ext_sets)
+        breakdown = _score_breakdown(expected, node_sets, edge_sets, recit, ext_sets)
     else:
         score = _legacy_score(answered, adequate)
+        breakdown = {"kind": "legacy",
+                     "note": "No expected reasoning path for this question; scored "
+                             "0 (no answer) / 40 (answered) / 100 (adequate)."}
     return {
         "topic": question.get("topic", "general"),
+        "question": qtext,
         "turns": turns,
         "answered": answered,
         "adequate": adequate,
         "score": round(score * 100),
+        "rubric": _rubric_from_path(expected),
+        "transcript": transcript,
+        "breakdown": breakdown,
+    }
+
+
+def _score_breakdown(expected: dict, nodes_sets: List[list], edge_idx_sets: List[list],
+                     recitation_scores: List[float], extension_sets: List[list]) -> dict:
+    """Explain the EDS score: which expected nodes/edges the agent demonstrated
+    (union across turns), the authenticity factor R, and each formula term."""
+    exp_nodes = [_node_label(n) for n in (expected.get("nodes") or [])]
+    exp_edges = expected.get("edges", []) or []
+    exp_ext = expected.get("extensions", []) or []
+    all_nodes, all_edges, all_ext = set(), set(), set()
+    for s in nodes_sets:
+        all_nodes.update(s or [])
+    for s in edge_idx_sets:
+        all_edges.update(s or [])
+    for s in extension_sets:
+        all_ext.update(s or [])
+    min_recit = min(recitation_scores) if recitation_scores else 0.5
+    R = 1.0 - min_recit
+    node_score = len(all_nodes) / max(len(exp_nodes), 1)
+    edge_score = len(all_edges) / max(len(exp_edges), 1)
+    gen = min(1.0, len(all_ext) / max(len(exp_ext), 3))
+    coverage = (node_score + edge_score) / 2.0
+    demonstrated_edges = []
+    for i in sorted(x for x in all_edges if isinstance(x, int) and 0 <= x < len(exp_edges)):
+        e = _edge_descriptor(exp_edges[i])
+        demonstrated_edges.append(f"{e['src']} → {e['dst']}".strip(" →"))
+    return {
+        "kind": "eds",
+        "nodes_expected": exp_nodes,
+        "nodes_demonstrated": sorted(all_nodes),
+        "edges_expected": len(exp_edges),
+        "edges_demonstrated": demonstrated_edges,
+        "node_score": round(node_score, 3),
+        "edge_score": round(edge_score, 3),
+        "recitation_min": round(min_recit, 3),
+        "authenticity_R": round(R, 3),
+        "generativity": round(gen, 3),
+        "novel_extensions": sorted(all_ext),
+        "formula": ("EDS = R·(α·node + β·edge) + γ·(1−R·coverage)·gen  "
+                    f"[α={EDS_ALPHA}, β={EDS_BETA}, γ={EDS_GAMMA}]"),
     }
 
 

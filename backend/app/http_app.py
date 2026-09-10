@@ -553,6 +553,7 @@ def _register_routes(app: FastAPI, deps) -> None:
     _register_course_ops(app, deps)
     _register_tts(app, deps)
     _register_admin_simulations(app, deps)
+    _register_admin_testing(app, deps)
 
 
 class CourseCreateRequest(BaseModel):
@@ -2427,6 +2428,121 @@ class AssignExamRequest(BaseModel):
     draft: bool = False
 
 
+def _build_question_dicts(settings, *, concepts, chunks, difficulty, domain, count):
+    """Author `count` oral-exam questions for the given concepts + chunks via
+    Bedrock and parse them into question dicts — NO DB writes.
+
+    This is the single source of truth for the generation prompt and parse. Both
+    the professor `generate_questions` endpoint and the admin QG test bench call
+    it, so the bench grades the EXACT questions students would get, not a copy.
+
+    Returns a list of dicts:
+      {question_id, topic, question, difficulty, concept_ids, expected_path}
+    """
+    import json as _json, uuid as _uuid  # noqa: F401  (uuid used for ids)
+
+    concept_descriptions = ""
+    if concepts:
+        concept_descriptions = "\n".join(
+            f"- {c.get('label', 'unknown')}"
+            + (f" ({c.get('definition', '')})" if c.get('definition') else "")
+            for c in concepts
+        )
+
+    combined_chunks = "\n\n---\n\n".join(chunks[:MAX_CHUNKS_FOR_GENERATION])
+
+    difficulty_guidance = {
+        "recall": (
+            "Generate questions focused on definitional accuracy and formula recall. "
+            "Questions should verify the student can correctly state key definitions, "
+            "identify components, and reproduce fundamental relationships."
+        ),
+        "balanced": (
+            "Generate questions that mix recall with causal reasoning. "
+            "Some questions should verify definitions, while others should require "
+            "the student to explain WHY something works, trace mechanisms, or "
+            "connect prerequisite concepts to their consequences."
+        ),
+        "deep": (
+            "Generate questions that probe deep causal understanding and high-hop "
+            "prerequisite chains. Questions should require the student to trace "
+            "multi-step causal mechanisms, synthesize across concepts, explain "
+            "trade-offs, and articulate why specific assumptions break down. "
+            "Never ask for simple definitions."
+        ),
+    }.get(difficulty, "Generate questions that mix recall with causal reasoning.")
+
+    system_prompt = (
+        "You are an expert Socratic oral examiner designing assessment questions "
+        "for university-level courses. Your questions must probe EPISTEMIC DEPTH — "
+        "they test whether a student truly understands causal mechanisms, not just "
+        "whether they can parrot definitions.\n\n"
+        "Design principles:\n"
+        "- Prefer 'explain why' and 'trace how' over 'define' or 'list'\n"
+        "- Questions should require articulating causal chains and mechanisms\n"
+        "- Each question should be standalone and clearly worded\n"
+        "- Questions should be answerable from the provided source material\n"
+        "- Frame questions as an oral examiner would ask them — direct, probing, "
+        "concise (1-2 sentences)\n"
+        "- Never ask trivial yes/no questions\n"
+        "- Target specific concept clusters from the knowledge graph\n\n"
+        f"Difficulty focus: {difficulty_guidance}\n\n"
+        "Return ONLY valid JSON. No markdown fences, no prose outside the JSON."
+    )
+
+    user_prompt = (
+        f"Domain: {domain}\n"
+        f"Difficulty: {difficulty}\n"
+        f"Number of questions to generate: {count}\n\n"
+    )
+
+    if concept_descriptions:
+        user_prompt += f"Concept graph (topics to examine):\n{concept_descriptions}\n\n"
+
+    if combined_chunks:
+        user_prompt += f"Source material:\n{combined_chunks}\n\n"
+
+    user_prompt += (
+        f"Generate exactly {count} oral exam questions. "
+        "For each question, return a JSON object with:\n"
+        '- "topic": the concept/topic this question targets (short label, 2-5 words)\n'
+        '- "question": the actual question text (1-2 sentences, Socratic style)\n'
+        '- "difficulty": one of "recall", "balanced", or "deep"\n'
+        '- "concept_ids": list of concept labels this question covers\n'
+        '- "expected_path": the expected reasoning path a strong student should demonstrate:\n'
+        '  {"nodes": [{"label": "concept name", "definition": "1-sentence definition"}] '
+        "-- the key concepts that must be DEMONSTRATED with understanding (not just named),\n"
+        '  "edges": [{"src": "concept_A", "dst": "concept_B", '
+        '"link_type": "CAUSES|ENABLES|PREVENTS|INCREASES|DECREASES", '
+        '"explanation": "1 sentence explaining the causal mechanism"}] '
+        "-- the causal links between concepts that must be ARTICULATED,\n"
+        '  "extensions": [{"label": "concept", "connection": "how this extends beyond the base expected path"}] '
+        "-- 1-3 bonus concepts for students who go deeper}\n\n"
+        'Return format: {"questions": [...]}'
+    )
+
+    data = call_bedrock(
+        settings, system_prompt, user_prompt,
+        max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.3,
+    )
+    questions_raw = data.get("questions", data if isinstance(data, list) else [])
+
+    out = []
+    for q in questions_raw:
+        if not isinstance(q, dict) or not q.get("question"):
+            continue
+        topic = q.get("topic", "general")
+        out.append({
+            "question_id": str(_uuid.uuid4()),
+            "topic": topic,
+            "question": q["question"],
+            "difficulty": q.get("difficulty", difficulty),
+            "concept_ids": q.get("concept_ids", [topic]),
+            "expected_path": q.get("expected_path", {}),
+        })
+    return out
+
+
 def _register_questions(app: FastAPI, deps) -> None:
     """Question generation (direct Bedrock Converse) and review endpoints."""
 
@@ -2481,126 +2597,26 @@ def _register_questions(app: FastAPI, deps) -> None:
                     return {"status": "error",
                             "message": "No course material or concepts found. Upload material and build the graph first."}
 
-                concept_descriptions = ""
-                if concepts:
-                    concept_descriptions = "\n".join(
-                        f"- {c.get('label', 'unknown')}"
-                        + (f" ({c.get('definition', '')})" if c.get('definition') else "")
-                        for c in concepts
-                    )
-
-                combined_chunks = "\n\n---\n\n".join(chunks[:MAX_CHUNKS_FOR_GENERATION])
-
-                difficulty_guidance = {
-                    "recall": (
-                        "Generate questions focused on definitional accuracy and formula recall. "
-                        "Questions should verify the student can correctly state key definitions, "
-                        "identify components, and reproduce fundamental relationships."
-                    ),
-                    "balanced": (
-                        "Generate questions that mix recall with causal reasoning. "
-                        "Some questions should verify definitions, while others should require "
-                        "the student to explain WHY something works, trace mechanisms, or "
-                        "connect prerequisite concepts to their consequences."
-                    ),
-                    "deep": (
-                        "Generate questions that probe deep causal understanding and high-hop "
-                        "prerequisite chains. Questions should require the student to trace "
-                        "multi-step causal mechanisms, synthesize across concepts, explain "
-                        "trade-offs, and articulate why specific assumptions break down. "
-                        "Never ask for simple definitions."
-                    ),
-                }.get(req.difficulty, "Generate questions that mix recall with causal reasoning.")
-
-                system_prompt = (
-                    "You are an expert Socratic oral examiner designing assessment questions "
-                    "for university-level courses. Your questions must probe EPISTEMIC DEPTH — "
-                    "they test whether a student truly understands causal mechanisms, not just "
-                    "whether they can parrot definitions.\n\n"
-                    "Design principles:\n"
-                    "- Prefer 'explain why' and 'trace how' over 'define' or 'list'\n"
-                    "- Questions should require articulating causal chains and mechanisms\n"
-                    "- Each question should be standalone and clearly worded\n"
-                    "- Questions should be answerable from the provided source material\n"
-                    "- Frame questions as an oral examiner would ask them — direct, probing, "
-                    "concise (1-2 sentences)\n"
-                    "- Never ask trivial yes/no questions\n"
-                    "- Target specific concept clusters from the knowledge graph\n\n"
-                    f"Difficulty focus: {difficulty_guidance}\n\n"
-                    "Return ONLY valid JSON. No markdown fences, no prose outside the JSON."
+                # Author the questions via the shared generation core (same logic
+                # the admin QG test bench exercises), then persist them as drafts.
+                stored_questions = _build_question_dicts(
+                    settings, concepts=concepts, chunks=chunks,
+                    difficulty=req.difficulty, domain=req.domain, count=req.count,
                 )
 
-                user_prompt = (
-                    f"Domain: {req.domain}\n"
-                    f"Difficulty: {req.difficulty}\n"
-                    f"Number of questions to generate: {req.count}\n\n"
-                )
-
-                if concept_descriptions:
-                    user_prompt += f"Concept graph (topics to examine):\n{concept_descriptions}\n\n"
-
-                if combined_chunks:
-                    user_prompt += f"Source material:\n{combined_chunks}\n\n"
-
-                user_prompt += (
-                    f"Generate exactly {req.count} oral exam questions. "
-                    "For each question, return a JSON object with:\n"
-                    '- "topic": the concept/topic this question targets (short label, 2-5 words)\n'
-                    '- "question": the actual question text (1-2 sentences, Socratic style)\n'
-                    '- "difficulty": one of "recall", "balanced", or "deep"\n'
-                    '- "concept_ids": list of concept labels this question covers\n'
-                    '- "expected_path": the expected reasoning path a strong student should demonstrate:\n'
-                    '  {"nodes": [{"label": "concept name", "definition": "1-sentence definition"}] '
-                    "-- the key concepts that must be DEMONSTRATED with understanding (not just named),\n"
-                    '  "edges": [{"src": "concept_A", "dst": "concept_B", '
-                    '"link_type": "CAUSES|ENABLES|PREVENTS|INCREASES|DECREASES", '
-                    '"explanation": "1 sentence explaining the causal mechanism"}] '
-                    "-- the causal links between concepts that must be ARTICULATED,\n"
-                    '  "extensions": [{"label": "concept", "connection": "how this extends beyond the base expected path"}] '
-                    "-- 1-3 bonus concepts for students who go deeper}\n\n"
-                    'Return format: {"questions": [...]}'
-                )
-
-                data = call_bedrock(
-                    settings, system_prompt, user_prompt,
-                    max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.3,
-                )
-                questions_raw = data.get("questions", data if isinstance(data, list) else [])
-
-                # Batch insert: collect all valid questions, then insert in one executemany call
-                stored_questions = []
                 insert_params = []
-                for q in questions_raw:
-                    if not isinstance(q, dict) or not q.get("question"):
-                        continue
-                    question_id = str(_uuid.uuid4())
-                    topic = q.get("topic", "general")
-                    text = q["question"]
-                    diff = q.get("difficulty", req.difficulty)
-                    concept_ids = q.get("concept_ids", [topic])
-                    expected_path = q.get("expected_path", {})
-
+                for sq in stored_questions:
+                    sq["status"] = "draft"
                     difficulty_json = _json.dumps({
-                        "level": diff,
-                        "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(diff, 0.55),
+                        "level": sq["difficulty"],
+                        "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(sq["difficulty"], 0.55),
                     })
-
                     insert_params.append((
-                        question_id, course_id, caller.org_id,
-                        _json.dumps(concept_ids), text,
+                        sq["question_id"], course_id, caller.org_id,
+                        _json.dumps(sq["concept_ids"]), sq["question"],
                         "oral", difficulty_json, caller.user_id,
-                        _json.dumps(expected_path),
+                        _json.dumps(sq["expected_path"]),
                     ))
-
-                    stored_questions.append({
-                        "question_id": question_id,
-                        "topic": topic,
-                        "question": text,
-                        "difficulty": diff,
-                        "concept_ids": concept_ids,
-                        "expected_path": expected_path,
-                        "status": "draft",
-                    })
 
                 if insert_params:
                     with repo.conn.cursor() as cur:
@@ -5436,6 +5452,55 @@ def _load_sim_questions(cur, assignment_id: str):
     return course_id, questions
 
 
+def _persist_sim_turns(conn, org_id, simulation_id, assignment_id, questions, report):
+    """Write one row per (agent × question × turn) to agent_simulation_turn — the
+    normalized, queryable transcript. Idempotent per simulation: clears any prior
+    rows for this simulation_id first. No-op if the table isn't present."""
+    import json as _json
+    from psycopg2.extras import execute_values
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.agent_simulation_turn')")
+        if cur.fetchone()[0] is None:
+            return
+        cur.execute("DELETE FROM agent_simulation_turn WHERE simulation_id = %s::uuid",
+                    (simulation_id,))
+        qid_by_index = {i: q.get("question_id") for i, q in enumerate(questions)}
+        rows = []
+        for agent in report.get("agents", []):
+            a_idx, a_skill = agent.get("index"), agent.get("skill")
+            for qi, pq in enumerate(agent.get("per_q", [])):
+                rubric = pq.get("rubric") or {}
+                breakdown = pq.get("breakdown") or {}
+                q_score = pq.get("score")
+                transcript = pq.get("transcript") or []
+                for t in transcript:
+                    rows.append((
+                        simulation_id, org_id, assignment_id, a_idx, a_skill,
+                        qid_by_index.get(qi), qi + 1, pq.get("question"), pq.get("topic"),
+                        t.get("round"), bool(t.get("is_probe")), t.get("prompt"),
+                        t.get("answer"), t.get("probe"), t.get("answered"), t.get("adequate"),
+                        t.get("recitation_score"),
+                        _json.dumps(t.get("nodes_demonstrated") or []),
+                        _json.dumps(t.get("edges_demonstrated") or []),
+                        _json.dumps(t.get("novel_extensions") or []),
+                        q_score, _json.dumps(rubric), _json.dumps(breakdown),
+                    ))
+        if rows:
+            execute_values(cur,
+                """INSERT INTO agent_simulation_turn
+                   (simulation_id, org_id, assignment_id, agent_index, agent_skill,
+                    question_id, question_index, question_text, topic, round, is_probe,
+                    prompt, answer, probe, answered, adequate, recitation_score,
+                    nodes_demonstrated, edges_demonstrated, novel_extensions,
+                    question_score, rubric, breakdown)
+                   VALUES %s""",
+                rows,
+                template="(%s::uuid,%s::uuid,%s::uuid,%s,%s,%s::uuid,%s,%s,%s,%s,%s,"
+                         "%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s::jsonb,%s::jsonb)")
+    conn.commit()
+    logger.info("sim %s: persisted %d transcript rows", simulation_id[:8], len(rows))
+
+
 def _run_simulation_bg(settings, org_id, simulation_id, assignment_id,
                        num_agents, curve, max_followups):
     """Background: ensure expected paths, run the cohort, persist the report."""
@@ -5484,6 +5549,12 @@ def _run_simulation_bg(settings, org_id, simulation_id, assignment_id,
             cur.execute("UPDATE agent_simulation SET status = 'completed', report = %s::jsonb WHERE simulation_id = %s::uuid",
                         (_json.dumps(report), simulation_id))
         conn.commit()
+        # Persist the normalized per-turn transcript (queryable analysis surface).
+        try:
+            _persist_sim_turns(conn, org_id, simulation_id, assignment_id, questions, report)
+        except Exception as exc:  # noqa: BLE001 - analysis rows are best-effort
+            conn.rollback()
+            logger.warning("sim %s: persisting turn rows failed: %s", simulation_id[:8], exc)
         logger.info("sim %s completed: %d agents, mean=%s", simulation_id[:8],
                     report["num_agents"], report["aggregate"]["mean"])
     except Exception as exc:  # noqa: BLE001
@@ -5753,6 +5824,272 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                         "created_at": r[6].isoformat() if r[6] else None,
                     })
                 return {"simulations": sims}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_SIMULATION_TURNS)
+    def list_simulation_turns(simulation_id: str, x_org_name: str = Header(...),
+                              x_user_id: str = Header("operator"),
+                              x_role: str = Header("platform_admin")):
+        """Normalized per-turn transcript for one simulation — the queryable
+        analysis surface (persisted so this LLM detail is never re-paid for)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.agent_simulation_turn')")
+                    if cur.fetchone()[0] is None:
+                        return {"turns": []}
+                    cur.execute(
+                        """SELECT agent_index, agent_skill, question_index, question_text,
+                                  topic, round, is_probe, prompt, answer, probe, answered,
+                                  adequate, recitation_score, nodes_demonstrated,
+                                  edges_demonstrated, novel_extensions, question_score
+                           FROM agent_simulation_turn
+                           WHERE simulation_id = %s::uuid AND org_id = %s::uuid
+                           ORDER BY agent_index, question_index, round""",
+                        (simulation_id, caller.org_id))
+                    cols = [c[0] for c in cur.description]
+                    turns = [dict(zip(cols, row)) for row in cur.fetchall()]
+                return {"turns": turns}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+class QGTestRunRequest(BaseModel):
+    """POST body to run the QG quality bench for one subject."""
+    course_id: str
+    count: int = Field(default=6, ge=1, le=MAX_QUESTION_COUNT)
+    difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
+    concept_ids: Optional[List[str]] = None
+    domain: str = Field(default="general", min_length=1, max_length=200)
+
+
+def _ensure_qg_test_table(repo) -> None:
+    """Create the qg_test_run history table on first use (non-owner-safe)."""
+    with repo.conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.qg_test_run')")
+        if cur.fetchone()[0] is not None:
+            return
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS qg_test_run (
+                   run_id UUID PRIMARY KEY,
+                   org_id UUID NOT NULL,
+                   course_id UUID NOT NULL,
+                   course_name TEXT,
+                   difficulty TEXT NOT NULL,
+                   requested_count INT NOT NULL,
+                   generated_count INT NOT NULL,
+                   report JSONB,
+                   status TEXT NOT NULL,
+                   error TEXT,
+                   created_by TEXT,
+                   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    repo.conn.commit()
+
+
+def _register_admin_testing(app: FastAPI, deps) -> None:
+    """platform_admin: the QG (question-generation) quality test bench.
+
+    Sources a real subject's concept graph, live-generates a question batch with
+    the SAME generator students get (``_build_question_dicts``), then grades it
+    with ``qg_bench.run_qg_checks`` against the graph + each question's
+    ``expected_path`` + real embeddings. Ephemeral: test questions are NEVER
+    persisted to the ``question`` table, only the run's report is kept for history.
+    """
+    from backend.app import qg_bench
+
+    def _admin_caller(api, x_user_id, x_role, x_org_name):
+        caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+        if caller.role != Role.PLATFORM_ADMIN:
+            raise AuthorizationError("platform_admin role required")
+        return caller
+
+    @app.get(R.ADMIN_TESTING_SUBJECTS)
+    def testing_subjects(x_org_name: str = Header(...),
+                         x_user_id: str = Header("operator"),
+                         x_role: str = Header("platform_admin")):
+        """Courses in the admin's org that have a concept graph to test against."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)   # RLS scopes course + graph_version
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT c.course_id, c.course_name,
+                                  COALESCE(g.node_count, 0), COALESCE(g.edge_count, 0)
+                           FROM course c
+                           LEFT JOIN graph_version g
+                             ON g.course_id = c.course_id AND g.is_active = true
+                           ORDER BY c.created_at DESC LIMIT 200""")
+                    rows = cur.fetchall()
+                subjects = [
+                    {"course_id": str(r[0]), "course_name": r[1],
+                     "node_count": r[2], "edge_count": r[3],
+                     "testable": (r[2] or 0) > 0}
+                    for r in rows]
+                return {"subjects": subjects}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.ADMIN_TESTING_RUNS)
+    def create_testing_run(req: QGTestRunRequest, x_org_name: str = Header(...),
+                           x_user_id: str = Header("operator"),
+                           x_role: str = Header("platform_admin")):
+        """Live-generate a batch for one subject and grade it — synchronous."""
+        import json as _json, uuid as _uuid
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                _ensure_qg_test_table(repo)
+                settings = d["settings"]
+
+                # 1. Source the subject + its concept graph (topics + causal edges).
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT course_name FROM course WHERE course_id = %s::uuid",
+                                (req.course_id,))
+                    crow = cur.fetchone()
+                if not crow:
+                    raise AuthorizationError("course not found")
+                course_name = crow[0]
+
+                graph_data = _query_graph_version(repo, caller.org_id, req.course_id)
+                concepts = graph_data.get("concepts", [])
+                if not concepts:
+                    return {"status": "error",
+                            "message": "This subject has no concept graph yet. Build the graph first."}
+
+                if req.concept_ids:
+                    sel = set(req.concept_ids)
+                    concepts = [c for c in concepts
+                                if c.get("label") in sel or c.get("id") in sel]
+
+                # 2. Load the same source material the real generator sees.
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
+                        (req.course_id,))
+                    chunks = [row[0] for row in cur.fetchall()]
+
+                # 3. Generate the batch with the SHARED generator core (no DB writes).
+                questions = _build_question_dicts(
+                    settings, concepts=concepts, chunks=chunks,
+                    difficulty=req.difficulty, domain=req.domain, count=req.count)
+
+                if not questions:
+                    return {"status": "error",
+                            "message": "The generator returned no usable questions. Try again."}
+
+                # 4. Real embeddings for QG-06 (semantic near-duplicate detection).
+                embeddings = None
+                try:
+                    embeddings = d["embedder"].embed([q["question"] for q in questions])
+                except Exception as exc:  # embedding is best-effort; QG-06 falls back to BoW
+                    logger.warning("QG bench: embedding failed, QG-06 uses bag-of-words: %s", exc)
+
+                # 5. Grade against the sourced graph + expected paths + embeddings.
+                report = qg_bench.run_qg_checks(
+                    course_name, graph_data, questions, embeddings=embeddings)
+
+                run_id = str(_uuid.uuid4())
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO qg_test_run
+                           (run_id, org_id, course_id, course_name, difficulty,
+                            requested_count, generated_count, report, status, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s, %s::jsonb, 'completed', %s)""",
+                        (run_id, caller.org_id, req.course_id, course_name, req.difficulty,
+                         req.count, len(questions), _json.dumps(report), caller.user_id))
+                repo.conn.commit()
+
+                return {"status": "completed", "run_id": run_id,
+                        "course_id": req.course_id, "course_name": course_name,
+                        "difficulty": req.difficulty, "generated_count": len(questions),
+                        "report": report}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_TESTING_RUNS)
+    def list_testing_runs(x_org_name: str = Header(...),
+                          x_user_id: str = Header("operator"),
+                          x_role: str = Header("platform_admin")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                _ensure_qg_test_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT run_id, course_id, course_name, difficulty,
+                                  generated_count, report, status, created_at
+                           FROM qg_test_run WHERE org_id = %s::uuid
+                           ORDER BY created_at DESC LIMIT 50""",
+                        (caller.org_id,))
+                    rows = cur.fetchall()
+                runs = []
+                for r in rows:
+                    report = r[5] if isinstance(r[5], dict) else None
+                    summary = (report or {}).get("summary") if report else None
+                    fails = sum(v.get("fail", 0) for v in (summary or {}).values())
+                    runs.append({
+                        "run_id": str(r[0]), "course_id": str(r[1]),
+                        "course_name": r[2], "difficulty": r[3],
+                        "generated_count": r[4], "status": r[6],
+                        "fail_count": fails,
+                        "created_at": r[7].isoformat() if r[7] else None,
+                    })
+                return {"runs": runs}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_TESTING_RUN)
+    def get_testing_run(run_id: str, x_org_name: str = Header(...),
+                        x_user_id: str = Header("operator"),
+                        x_role: str = Header("platform_admin")):
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                _ensure_qg_test_table(repo)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT course_id, course_name, difficulty, generated_count,
+                                  report, status, error, created_at
+                           FROM qg_test_run
+                           WHERE run_id = %s::uuid AND org_id = %s::uuid""",
+                        (run_id, caller.org_id))
+                    r = cur.fetchone()
+                if not r:
+                    raise AuthorizationError("test run not found")
+                return {
+                    "run_id": run_id, "course_id": str(r[0]), "course_name": r[1],
+                    "difficulty": r[2], "generated_count": r[3], "report": r[4],
+                    "status": r[5], "error": r[6],
+                    "created_at": r[7].isoformat() if r[7] else None,
+                }
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

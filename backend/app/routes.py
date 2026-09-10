@@ -87,6 +87,12 @@ ADMIN_ACTIVE_TASKS = "/api/admin/active-tasks"                  # GET app backgr
 ADMIN_ASSIGNMENTS = "/api/admin/assignments"                    # GET org assignments (picker)
 ADMIN_SIMULATIONS = "/api/admin/simulations"                    # POST create, GET list
 ADMIN_SIMULATION = "/api/admin/simulations/{simulation_id}"     # GET status + report
+ADMIN_SIMULATION_TURNS = "/api/admin/simulations/{simulation_id}/turns"  # GET transcript rows
+
+# ── Admin: QG (question-generation) quality test bench ──────────────────────
+ADMIN_TESTING_SUBJECTS = "/api/admin/testing/subjects"          # GET testable courses (graph-backed)
+ADMIN_TESTING_RUNS = "/api/admin/testing/runs"                  # POST run (generate+grade), GET history
+ADMIN_TESTING_RUN = "/api/admin/testing/runs/{run_id}"          # GET one run's full report
 
 
 def frontend_config() -> dict:
