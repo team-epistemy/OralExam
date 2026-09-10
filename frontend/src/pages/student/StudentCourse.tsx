@@ -1,12 +1,29 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
-import { PlayCircle, ChevronLeft, Dumbbell, ClipboardList, GraduationCap, Check } from 'lucide-react';
+import { PlayCircle, ChevronLeft, Dumbbell, ClipboardList, GraduationCap, Check, Clock, Award } from 'lucide-react';
 import { get } from '../../api/client';
 import type { StudentAssignment } from './Dashboard';
 
 interface StudentDashboardData {
   courses: { course_id: string; course_name: string }[];
   assignments: StudentAssignment[];
+}
+
+// One chip per card covering the student's attempt: untaken shows nothing, a
+// practice test ends at Completed (it is never graded), and a graded item moves
+// Completed -> Awaiting grade -> Graded. The score stays behind Results.
+export function attemptChip(a: StudentAssignment, type: string) {
+  if (!a.completed) return null;
+  if (type === 'practice') return { text: 'Completed', icon: Check, cls: 'text-green-700 bg-green-50 border-green-200' };
+  if (a.grade_status === 'released') return { text: 'Graded', icon: Award, cls: 'text-blue-700 bg-blue-50 border-blue-200' };
+  return { text: 'Awaiting grade', icon: Clock, cls: 'text-amber-700 bg-amber-50 border-amber-200' };
+}
+
+// Minutes if the item is timed, else null. The difficulty word ('Balanced') is
+// deliberately not surfaced to students — a timed item shows its limit instead.
+export function timeLimit(a: StudentAssignment): number | null {
+  const m = a.config?.time_limit_minutes ?? a.config?.duration_minutes;
+  return m && m > 0 ? m : null;
 }
 
 const SECTIONS = [
@@ -64,20 +81,20 @@ export default function StudentCourse() {
                   const startLabel = a.completed && type === 'practice'
                     ? 'Retake'
                     : type === 'practice' ? 'Start Practice' : type === 'exam' ? 'Start Exam' : 'Start';
+                  const chip = attemptChip(a, type);
                   return (
                     <div key={a.id} className="bg-white rounded-xl border-2 border-gray-200 p-5 hover:border-blue-300 transition-colors">
                       <div className="flex items-start justify-between gap-2">
                         <p className="font-semibold text-gray-900">{a.title}</p>
-                        {a.completed && (
-                          <span className="flex-shrink-0 inline-flex items-center gap-1 text-[11px] font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
-                            <Check className="w-3 h-3" /> Completed
+                        {chip && (
+                          <span className={`flex-shrink-0 inline-flex items-center gap-1 text-[11px] font-medium border rounded-full px-2 py-0.5 ${chip.cls}`}>
+                            <chip.icon className="w-3 h-3" /> {chip.text}
                           </span>
                         )}
                       </div>
                       <div className="flex gap-3 mt-1 text-xs text-gray-400">
-                        {a.config?.duration_minutes && <span>{a.config.duration_minutes} min</span>}
-                        {a.config?.difficulty && <span className="capitalize">{a.config.difficulty}</span>}
-                        {a.questions_count && <span>{a.questions_count} questions</span>}
+                        {timeLimit(a) && <span>{timeLimit(a)} min</span>}
+                        {!!a.questions_count && <span>{a.questions_count} questions</span>}
                       </div>
                       <div className="mt-4 flex gap-2">
                         <Link
