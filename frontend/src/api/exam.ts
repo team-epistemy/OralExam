@@ -99,7 +99,10 @@ export async function completeSession(sessionId: string): Promise<void> {
 export interface ExamResult {
   session_id: string;
   assignment_id: string;
-  score: number;
+  // null until the professor releases the grade on a graded item — the draft EDS
+  // is never shown to the student as a mark. Practice tests are always released.
+  score: number | null;
+  grade_released?: boolean;
   total_questions: number;
   questions_answered: number;
   feedback: string;
@@ -108,8 +111,8 @@ export interface ExamResult {
     question_id: string;
     question_text: string;
     answer: string;
-    score: number;
-    feedback: string;
+    score?: number;
+    feedback?: string;
     components?: EDSComponents | null;
   }[];
   completed_at: string;

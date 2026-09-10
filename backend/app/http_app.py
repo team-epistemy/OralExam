@@ -1587,21 +1587,32 @@ def _assignment_is_practice(cur, assignment_id: str) -> bool:
     return bool(row) and (row[0] or "assignment") == "practice"
 
 
+def _enrolled_sql(course_col: str) -> str:
+    """SQL predicate (2 params, both the student's lowercased email) for "this
+    student is enrolled in `course_col`". Enrolment is required — a course with an
+    empty roster is NOT open to the org, or every student would see every course.
+    public.enrollment is the email-keyed roster mirror; auth.enrollment is
+    authoritative (by app_user), so a course counts if either records the student."""
+    return f"""(EXISTS (SELECT 1 FROM enrollment e
+                        WHERE e.course_id = {course_col}
+                          AND lower(e.student_email) = %s)
+                OR EXISTS (SELECT 1 FROM auth.enrollment ae
+                           JOIN auth.app_user au ON au.id = ae.app_user_id
+                           WHERE ae.course_id = {course_col}
+                             AND lower(au.email) = %s))"""
+
+
 def _query_student_courses(repo, org_id: str, student_email: str) -> list:
-    """Courses a student can access: those with no roster (open) OR where the
-    student is enrolled — the same gate as assignment visibility, so the course
-    list and the assignments the student sees stay consistent."""
+    """Courses the student is enrolled in — the same gate as assignment
+    visibility, so the course list and the assignments stay consistent."""
     _ensure_enrollment_table(repo)
     email = (student_email or "").strip().lower()
     with repo.conn.cursor() as cur:
         cur.execute(
-            """SELECT course_id, course_name FROM course c
-               WHERE c.org_id = %s
-                 AND (NOT EXISTS (SELECT 1 FROM enrollment e WHERE e.course_id = c.course_id)
-                      OR EXISTS (SELECT 1 FROM enrollment e
-                                 WHERE e.course_id = c.course_id AND e.student_email = %s))
+            f"""SELECT course_id, course_name FROM course c
+               WHERE c.org_id = %s AND {_enrolled_sql('c.course_id')}
                ORDER BY course_name""",
-            (org_id, email),
+            (org_id, email, email),
         )
         rows = cur.fetchall()
     return [{"course_id": str(r[0]), "course_name": r[1]} for r in rows]
@@ -1689,12 +1700,10 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
                 caller = api.caller_for_org(x_user_id, x_role, x_org_name)
                 repo.set_tenant(caller.org_id)
 
-                # Roster-scoped: only courses the student is enrolled in (or open,
-                # rosterless courses) — not every course in the org.
+                # Roster-scoped: only courses the student is enrolled in — never
+                # every course in the org. caller.user_id is the student's email,
+                # which is what the roster gate matches on.
                 courses = _query_student_courses(repo, caller.org_id, caller.user_id)
-                # Pass the student's email so the roster gate matches — without it
-                # student_email defaults to "", which matches no roster entry, so
-                # every course that HAS a roster has its assignments hidden.
                 assignments = _query_student_assignments(repo, caller.org_id, caller.user_id)
 
                 return {
@@ -1728,8 +1737,8 @@ def _register_student_dashboard(app: FastAPI, deps) -> None:
 def _query_student_assignments(repo, org_id: str, student_email: str = "") -> list:
     """Active assignments for the student's enrolled courses.
 
-    A course with no roster stays open to everyone (backward-compatible); once a
-    roster exists, only enrolled students see that course's assignments."""
+    Enrolment is required: an empty roster hides the course rather than opening it
+    to the whole org (see _enrolled_sql)."""
     _ensure_enrollment_table(repo)
     email = (student_email or "").strip().lower()
     with repo.conn.cursor() as cur:
@@ -1741,15 +1750,16 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
                       a.created_at, c.course_name, a.course_id, {type_col},
                       EXISTS (SELECT 1 FROM exam_session es
                               WHERE es.assignment_id = a.assignment_id
-                                AND es.student_id = %s AND es.status = 'completed') AS completed
+                                AND es.student_id = %s AND es.status = 'completed') AS completed,
+                      (SELECT g.status FROM grade g
+                        WHERE g.assignment_id = a.assignment_id AND g.student_id = %s
+                        ORDER BY g.updated_at DESC LIMIT 1) AS grade_status
                FROM assignment a
                JOIN course c ON c.course_id = a.course_id
                WHERE a.org_id = %s AND a.status = 'active'
-                 AND (NOT EXISTS (SELECT 1 FROM enrollment e WHERE e.course_id = a.course_id)
-                      OR EXISTS (SELECT 1 FROM enrollment e
-                                 WHERE e.course_id = a.course_id AND e.student_email = %s))
+                 AND {_enrolled_sql('a.course_id')}
                ORDER BY a.created_at DESC""",
-            (email, org_id, email),
+            (email, email, org_id, email, email),
         )
         rows = cur.fetchall()
     return [
@@ -1764,6 +1774,9 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
             "assignment_type": r[7] or "assignment",
             "questions_count": (r[3] or {}).get("max_questions") if isinstance(r[3], dict) else None,
             "completed": bool(r[8]),
+            # None until a professor grades it, then 'pending' -> 'released'. The
+            # score itself stays behind Results; the card only shows which state.
+            "grade_status": r[9],
         }
         for r in rows
     ]
@@ -1855,8 +1868,31 @@ def _query_course_performance(repo, org_id: str, course_id: str) -> dict:
     return aggregate_performance(rows, label_of, bar=0.5)
 
 
-def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
-    """Assemble the caller's exam results from their most-recent session."""
+def _withhold_unreleased(results: dict) -> dict:
+    """Strip every score from a student's results until the professor releases them.
+
+    The auto EDS is an internal draft, not a mark: on a graded item the student
+    sees their own answers but no number until grade.status = 'released'. Practice
+    tests are exempt — they are never professor-graded, so EDS is all they have."""
+    return {
+        **results,
+        "grade_released": False,
+        "score": None,
+        "components": None,
+        "feedback": "Your professor hasn't released your grade yet.",
+        "question_results": [
+            {k: v for k, v in q.items() if k not in ("score", "components", "feedback")}
+            for q in results.get("question_results", [])
+        ],
+    }
+
+
+def _query_exam_results(repo, assignment_id: str, student_id: str,
+                        for_student: bool = False) -> dict:
+    """Assemble the caller's exam results from their most-recent session.
+
+    `for_student` gates unreleased scores (see _withhold_unreleased); professors
+    reviewing the same session always see the draft EDS."""
     with repo.conn.cursor() as cur:
         cur.execute(
             """SELECT session_id, status, completed_at FROM exam_session
@@ -1914,21 +1950,27 @@ def _query_exam_results(repo, assignment_id: str, student_id: str) -> dict:
             (session_id,),
         )
         grow = cur.fetchone()
-    if grow and grow[2] == "released":
+        is_practice = _assignment_is_practice(cur, assignment_id)
+    released = bool(grow) and grow[2] == "released"
+    if released:
         overall = round(float(grow[0]) * 100)
         comp = grow[1] if isinstance(grow[1], dict) else _json.loads(grow[1] or "{}")
         comment = comp.get("overall_comment")
         if comment:
             feedback = comment
 
-    return {
+    out = {
         "session_id": session_id, "assignment_id": assignment_id, "status": srow[1],
         "score": overall, "total_questions": total, "questions_answered": answered,
         "feedback": feedback,
         "components": components,
         "question_results": q_results,
         "completed_at": srow[2].isoformat() if srow[2] else None,
+        "grade_released": released or is_practice,
     }
+    if for_student and not is_practice and not released:
+        return _withhold_unreleased(out)
+    return out
 
 
 # ── M4 Graph ─────────────────────────────────────────────────────────────────
@@ -3847,7 +3889,8 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
                 caller = api.caller_for_org(x_user_id, x_role, x_org_name)
                 repo.set_tenant(caller.org_id)
-                return _query_exam_results(repo, assignment_id, caller.user_id)
+                return _query_exam_results(repo, assignment_id, caller.user_id,
+                                           for_student=caller.role != Role.PROFESSOR)
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

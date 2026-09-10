@@ -15,9 +15,14 @@ export interface StudentAssignment {
   course_name: string;
   status: string;
   assignment_type: 'practice' | 'assignment' | 'exam';
-  config: { difficulty?: string; duration_minutes?: number; max_questions?: number };
+  // Raw stored assignment config. Timed items carry time_limit_minutes;
+  // duration_minutes is the older key some rows still use.
+  config: { difficulty?: string; time_limit_minutes?: number; duration_minutes?: number; max_questions?: number };
   questions_count?: number;
   completed?: boolean;
+  // null/absent until a professor grades this student's attempt; the score stays
+  // behind the Results page, so only the state reaches the card.
+  grade_status?: 'pending' | 'released' | null;
   created_at: string;
 }
 
@@ -55,13 +60,8 @@ export default function StudentDashboard() {
 
   // Course grid is driven by the student's *enrollments* (data.courses), not by
   // the assignments — otherwise a course a professor just added the student to
-  // stays invisible until it has a visible assignment (issue S-E-2.3). Assignment
-  // counts are overlaid per course; a freshly-added course shows with 0 items.
-  const countByCourse = new Map<string, number>();
-  for (const a of assignments) {
-    const key = a.course_id || a.course_name;
-    countByCourse.set(key, (countByCourse.get(key) || 0) + 1);
-  }
+  // stays invisible until it has a visible assignment (issue S-E-2.3). Tiles
+  // carry the name only; item and grade state live inside the course.
   const enrolled = data?.courses || [];
   const seen = new Set(enrolled.map((c) => c.course_id));
   // Defensive: include any course that has assignments but is missing from the
@@ -73,11 +73,7 @@ export default function StudentDashboard() {
       extras.push({ course_id: a.course_id, course_name: a.course_name });
     }
   }
-  const courses = [...enrolled, ...extras].map((c) => ({
-    course_id: c.course_id,
-    course_name: c.course_name,
-    count: countByCourse.get(c.course_id) || 0,
-  }));
+  const courses = [...enrolled, ...extras];
 
   return (
     <div className="space-y-8">
@@ -99,7 +95,6 @@ export default function StudentDashboard() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="font-semibold text-gray-900 truncate">{c.course_name}</p>
-                <p className="text-sm text-gray-500">{c.count} active item{c.count !== 1 ? 's' : ''}</p>
               </div>
               <ChevronRight className="w-5 h-5 text-gray-300 flex-shrink-0" />
             </Link>
