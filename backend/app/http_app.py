@@ -5871,6 +5871,13 @@ class QGTestRunRequest(BaseModel):
     domain: str = Field(default="general", min_length=1, max_length=200)
 
 
+class QGHumanEvalRequest(BaseModel):
+    """PUT body: a reviewer's human evaluation of one generated question."""
+    verdict: Optional[str] = Field(default=None, pattern=r"^(good|needs_edit|reject)$")
+    rating: Optional[int] = Field(default=None, ge=1, le=5)
+    notes: Optional[str] = Field(default=None, max_length=4000)
+
+
 def _ensure_qg_test_table(repo) -> None:
     """Create the qg_test_run history table on first use (non-owner-safe)."""
     with repo.conn.cursor() as cur:
@@ -5892,6 +5899,47 @@ def _ensure_qg_test_table(repo) -> None:
                    created_by TEXT,
                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
     repo.conn.commit()
+
+
+def _persist_qg_questions(cur, run_id, org_id, course_id, questions, report):
+    """Save one row per generated question (text, difficulty, rubric + the
+    per-question automated QG verdicts) to qg_test_question, so the batch can be
+    human-evaluated later. No-op if the table isn't present."""
+    import json as _json
+    from collections import defaultdict
+    from psycopg2.extras import execute_values
+    cur.execute("SELECT to_regclass('public.qg_test_question')")
+    if cur.fetchone()[0] is None:
+        return
+    # Group the automated per-question verdicts by question id (skip batch checks).
+    by_qid = defaultdict(list)
+    for r in report.get("results", []):
+        rid = r.get("id")
+        if rid and rid != "BATCH":
+            by_qid[rid].append({"criterion": r.get("criterion"),
+                                "status": r.get("status"), "reasoning": r.get("reasoning")})
+    rows = []
+    for i, q in enumerate(questions):
+        qid = q.get("question_id") or ("Q%d" % (i + 1))
+        auto = by_qid.get(qid, [])
+        rows.append((
+            run_id, org_id, course_id, i + 1, q.get("question"),
+            q.get("_declared") or q.get("difficulty"), q.get("_classified"),
+            _json.dumps(q.get("concept_ids") or []),
+            _json.dumps(q.get("expected_path") or {}),
+            _json.dumps(auto),
+            sum(1 for a in auto if a["status"] == "pass"),
+            sum(1 for a in auto if a["status"] == "fail"),
+        ))
+    if rows:
+        execute_values(cur,
+            """INSERT INTO qg_test_question
+               (run_id, org_id, course_id, position, question_text,
+                declared_difficulty, classified_difficulty, concept_ids,
+                expected_path, auto_results, auto_pass, auto_fail)
+               VALUES %s""",
+            rows,
+            template="(%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s)")
 
 
 def _register_admin_testing(app: FastAPI, deps) -> None:
@@ -6015,6 +6063,9 @@ def _register_admin_testing(app: FastAPI, deps) -> None:
                            VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s, %s::jsonb, 'completed', %s)""",
                         (run_id, caller.org_id, req.course_id, course_name, req.difficulty,
                          req.count, len(questions), _json.dumps(report), caller.user_id))
+                    # Save each generated question + its automated verdicts for human eval.
+                    _persist_qg_questions(cur, run_id, caller.org_id, req.course_id,
+                                          questions, report)
                 repo.conn.commit()
 
                 return {"status": "completed", "run_id": run_id,
@@ -6090,6 +6141,75 @@ def _register_admin_testing(app: FastAPI, deps) -> None:
                     "status": r[5], "error": r[6],
                     "created_at": r[7].isoformat() if r[7] else None,
                 }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_TESTING_RUN_QUESTIONS)
+    def list_testing_run_questions(run_id: str, x_org_name: str = Header(...),
+                                   x_user_id: str = Header("operator"),
+                                   x_role: str = Header("platform_admin")):
+        """Per-question records for a run: text, difficulty, the automated QG
+        verdicts, and any human evaluation recorded so far."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.qg_test_question')")
+                    if cur.fetchone()[0] is None:
+                        return {"questions": []}
+                    cur.execute(
+                        """SELECT question_id, position, question_text, declared_difficulty,
+                                  classified_difficulty, concept_ids, expected_path,
+                                  auto_results, auto_pass, auto_fail, human_verdict,
+                                  human_rating, human_notes, reviewed_by, reviewed_at
+                           FROM qg_test_question
+                           WHERE run_id = %s::uuid AND org_id = %s::uuid
+                           ORDER BY position""",
+                        (run_id, caller.org_id))
+                    cols = [c[0] for c in cur.description]
+                    out = []
+                    for row in cur.fetchall():
+                        rec = dict(zip(cols, row))
+                        rec["question_id"] = str(rec["question_id"])
+                        rec["reviewed_at"] = (rec["reviewed_at"].isoformat()
+                                              if rec["reviewed_at"] else None)
+                        out.append(rec)
+                return {"questions": out}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.put(R.ADMIN_TESTING_QUESTION_EVAL)
+    def save_testing_question_eval(question_id: str, req: QGHumanEvalRequest,
+                                   x_org_name: str = Header(...),
+                                   x_user_id: str = Header("operator"),
+                                   x_role: str = Header("platform_admin")):
+        """Record (or update) a reviewer's human evaluation of one question."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE qg_test_question
+                           SET human_verdict = %s, human_rating = %s, human_notes = %s,
+                               reviewed_by = %s, reviewed_at = NOW()
+                           WHERE question_id = %s::uuid AND org_id = %s::uuid
+                           RETURNING question_id""",
+                        (req.verdict, req.rating, req.notes, caller.user_id,
+                         question_id, caller.org_id))
+                    if cur.fetchone() is None:
+                        raise AuthorizationError("question not found")
+                repo.conn.commit()
+                return {"status": "saved", "question_id": question_id}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

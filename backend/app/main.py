@@ -148,6 +148,12 @@ def migrate() -> None:
             print(f"applying {migration_019.name} ...")
             cur.execute(migration_019.read_text())
 
+        # Always apply migration_020 (qg_test_question per-question + human eval; idempotent)
+        migration_020 = db_dir / "migration_020_qg_test_question.sql"
+        if migration_020.exists():
+            print(f"applying {migration_020.name} ...")
+            cur.execute(migration_020.read_text())
+
     conn.commit()
     print("all schemas applied")
 

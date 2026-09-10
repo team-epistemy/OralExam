@@ -93,6 +93,8 @@ ADMIN_SIMULATION_TURNS = "/api/admin/simulations/{simulation_id}/turns"  # GET t
 ADMIN_TESTING_SUBJECTS = "/api/admin/testing/subjects"          # GET testable courses (graph-backed)
 ADMIN_TESTING_RUNS = "/api/admin/testing/runs"                  # POST run (generate+grade), GET history
 ADMIN_TESTING_RUN = "/api/admin/testing/runs/{run_id}"          # GET one run's full report
+ADMIN_TESTING_RUN_QUESTIONS = "/api/admin/testing/runs/{run_id}/questions"  # GET per-question + human eval
+ADMIN_TESTING_QUESTION_EVAL = "/api/admin/testing/questions/{question_id}/eval"  # PUT human eval
 
 
 def frontend_config() -> dict:
