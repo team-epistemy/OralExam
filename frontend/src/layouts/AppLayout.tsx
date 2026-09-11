@@ -36,7 +36,9 @@ function AdminNav() {
   const { pathname } = useLocation();
   const items = [
     { to: '/admin/professors', label: 'Professors' },
+    { to: '/admin/directory', label: 'Directory' },
     { to: '/admin/simulations', label: 'Simulations' },
+    { to: '/admin/testing', label: 'Testing' },
     { to: '/admin/tasks', label: 'Tasks' },
   ];
   return (

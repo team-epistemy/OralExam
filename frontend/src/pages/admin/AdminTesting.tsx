@@ -408,15 +408,23 @@ export default function AdminTesting() {
             {history.map((r) => (
               <button
                 key={r.run_id}
-                onClick={() => openRun.mutate(r.run_id)}
+                onClick={() => (r.status === 'running' ? setRunningId(r.run_id) : openRun.mutate(r.run_id))}
                 className="w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 hover:bg-gray-50"
               >
                 <span className="flex-1 min-w-0 truncate text-gray-800">{r.course_name}</span>
                 <span className="text-xs text-gray-400">{r.difficulty}</span>
                 <span className="text-xs text-gray-400 tabular-nums">{r.generated_count} q</span>
-                <span className={`text-xs font-medium tabular-nums ${r.fail_count > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                  {r.fail_count > 0 ? `${r.fail_count} fail` : 'all pass'}
-                </span>
+                {r.status === 'running' ? (
+                  <span className="text-xs font-medium text-blue-600 inline-flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Processing
+                  </span>
+                ) : r.status === 'failed' ? (
+                  <span className="text-xs font-medium text-red-600">failed</span>
+                ) : (
+                  <span className={`text-xs font-medium tabular-nums ${r.fail_count > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                    {r.fail_count > 0 ? `${r.fail_count} fail` : 'all pass'}
+                  </span>
+                )}
               </button>
             ))}
           </div>

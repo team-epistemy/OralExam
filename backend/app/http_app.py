@@ -5861,6 +5861,90 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
+    @app.get(R.ADMIN_PROFESSORS)
+    def list_professors(x_org_name: str = Header(...),
+                        x_user_id: str = Header("operator"),
+                        x_role: str = Header("platform_admin")):
+        """Every professor in the org mapped to their courses and each course's
+        enrolled students — a read-only view for debugging/analysis. Surfaces
+        roster mismatches (authoritative auth.enrollment vs the public.enrollment
+        mirror the professor UI reads) and courses with no owner."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    # Professors in this org.
+                    cur.execute(
+                        """SELECT email, status, created_at FROM auth.app_user
+                           WHERE role = 'professor' ORDER BY lower(email)""")
+                    profs = [{"email": r[0], "status": r[1],
+                              "created_at": r[2].isoformat() if r[2] else None}
+                             for r in cur.fetchall()]
+                    # Student counts in the org (for a small header stat).
+                    cur.execute("SELECT count(*) FROM auth.app_user WHERE role = 'student'")
+                    student_total_org = cur.fetchone()[0]
+                    # All courses in the org (created_by = owning professor email).
+                    cur.execute(
+                        """SELECT course_id, course_name, created_by, created_at
+                           FROM course ORDER BY lower(course_name)""")
+                    courses = [{"course_id": str(r[0]), "course_name": r[1],
+                                "created_by": r[2], "created_at": r[3].isoformat() if r[3] else None}
+                               for r in cur.fetchall()]
+                    # Authoritative rosters: auth.enrollment → auth.app_user (student email).
+                    cur.execute(
+                        """SELECT ae.course_id, su.email
+                           FROM auth.enrollment ae
+                           JOIN auth.app_user su ON su.id = ae.app_user_id
+                           ORDER BY lower(su.email)""")
+                    students_by_course: Dict[str, list] = {}
+                    for cid, email in cur.fetchall():
+                        students_by_course.setdefault(str(cid), []).append(email)
+                    # Public mirror counts (what the professor UI reads) — flag divergence.
+                    mirror_by_course: Dict[str, int] = {}
+                    cur.execute("SELECT to_regclass('public.enrollment')")
+                    if cur.fetchone()[0] is not None:
+                        cur.execute(
+                            "SELECT course_id, count(*) FROM enrollment WHERE org_id = %s::uuid GROUP BY course_id",
+                            (caller.org_id,))
+                        mirror_by_course = {str(r[0]): r[1] for r in cur.fetchall()}
+
+                def _course_obj(c):
+                    cid = c["course_id"]
+                    students = students_by_course.get(cid, [])
+                    roster = mirror_by_course.get(cid, 0)
+                    return {**c, "student_count": len(students), "roster_count": roster,
+                            "mismatch": len(students) != roster, "students": students}
+
+                by_owner: Dict[str, list] = {}
+                unassigned = []
+                prof_emails = {p["email"].lower() for p in profs}
+                for c in courses:
+                    obj = _course_obj(c)
+                    owner = (c.get("created_by") or "").lower()
+                    if owner and owner in prof_emails:
+                        by_owner.setdefault(owner, []).append(obj)
+                    else:
+                        unassigned.append(obj)
+
+                out_profs = []
+                for p in profs:
+                    pcourses = by_owner.get(p["email"].lower(), [])
+                    out_profs.append({
+                        **p,
+                        "course_count": len(pcourses),
+                        "student_total": sum(c["student_count"] for c in pcourses),
+                        "courses": pcourses,
+                    })
+                return {"professors": out_profs, "unassigned_courses": unassigned,
+                        "org_student_total": student_total_org}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
 
 class QGTestRunRequest(BaseModel):
     """POST body to run the QG quality bench for one subject."""
