@@ -5942,6 +5942,70 @@ def _persist_qg_questions(cur, run_id, org_id, course_id, questions, report):
             template="(%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s)")
 
 
+def _run_qg_test_bg(d, org_id, run_id, course_id, course_name, difficulty,
+                    count, concept_ids, domain):
+    """Background: generate a batch with the real generator, embed + grade it,
+    and persist the report + per-question rows. Updates the qg_test_run row to
+    'completed'/'failed'. Run off-request so a slow LLM batch can't hold the
+    HTTP connection past CloudFront's origin timeout (→ 504)."""
+    import json as _json
+    from backend.app import qg_bench
+    settings = d["settings"]
+    repo = _request_repo(d)
+    try:
+        repo.set_tenant(org_id)
+        graph_data = _query_graph_version(repo, org_id, course_id)
+        concepts = graph_data.get("concepts", [])
+        if concept_ids:
+            sel = set(concept_ids)
+            concepts = [c for c in concepts
+                        if c.get("label") in sel or c.get("id") in sel]
+        with repo.conn.cursor() as cur:
+            cur.execute("SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
+                        (course_id,))
+            chunks = [row[0] for row in cur.fetchall()]
+
+        questions = _build_question_dicts(
+            settings, concepts=concepts, chunks=chunks,
+            difficulty=difficulty, domain=domain, count=count)
+        if not questions:
+            raise RuntimeError("The generator returned no usable questions.")
+
+        embeddings = None
+        try:
+            embeddings = d["embedder"].embed([q["question"] for q in questions])
+        except Exception as exc:  # embedding is best-effort; QG-06 falls back to BoW
+            logger.warning("QG bench %s: embedding failed, QG-06 uses bag-of-words: %s",
+                           run_id[:8], exc)
+
+        report = qg_bench.run_qg_checks(
+            course_name, graph_data, questions, embeddings=embeddings)
+
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                """UPDATE qg_test_run SET status = 'completed', report = %s::jsonb,
+                          generated_count = %s
+                   WHERE run_id = %s::uuid AND org_id = %s::uuid""",
+                (_json.dumps(report), len(questions), run_id, org_id))
+            _persist_qg_questions(cur, run_id, org_id, course_id, questions, report)
+        repo.conn.commit()
+        logger.info("QG bench %s completed: %d questions", run_id[:8], len(questions))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("QG bench %s failed: %s", run_id[:8], exc, exc_info=True)
+        try:
+            repo.conn.rollback()
+            with repo.conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE qg_test_run SET status = 'failed', error = %s
+                       WHERE run_id = %s::uuid AND org_id = %s::uuid""",
+                    (str(exc)[:500], run_id, org_id))
+            repo.conn.commit()
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        _release_repo(d, repo)
+
+
 def _register_admin_testing(app: FastAPI, deps) -> None:
     """platform_admin: the QG (question-generation) quality test bench.
 
@@ -5994,8 +6058,14 @@ def _register_admin_testing(app: FastAPI, deps) -> None:
     def create_testing_run(req: QGTestRunRequest, x_org_name: str = Header(...),
                            x_user_id: str = Header("operator"),
                            x_role: str = Header("platform_admin")):
-        """Live-generate a batch for one subject and grade it — synchronous."""
-        import json as _json, uuid as _uuid
+        """Kick off a generate+grade run in the background and return immediately.
+
+        The heavy work (LLM generation, embeddings, grading) runs off-request in a
+        thread so it can't hold the HTTP connection past CloudFront's origin
+        timeout (which surfaced as intermittent 504s). The client polls
+        GET /runs/{id} until status flips to completed/failed.
+        """
+        import uuid as _uuid
 
         def _do():
             d = deps()
@@ -6005,9 +6075,8 @@ def _register_admin_testing(app: FastAPI, deps) -> None:
                 caller = _admin_caller(api, x_user_id, x_role, x_org_name)
                 repo.set_tenant(caller.org_id)
                 _ensure_qg_test_table(repo)
-                settings = d["settings"]
 
-                # 1. Source the subject + its concept graph (topics + causal edges).
+                # Fast validation only — subject exists and has a concept graph.
                 with repo.conn.cursor() as cur:
                     cur.execute("SELECT course_name FROM course WHERE course_id = %s::uuid",
                                 (req.course_id,))
@@ -6017,61 +6086,31 @@ def _register_admin_testing(app: FastAPI, deps) -> None:
                 course_name = crow[0]
 
                 graph_data = _query_graph_version(repo, caller.org_id, req.course_id)
-                concepts = graph_data.get("concepts", [])
-                if not concepts:
+                if not graph_data.get("concepts"):
                     return {"status": "error",
                             "message": "This subject has no concept graph yet. Build the graph first."}
 
-                if req.concept_ids:
-                    sel = set(req.concept_ids)
-                    concepts = [c for c in concepts
-                                if c.get("label") in sel or c.get("id") in sel]
-
-                # 2. Load the same source material the real generator sees.
-                with repo.conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
-                        (req.course_id,))
-                    chunks = [row[0] for row in cur.fetchall()]
-
-                # 3. Generate the batch with the SHARED generator core (no DB writes).
-                questions = _build_question_dicts(
-                    settings, concepts=concepts, chunks=chunks,
-                    difficulty=req.difficulty, domain=req.domain, count=req.count)
-
-                if not questions:
-                    return {"status": "error",
-                            "message": "The generator returned no usable questions. Try again."}
-
-                # 4. Real embeddings for QG-06 (semantic near-duplicate detection).
-                embeddings = None
-                try:
-                    embeddings = d["embedder"].embed([q["question"] for q in questions])
-                except Exception as exc:  # embedding is best-effort; QG-06 falls back to BoW
-                    logger.warning("QG bench: embedding failed, QG-06 uses bag-of-words: %s", exc)
-
-                # 5. Grade against the sourced graph + expected paths + embeddings.
-                report = qg_bench.run_qg_checks(
-                    course_name, graph_data, questions, embeddings=embeddings)
-
+                # Record a 'running' row, then generate + grade in the background.
                 run_id = str(_uuid.uuid4())
                 with repo.conn.cursor() as cur:
                     cur.execute(
                         """INSERT INTO qg_test_run
                            (run_id, org_id, course_id, course_name, difficulty,
-                            requested_count, generated_count, report, status, created_by)
-                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s, %s::jsonb, 'completed', %s)""",
+                            requested_count, generated_count, status, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, 0, 'running', %s)""",
                         (run_id, caller.org_id, req.course_id, course_name, req.difficulty,
-                         req.count, len(questions), _json.dumps(report), caller.user_id))
-                    # Save each generated question + its automated verdicts for human eval.
-                    _persist_qg_questions(cur, run_id, caller.org_id, req.course_id,
-                                          questions, report)
+                         req.count, caller.user_id))
                 repo.conn.commit()
 
-                return {"status": "completed", "run_id": run_id,
+                threading.Thread(
+                    target=_run_qg_test_bg,
+                    args=(d, caller.org_id, run_id, req.course_id, course_name,
+                          req.difficulty, req.count, req.concept_ids, req.domain),
+                    daemon=True).start()
+
+                return {"status": "running", "run_id": run_id,
                         "course_id": req.course_id, "course_name": course_name,
-                        "difficulty": req.difficulty, "generated_count": len(questions),
-                        "report": report}
+                        "difficulty": req.difficulty}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

@@ -264,15 +264,35 @@ export default function AdminTesting() {
   });
   const history = historyData?.runs || [];
 
+  // The run is now asynchronous: POST starts it and returns a run_id; we poll
+  // GET /runs/{id} until it flips to completed/failed. (Keeps the request short
+  // so a slow LLM batch can't trip CloudFront's origin timeout → 504.)
+  const [runningId, setRunningId] = useState<string | null>(null);
+
   const runMutation = useMutation({
     mutationFn: () => createTestRun({ course_id: courseId, difficulty, count }),
     onSuccess: (res) => {
-      setResult(res);
-      if (res.status === 'error') setError(res.message || 'Generation failed.');
-      queryClient.invalidateQueries({ queryKey: ['testing-runs'] });
+      if (res.status === 'error') { setError(res.message || 'Generation failed.'); return; }
+      setRunningId(res.run_id ?? null);   // begin polling
     },
     onError: (e) => setError(e instanceof ApiError ? e.message : 'Test run failed.'),
   });
+
+  const { data: polled } = useQuery({
+    queryKey: ['testing-run-poll', runningId],
+    queryFn: () => getTestRun(runningId as string),
+    enabled: !!runningId,
+    refetchInterval: (q) => (q.state.data && q.state.data.status !== 'running' ? false : 2000),
+  });
+
+  useEffect(() => {
+    if (polled && polled.status !== 'running') {
+      setResult(polled);
+      setRunningId(null);
+      if (polled.status === 'failed') setError(polled.error || 'Generation failed.');
+      queryClient.invalidateQueries({ queryKey: ['testing-runs'] });
+    }
+  }, [polled?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openRun = useMutation({
     mutationFn: (runId: string) => getTestRun(runId),
@@ -280,7 +300,8 @@ export default function AdminTesting() {
   });
 
   const selected = subjects.find((s) => s.course_id === courseId);
-  const busy = runMutation.isPending || openRun.isPending;
+  const running = runMutation.isPending || !!runningId;
+  const busy = running || openRun.isPending;
 
   const run = () => {
     if (!courseId) { setError('Pick a subject first.'); return; }
@@ -358,12 +379,12 @@ export default function AdminTesting() {
           disabled={busy || !courseId || (selected && !selected.testable)}
           className="inline-flex items-center gap-2 px-4 py-2 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light disabled:opacity-50"
         >
-          {runMutation.isPending
+          {running
             ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating &amp; grading…</>
             : <><Play className="w-4 h-4" /> Run tests</>}
         </button>
-        {runMutation.isPending && (
-          <p className="text-xs text-gray-400">Calling the live generator, then embedding + grading — this can take ~10–30s.</p>
+        {running && (
+          <p className="text-xs text-gray-400">Running in the background — generating, embedding, then grading. This can take ~10–60s; the report appears here when it's done.</p>
         )}
       </div>
 
