@@ -1587,30 +1587,47 @@ def _assignment_is_practice(cur, assignment_id: str) -> bool:
     return bool(row) and (row[0] or "assignment") == "practice"
 
 
-def _enrolled_sql(course_col: str) -> str:
-    """SQL predicate (2 params, both the student's lowercased email) for "this
-    student is enrolled in `course_col`". Enrolment is required — a course with an
-    empty roster is NOT open to the org, or every student would see every course.
-    public.enrollment is the email-keyed roster mirror; auth.enrollment is
-    authoritative (by app_user), so a course counts if either records the student."""
-    return f"""(EXISTS (SELECT 1 FROM enrollment e
-                        WHERE e.course_id = {course_col}
-                          AND lower(e.student_email) = %s)
-                OR EXISTS (SELECT 1 FROM auth.enrollment ae
-                           JOIN auth.app_user au ON au.id = ae.app_user_id
-                           WHERE ae.course_id = {course_col}
-                             AND lower(au.email) = %s))"""
+def _enrolled_sql(course_col: str, has_public_enrollment: bool = True) -> str:
+    """SQL predicate (ALWAYS 2 params, both the student's lowercased email) for
+    "this student is enrolled in `course_col`". Enrolment is required — a course
+    with an empty roster is NOT open to the org, or every student would see every
+    course. auth.enrollment (by app_user) is authoritative; public.enrollment is
+    the email-keyed mirror the professor UI writes.
+
+    public.enrollment is lazily created and absent on a fresh DB, and referencing
+    a missing relation errors at plan time (a runtime guard can't short-circuit
+    it). So when `has_public_enrollment` is False we fall back to the authoritative
+    auth roster for BOTH param slots — the param count stays 2 so every call site's
+    tuple is unchanged."""
+    auth_branch = f"""EXISTS (SELECT 1 FROM auth.enrollment ae
+                             JOIN auth.app_user au ON au.id = ae.app_user_id
+                             WHERE ae.course_id = {course_col}
+                               AND lower(au.email) = %s)"""
+    if not has_public_enrollment:
+        # No public.enrollment table: both email params route to the authoritative
+        # auth roster (X OR X == X); nothing references the missing relation.
+        return f"({auth_branch}\n                OR {auth_branch})"
+    public_branch = f"""EXISTS (SELECT 1 FROM enrollment e
+                               WHERE e.course_id = {course_col}
+                                 AND lower(e.student_email) = %s)"""
+    return f"({public_branch}\n                OR {auth_branch})"
+
+
+def _has_public_enrollment(cur) -> bool:
+    """True when the lazily-created public.enrollment mirror exists."""
+    cur.execute("SELECT to_regclass('public.enrollment')")
+    return cur.fetchone()[0] is not None
 
 
 def _query_student_courses(repo, org_id: str, student_email: str) -> list:
     """Courses the student is enrolled in — the same gate as assignment
     visibility, so the course list and the assignments stay consistent."""
-    _ensure_enrollment_table(repo)
     email = (student_email or "").strip().lower()
     with repo.conn.cursor() as cur:
+        has_pub = _has_public_enrollment(cur)
         cur.execute(
             f"""SELECT course_id, course_name FROM course c
-               WHERE c.org_id = %s AND {_enrolled_sql('c.course_id')}
+               WHERE c.org_id = %s AND {_enrolled_sql('c.course_id', has_pub)}
                ORDER BY course_name""",
             (org_id, email, email),
         )
@@ -1739,9 +1756,9 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
 
     Enrolment is required: an empty roster hides the course rather than opening it
     to the whole org (see _enrolled_sql)."""
-    _ensure_enrollment_table(repo)
     email = (student_email or "").strip().lower()
     with repo.conn.cursor() as cur:
+        has_pub = _has_public_enrollment(cur)
         cur.execute("""SELECT 1 FROM information_schema.columns
                        WHERE table_name='assignment' AND column_name='assignment_type'""")
         type_col = "a.assignment_type" if cur.fetchone() is not None else "'assignment'"
@@ -1757,7 +1774,7 @@ def _query_student_assignments(repo, org_id: str, student_email: str = "") -> li
                FROM assignment a
                JOIN course c ON c.course_id = a.course_id
                WHERE a.org_id = %s AND a.status = 'active'
-                 AND {_enrolled_sql('a.course_id')}
+                 AND {_enrolled_sql('a.course_id', has_pub)}
                ORDER BY a.created_at DESC""",
             (email, email, org_id, email, email),
         )
