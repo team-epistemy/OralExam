@@ -1086,9 +1086,11 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           <p className="text-gray-500 text-sm mb-5">
             {attemptedCount} of {N} questions answered &middot; {N - attemptedCount} skipped.
           </p>
-          <div className="flex justify-center mb-6">
-            <EDSGauge score={edsScore} />
-          </div>
+          {showDraftScores && (
+            <div className="flex justify-center mb-6">
+              <EDSGauge score={edsScore} />
+            </div>
+          )}
           {statusList}
 
           <div className={`rounded-lg p-3 max-w-lg mx-auto mb-6 text-sm ${isPractice ? 'bg-blue-50 border border-blue-200 text-blue-800' : 'bg-amber-50 border border-amber-200 text-gray-700'}`}>
@@ -1492,21 +1494,24 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           </div>
         </div>
 
-        {/* Right sidebar: EDS score */}
+        {/* Right sidebar: progress, plus the live EDS on ungraded work only */}
         <div className="w-64 flex-shrink-0 hidden lg:block">
           <div className="border border-gray-200 rounded-xl overflow-hidden">
-            {/* Score display */}
-            <div className="p-5 text-center">
-              <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-3">
-                Epistemic Depth Score
-              </p>
-              <EDSGauge score={edsScore} />
-              <EDSBreakdown components={cur?.edsComponents ?? null} />
-              <EDSExplainer className="mt-3 text-left" />
-            </div>
+            {/* Score display — hidden on assignments and exams: the mark is the
+                professor's to release, so no draft number appears mid-attempt. */}
+            {showDraftScores && (
+              <div className="p-5 text-center">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-3">
+                  Epistemic Depth Score
+                </p>
+                <EDSGauge score={edsScore} />
+                <EDSBreakdown components={cur?.edsComponents ?? null} />
+                <EDSExplainer className="mt-3 text-left" />
+              </div>
+            )}
 
             {/* Progress summary */}
-            <div className="border-t border-gray-100 px-4 py-3">
+            <div className={`px-4 py-3 ${showDraftScores ? 'border-t border-gray-100' : ''}`}>
               <div className="flex justify-between text-xs mb-1.5">
                 <span className="text-gray-500 font-semibold uppercase tracking-wide">
                   Progress
