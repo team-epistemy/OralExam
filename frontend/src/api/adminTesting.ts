@@ -35,8 +35,9 @@ export interface QGReport {
 }
 
 export interface TestRunResult {
-  status: string;                 // "completed" | "error"
-  message?: string;               // present when status === "error"
+  status: string;                 // "running" | "completed" | "failed" | "error"
+  message?: string;               // present when status === "error" (validation)
+  error?: string | null;          // present when status === "failed" (async run error)
   run_id?: string;
   course_id?: string;
   course_name?: string;
