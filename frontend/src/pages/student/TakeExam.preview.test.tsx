@@ -37,7 +37,8 @@ function renderPreview() {
 
 // Advance from the readiness screen into the taking phase (banner lives there).
 async function enterTaking() {
-  const startBtn = await screen.findByRole('button', { name: /start exam/i });
+  // The Start button is named after the item type ('Start Assignment', etc).
+  const startBtn = await screen.findByRole('button', { name: /^start /i });
   fireEvent.click(startBtn);
 }
 

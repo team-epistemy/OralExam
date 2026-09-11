@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { PlayCircle, ChevronLeft, Dumbbell, ClipboardList, GraduationCap, Check, Clock, Award } from 'lucide-react';
 import { get } from '../../api/client';
 import type { StudentAssignment } from './Dashboard';
+import { typeNoun } from '../../assignmentType';
 
 interface StudentDashboardData {
   courses: { course_id: string; course_name: string }[];
@@ -78,9 +79,8 @@ export default function StudentCourse() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {items.map((a) => {
-                  const startLabel = a.completed && type === 'practice'
-                    ? 'Retake'
-                    : type === 'practice' ? 'Start Practice' : type === 'exam' ? 'Start Exam' : 'Start';
+                  // Verb + the item's own type, never 'Exam' for everything.
+                  const startLabel = `${a.completed && type === 'practice' ? 'Retake' : 'Start'} ${typeNoun(type)}`;
                   const chip = attemptChip(a, type);
                   return (
                     <div key={a.id} className="bg-white rounded-xl border-2 border-gray-200 p-5 hover:border-blue-300 transition-colors">
