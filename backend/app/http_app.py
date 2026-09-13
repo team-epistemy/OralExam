@@ -1911,10 +1911,21 @@ def _query_exam_results(repo, assignment_id: str, student_id: str,
     `for_student` gates unreleased scores (see _withhold_unreleased); professors
     reviewing the same session always see the draft EDS."""
     with repo.conn.cursor() as cur:
+        # Pick the session that represents the result, not merely the newest one:
+        # a graded session wins, then any completed session, then most recent. This
+        # keeps Results consistent with the "Graded" chip even if a stray later
+        # session exists (e.g. an abandoned retake), which otherwise showed no
+        # grade and no transcript.
         cur.execute(
-            """SELECT session_id, status, completed_at FROM exam_session
-               WHERE assignment_id = %s::uuid AND student_id = %s
-               ORDER BY started_at DESC LIMIT 1""",
+            """SELECT es.session_id, es.status, es.completed_at
+               FROM exam_session es
+               LEFT JOIN grade g ON g.session_id = es.session_id
+               WHERE es.assignment_id = %s::uuid AND es.student_id = %s
+               ORDER BY (g.grade_id IS NOT NULL) DESC,
+                        (es.status = 'completed') DESC,
+                        es.completed_at DESC NULLS LAST,
+                        es.started_at DESC
+               LIMIT 1""",
             (assignment_id, student_id),
         )
         srow = cur.fetchone()
@@ -3944,6 +3955,23 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 if not arow:
                     raise AuthorizationError("assignment not found")
                 is_preview = _start_is_preview(arow[4], arow[5], caller.role, caller.user_id)
+
+                # Single-attempt enforcement: assignments and exams can't be retaken
+                # once completed — only practice tests may be re-taken. Previews (a
+                # professor's dry run) never count and are always allowed.
+                if not is_preview:
+                    with repo.conn.cursor() as cur:
+                        if not _assignment_is_practice(cur, assignment_id):
+                            cur.execute(
+                                """SELECT 1 FROM exam_session
+                                   WHERE assignment_id = %s::uuid AND student_id = %s
+                                         AND status = 'completed' LIMIT 1""",
+                                (assignment_id, caller.user_id),
+                            )
+                            if cur.fetchone():
+                                raise AuthorizationError(
+                                    "This assignment has already been submitted and "
+                                    "can't be retaken.")
 
                 course_id = str(arow[1])
                 question_set_id = str(arow[2])

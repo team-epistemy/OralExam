@@ -82,6 +82,9 @@ export default function StudentCourse() {
                   // Verb + the item's own type, never 'Exam' for everything.
                   const startLabel = `${a.completed && type === 'practice' ? 'Retake' : 'Start'} ${typeNoun(type)}`;
                   const chip = attemptChip(a, type);
+                  // Assignments and exams are single-attempt — once completed, only
+                  // Results is offered. Practice tests can always be re-taken.
+                  const canStart = !a.completed || type === 'practice';
                   return (
                     <div key={a.id} className="bg-white rounded-xl border-2 border-gray-200 p-5 hover:border-blue-300 transition-colors">
                       <div className="flex items-start justify-between gap-2">
@@ -97,16 +100,18 @@ export default function StudentCourse() {
                         {!!a.questions_count && <span>{a.questions_count} questions</span>}
                       </div>
                       <div className="mt-4 flex gap-2">
-                        <Link
-                          to={`/student/exam/${a.id}`}
-                          className="flex items-center justify-center gap-2 flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-                        >
-                          <PlayCircle className="w-4 h-4" />
-                          {startLabel}
-                        </Link>
+                        {canStart && (
+                          <Link
+                            to={`/student/exam/${a.id}`}
+                            className="flex items-center justify-center gap-2 flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                          >
+                            <PlayCircle className="w-4 h-4" />
+                            {startLabel}
+                          </Link>
+                        )}
                         <Link
                           to={`/student/results/${a.id}`}
-                          className="flex items-center justify-center px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+                          className={`flex items-center justify-center px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors ${canStart ? '' : 'flex-1'}`}
                         >
                           Results
                         </Link>
