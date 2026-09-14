@@ -3,7 +3,10 @@
 Regression: an empty roster used to mean "open to the whole org", so every
 student saw every course any professor created. These tests pin the SQL gate
 (the queries are raw SQL, so a recording cursor stands in for Postgres)."""
-from backend.app.http_app import (
+import pytest
+
+pytest.importorskip("fastapi")  # http_app imports fastapi at module load; CI runs lean deps
+from backend.app.http_app import (  # noqa: E402
     _enrolled_sql, _query_student_courses, _query_student_assignments,
     _query_exam_results, _withhold_unreleased,
 )
