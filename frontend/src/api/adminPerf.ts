@@ -43,15 +43,33 @@ export interface PerfResult {
 export interface PerfProbe {
   probe_id: string;
   status: 'running' | 'completed' | 'failed' | 'not_found';
-  progress?: { done: number; total: number };
-  result?: PerfResult;
-  error?: string;
+  result?: PerfResult | null;
+  error?: string | null;
 }
 
-export function startPerfProbe(runs: number): Promise<PerfProbe> {
+export interface PerfListItem {
+  probe_id: string;
+  runs: number;
+  status: string;
+  provider: string | null;
+  eval_model: string | null;
+  tts_model: string | null;
+  eval_p50_ms: number | null;
+  tts_p50_ms: number | null;
+  total_p50_ms: number | null;
+  path_penalty_ms: number | null;
+  created_by: string | null;
+  created_at: string | null;
+}
+
+export function startPerfProbe(runs: number): Promise<{ probe_id?: string; status: string; message?: string }> {
   return post('/api/admin/perf/probe', { runs });
 }
 
 export function getPerfProbe(id: string): Promise<PerfProbe> {
   return get(`/api/admin/perf/probe/${id}`);
+}
+
+export function listPerfProbes(): Promise<{ probes: PerfListItem[] }> {
+  return get('/api/admin/perf/probes');
 }

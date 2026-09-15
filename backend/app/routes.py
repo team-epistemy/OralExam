@@ -86,6 +86,7 @@ GRADE_OVERRIDE = "/api/grades/{grade_id}/override"
 ADMIN_ACTIVE_TASKS = "/api/admin/active-tasks"                  # GET app background jobs + ECS deploy status
 ADMIN_PROFESSORS = "/api/admin/professors"                      # GET professors → courses → enrolled students
 ADMIN_PERF_PROBE = "/api/admin/perf/probe"                      # POST start an end-to-end latency probe
+ADMIN_PERF_PROBES = "/api/admin/perf/probes"                    # GET saved probe history
 ADMIN_PERF_PROBE_GET = "/api/admin/perf/probe/{probe_id}"       # GET probe status + results
 ADMIN_ASSIGNMENTS = "/api/admin/assignments"                    # GET org assignments (picker)
 ADMIN_SIMULATIONS = "/api/admin/simulations"                    # POST create, GET list

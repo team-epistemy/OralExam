@@ -179,11 +179,6 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
 _INFLIGHT_REBUILDS: Dict[str, str] = {}
 _INFLIGHT_LOCK = threading.Lock()
 
-# Admin performance probe results, kept in-memory (transient diagnostic; a single
-# ECS task serves the poll, so no shared store is needed). probe_id -> {status, ...}.
-_PERF_PROBES: Dict[str, dict] = {}
-_PERF_LOCK = threading.Lock()
-
 
 def _clear_stale_flag(settings, org_id: str, course_id: str) -> None:
     """Clear is_stale on a course's active graph (RLS-scoped to org_id)."""
@@ -6051,13 +6046,22 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
             repo = _request_repo(d)
             try:
                 api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
-                _admin_caller(api, x_user_id, x_role, x_org_name)  # platform_admin gate
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)  # platform_admin gate
+                repo.set_tenant(caller.org_id)
                 probe_id = str(_uuid.uuid4())
-                with _PERF_LOCK:
-                    _PERF_PROBES[probe_id] = {"status": "running",
-                                              "progress": {"done": 0, "total": req.runs}}
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.perf_probe')")
+                    if cur.fetchone()[0] is None:
+                        return {"status": "error",
+                                "message": "perf_probe table not present — run the migration."}
+                    cur.execute(
+                        """INSERT INTO perf_probe (probe_id, org_id, runs, status, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s, 'running', %s)""",
+                        (probe_id, caller.org_id, req.runs, caller.user_id))
+                repo.conn.commit()
                 threading.Thread(target=_run_perf_probe_bg,
-                                 args=(d["settings"], probe_id, req.runs), daemon=True).start()
+                                 args=(d["settings"], caller.org_id, probe_id, req.runs),
+                                 daemon=True).start()
                 return {"probe_id": probe_id, "status": "running", "runs": req.runs}
             finally:
                 _release_repo(d, repo)
@@ -6067,18 +6071,61 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
     def get_perf_probe(probe_id: str, x_org_name: str = Header(...),
                        x_user_id: str = Header("operator"),
                        x_role: str = Header("platform_admin")):
-        """Poll a performance probe's status/results."""
+        """Poll one performance probe's status + full result (incl. traces)."""
         def _do():
             d = deps()
             repo = _request_repo(d)
             try:
                 api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
-                _admin_caller(api, x_user_id, x_role, x_org_name)
-                with _PERF_LOCK:
-                    p = _PERF_PROBES.get(probe_id)
-                if not p:
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.perf_probe')")
+                    if cur.fetchone()[0] is None:
+                        return {"probe_id": probe_id, "status": "not_found"}
+                    cur.execute(
+                        """SELECT status, result, error FROM perf_probe
+                           WHERE probe_id = %s::uuid AND org_id = %s::uuid""",
+                        (probe_id, caller.org_id))
+                    row = cur.fetchone()
+                if not row:
                     return {"probe_id": probe_id, "status": "not_found"}
-                return {"probe_id": probe_id, **p}
+                return {"probe_id": probe_id, "status": row[0], "result": row[1], "error": row[2]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_PERF_PROBES)
+    def list_perf_probes(x_org_name: str = Header(...),
+                         x_user_id: str = Header("operator"),
+                         x_role: str = Header("platform_admin")):
+        """History of saved performance probes for the org (newest first)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.perf_probe')")
+                    if cur.fetchone()[0] is None:
+                        return {"probes": []}
+                    cur.execute(
+                        """SELECT probe_id, runs, status, provider, eval_model, tts_model,
+                                  eval_p50_ms, tts_p50_ms, total_p50_ms, path_penalty_ms,
+                                  created_by, created_at
+                           FROM perf_probe WHERE org_id = %s::uuid
+                           ORDER BY created_at DESC LIMIT 50""",
+                        (caller.org_id,))
+                    cols = [c[0] for c in cur.description]
+                    out = []
+                    for r in cur.fetchall():
+                        rec = dict(zip(cols, r))
+                        rec["probe_id"] = str(rec["probe_id"])
+                        rec["created_at"] = rec["created_at"].isoformat() if rec["created_at"] else None
+                        out.append(rec)
+                return {"probes": out}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -6169,11 +6216,42 @@ def _persist_qg_questions(cur, run_id, org_id, course_id, questions, report):
             template="(%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s)")
 
 
-def _run_perf_probe_bg(settings, probe_id, runs):
+def _persist_perf_probe(settings, org_id, probe_id, status, result=None, error=None):
+    """Update the perf_probe row (owner-migrated table) with a run's outcome.
+    Best-effort: a missing table or write error is logged, not raised."""
+    import json as _json
+    conn = None
+    try:
+        conn = factory.db_connection(settings)
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
+            cur.execute("SELECT to_regclass('public.perf_probe')")
+            if cur.fetchone()[0] is None:
+                return
+            r = result or {}
+            cur.execute(
+                """UPDATE perf_probe SET status = %s, result = %s::jsonb, error = %s,
+                          provider = %s, eval_model = %s, tts_model = %s,
+                          eval_p50_ms = %s, tts_p50_ms = %s, total_p50_ms = %s, path_penalty_ms = %s
+                   WHERE probe_id = %s::uuid AND org_id = %s::uuid""",
+                (status, _json.dumps(r) if result else None, error,
+                 r.get("provider"), r.get("eval_model"), r.get("tts_model"),
+                 (r.get("eval_ms") or {}).get("p50"), (r.get("tts_ms") or {}).get("p50"),
+                 (r.get("total_per_answer_ms") or {}).get("p50"), r.get("first_answer_path_penalty_ms"),
+                 probe_id, org_id))
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("perf probe %s: persist failed: %s", probe_id[:8], exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _run_perf_probe_bg(settings, org_id, probe_id, runs):
     """Background: time the end-to-end student answer flow — the eval LLM call and
     the TTS round-trip per run, plus a one-off expected_path generation (the cost
-    a first answer to an un-prebuilt question pays). Stores results in _PERF_PROBES.
-    Bounded work, off-request, so the probe itself never trips a gateway timeout."""
+    a first answer to an un-prebuilt question pays). Persists to the perf_probe
+    table. Bounded work, off-request, so the probe never trips a gateway timeout."""
     import time as _t, statistics as _st, json as _json
     from backend.bedrock_helper import call_bedrock
     from backend import tts_helper
@@ -6228,8 +6306,6 @@ def _run_perf_probe_bg(settings, probe_id, runs):
                 sample_probe = probe_out
             if fb_out and not sample_feedback:
                 sample_feedback = fb_out
-            with _PERF_LOCK:
-                _PERF_PROBES[probe_id] = {"status": "running", "progress": {"done": i + 1, "total": runs}}
         # First-answer penalty: expected_path generation (only paid once, on an un-prebuilt question).
         pt0 = _t.time()
         try:
@@ -6257,12 +6333,10 @@ def _run_perf_probe_bg(settings, probe_id, runs):
             "sample_feedback": sample_feedback,
             "traces": traces,
         }
-        with _PERF_LOCK:
-            _PERF_PROBES[probe_id] = {"status": "completed", "result": result}
+        _persist_perf_probe(settings, org_id, probe_id, "completed", result=result)
     except Exception as exc:  # noqa: BLE001
         logger.warning("perf probe %s failed: %s", probe_id[:8], exc, exc_info=True)
-        with _PERF_LOCK:
-            _PERF_PROBES[probe_id] = {"status": "failed", "error": str(exc)[:300]}
+        _persist_perf_probe(settings, org_id, probe_id, "failed", error=str(exc)[:300])
 
 
 def _run_qg_test_bg(d, org_id, run_id, course_id, course_name, difficulty,

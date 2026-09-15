@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { Gauge, Loader2, Play, AlertCircle, Zap, Mic, Timer, AlertTriangle } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Gauge, Loader2, Play, AlertCircle, Zap, Mic, Timer, AlertTriangle, History } from 'lucide-react';
 import { ApiError } from '../../api/client';
-import { startPerfProbe, getPerfProbe, type PerfProbe, type PerfStat, type PerfTrace } from '../../api/adminPerf';
+import {
+  startPerfProbe, getPerfProbe, listPerfProbes,
+  type PerfProbe, type PerfStat, type PerfTrace,
+} from '../../api/adminPerf';
 
 function secs(ms: number) { return (ms / 1000).toFixed(2) + 's'; }
 
@@ -53,13 +56,17 @@ function StatCard({ icon: Icon, label, stat, tone = 'neutral', hint }: {
 }
 
 export default function AdminPerformance() {
+  const queryClient = useQueryClient();
   const [runs, setRuns] = useState(3);
   const [probeId, setProbeId] = useState<string | null>(null);
   const [error, setError] = useState('');
 
   const start = useMutation({
     mutationFn: () => startPerfProbe(runs),
-    onSuccess: (res) => { setError(''); setProbeId(res.probe_id); },
+    onSuccess: (res) => {
+      if (res.status === 'error' || !res.probe_id) { setError(res.message || 'Could not start probe.'); return; }
+      setError(''); setProbeId(res.probe_id);
+    },
     onError: (e) => setError(e instanceof ApiError ? e.message : 'Failed to start probe.'),
   });
 
@@ -73,8 +80,16 @@ export default function AdminPerformance() {
     },
   });
 
+  const { data: history } = useQuery({
+    queryKey: ['perf-probes'],
+    queryFn: listPerfProbes,
+  });
+
   useEffect(() => {
-    if (probe?.status === 'failed') setError(probe.error || 'Probe failed.');
+    if (probe && probe.status !== 'running') {
+      if (probe.status === 'failed') setError(probe.error || 'Probe failed.');
+      queryClient.invalidateQueries({ queryKey: ['perf-probes'] });
+    }
   }, [probe?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const running = start.isPending || probe?.status === 'running';
@@ -123,9 +138,9 @@ export default function AdminPerformance() {
           {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
           {running ? 'Probing…' : 'Run probe'}
         </button>
-        {running && probe?.progress && (
+        {running && (
           <p className="text-xs text-gray-400 -mt-2">
-            Round {probe.progress.done}/{probe.progress.total} · each round makes a live eval + TTS call, then one expected-path call.
+            Each round makes a live eval + TTS call; one expected-path call runs at the end. Result is saved for history.
           </p>
         )}
       </div>
@@ -185,6 +200,39 @@ export default function AdminPerformance() {
           <p className="text-xs text-gray-400">
             Measured server-side from the app environment (same region/network as production), averaged over {r.runs} run{r.runs === 1 ? '' : 's'}.
           </p>
+        </div>
+      )}
+
+      {/* Saved history */}
+      {history?.probes && history.probes.length > 0 && (
+        <div>
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+            <History className="w-4 h-4" /> Saved probes
+          </h2>
+          <div className="bg-white border border-gray-200 rounded-lg divide-y divide-gray-100">
+            {history.probes.map((p) => (
+              <button
+                key={p.probe_id}
+                onClick={() => { setProbeId(p.probe_id); setError(''); }}
+                className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 hover:bg-gray-50 ${p.probe_id === probeId ? 'bg-gray-50' : ''}`}
+              >
+                <span className="text-xs text-gray-400 w-36 shrink-0">{p.created_at ? new Date(p.created_at).toLocaleString() : ''}</span>
+                <span className="text-xs text-gray-400 w-14">{p.runs} run{p.runs === 1 ? '' : 's'}</span>
+                {p.status === 'running' && <span className="text-xs text-blue-600 inline-flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> running</span>}
+                {p.status === 'failed' && <span className="text-xs text-red-600">failed</span>}
+                <span className="flex-1" />
+                {p.status === 'completed' && (
+                  <>
+                    <span className="text-xs text-gray-700 tabular-nums">total {p.total_p50_ms != null ? (p.total_p50_ms / 1000).toFixed(2) + 's' : '—'}</span>
+                    <span className="text-xs text-gray-400 tabular-nums">eval {p.eval_p50_ms != null ? (p.eval_p50_ms / 1000).toFixed(1) + 's' : '—'}</span>
+                    <span className="text-xs text-gray-400 tabular-nums">tts {p.tts_p50_ms != null ? (p.tts_p50_ms / 1000).toFixed(1) + 's' : '—'}</span>
+                    <span className="text-xs text-amber-700 tabular-nums">path {p.path_penalty_ms != null ? (p.path_penalty_ms / 1000).toFixed(1) + 's' : '—'}</span>
+                  </>
+                )}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-gray-400 mt-1">Click a saved run to load its full trace breakdown above.</p>
         </div>
       )}
     </div>
