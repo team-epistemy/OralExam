@@ -6187,38 +6187,57 @@ def _run_perf_probe_bg(settings, probe_id, runs):
                   "student's answer; when adequate=false give a probe. TASK 2: identify demonstrated "
                   "nodes/edges. EXPECTED PATH:\n" + _json.dumps(expected) + "\nRespond ONLY with minified "
                   'JSON: {"answered":true,"adequate":false,"feedback":"..","probe":"..","eds":{}}')
-        ctx = ("Exam question: How does an increase in supply affect the equilibrium price?\n\n"
-               "Student's latest answer: When supply goes up the price usually falls because there's more "
-               "of the good available than people want at the old price, so sellers cut prices to clear it.")
-        probe_text = ("You said the price falls, but can you explain the mechanism: what happens to the "
-                      "quantity supplied at the original price, and how does that push the equilibrium price down?")
+        question_text = "How does an increase in supply affect the equilibrium price?"
+        answer_text = ("When supply goes up the price usually falls because there's more of the good "
+                       "available than people want at the old price, so sellers cut prices to clear it.")
+        ctx = f"Exam question: {question_text}\n\nStudent's latest answer: {answer_text}"
+        fallback_probe = ("You said the price falls, but can you explain the mechanism: what happens to the "
+                          "quantity supplied at the original price, and how does that push the price down?")
         eval_ms, tts_ms, total_ms = [], [], []
+        traces = []
         audio_bytes = 0
+        sample_probe = sample_feedback = ""
         for i in range(runs):
-            t0 = _t.time()
+            steps = []
+            # Step 1 — evaluation LLM (the response-processing cost); capture the probe it emits.
+            t0 = _t.time(); probe_out = fb_out = ""
             try:
-                call_bedrock(settings, system, ctx, max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1)
+                parsed = call_bedrock(settings, system, ctx, max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1)
+                if isinstance(parsed, dict):
+                    probe_out = (parsed.get("probe") or "").strip()
+                    fb_out = (parsed.get("feedback") or "").strip()
             except Exception:  # noqa: BLE001 - a failed call still yields a timing sample
                 pass
-            te = (_t.time() - t0) * 1000
+            te = round((_t.time() - t0) * 1000)
+            steps.append({"name": "eval_llm", "ms": te, "detail": getattr(settings, "anthropic_model", None)})
+            logger.info("perf-trace probe=%s run=%d step=eval_llm ms=%d", probe_id[:8], i + 1, te)
+            # Step 2 — TTS the examiner's probe (what the eval actually produced).
             t1 = _t.time()
             try:
-                a = tts_helper.synthesize(settings, probe_text)
+                a = tts_helper.synthesize(settings, probe_out or fallback_probe)
                 audio_bytes = len(a) if a else 0
             except Exception:  # noqa: BLE001
                 pass
-            tt = (_t.time() - t1) * 1000
-            eval_ms.append(round(te)); tts_ms.append(round(tt)); total_ms.append(round(te + tt))
+            tt = round((_t.time() - t1) * 1000)
+            steps.append({"name": "tts", "ms": tt, "detail": getattr(settings, "elevenlabs_model", None)})
+            logger.info("perf-trace probe=%s run=%d step=tts ms=%d bytes=%d", probe_id[:8], i + 1, tt, audio_bytes)
+
+            eval_ms.append(te); tts_ms.append(tt); total_ms.append(te + tt)
+            traces.append({"run": i + 1, "total_ms": te + tt, "steps": steps, "probe": probe_out})
+            if probe_out and not sample_probe:
+                sample_probe = probe_out
+            if fb_out and not sample_feedback:
+                sample_feedback = fb_out
             with _PERF_LOCK:
                 _PERF_PROBES[probe_id] = {"status": "running", "progress": {"done": i + 1, "total": runs}}
         # First-answer penalty: expected_path generation (only paid once, on an un-prebuilt question).
         pt0 = _t.time()
         try:
-            _generate_expected_path(settings, "How does an increase in supply affect the equilibrium price?",
-                                    ["Increase in supply", "Equilibrium price"])
+            _generate_expected_path(settings, question_text, ["Increase in supply", "Equilibrium price"])
         except Exception:  # noqa: BLE001
             pass
         path_ms = round((_t.time() - pt0) * 1000)
+        logger.info("perf-trace probe=%s step=expected_path_gen ms=%d", probe_id[:8], path_ms)
 
         def _summ(xs):
             return {"min": min(xs), "p50": round(_st.median(xs)), "max": max(xs), "runs": xs} if xs else {}
@@ -6232,6 +6251,11 @@ def _run_perf_probe_bg(settings, probe_id, runs):
             "total_per_answer_ms": _summ(total_ms),
             "first_answer_path_penalty_ms": path_ms,
             "tts_audio_bytes": audio_bytes,
+            "test_question": question_text,
+            "test_answer": answer_text,
+            "sample_probe": sample_probe,
+            "sample_feedback": sample_feedback,
+            "traces": traces,
         }
         with _PERF_LOCK:
             _PERF_PROBES[probe_id] = {"status": "completed", "result": result}

@@ -10,6 +10,19 @@ export interface PerfStat {
   runs: number[];
 }
 
+export interface PerfStep {
+  name: string;      // "eval_llm" | "tts"
+  ms: number;
+  detail: string | null;  // model id
+}
+
+export interface PerfTrace {
+  run: number;
+  total_ms: number;
+  steps: PerfStep[];
+  probe: string;     // the probe the eval produced this run
+}
+
 export interface PerfResult {
   runs: number;
   provider: string | null;
@@ -20,6 +33,11 @@ export interface PerfResult {
   total_per_answer_ms: PerfStat;
   first_answer_path_penalty_ms: number;
   tts_audio_bytes: number;
+  test_question: string;
+  test_answer: string;
+  sample_probe: string;
+  sample_feedback: string;
+  traces: PerfTrace[];
 }
 
 export interface PerfProbe {

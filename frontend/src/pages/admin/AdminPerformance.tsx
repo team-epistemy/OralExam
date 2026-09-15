@@ -2,9 +2,38 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Gauge, Loader2, Play, AlertCircle, Zap, Mic, Timer, AlertTriangle } from 'lucide-react';
 import { ApiError } from '../../api/client';
-import { startPerfProbe, getPerfProbe, type PerfProbe, type PerfStat } from '../../api/adminPerf';
+import { startPerfProbe, getPerfProbe, type PerfProbe, type PerfStat, type PerfTrace } from '../../api/adminPerf';
 
 function secs(ms: number) { return (ms / 1000).toFixed(2) + 's'; }
+
+const STEP_COLORS: Record<string, string> = { eval_llm: 'bg-amber-500', tts: 'bg-blue-500' };
+const STEP_LABELS: Record<string, string> = { eval_llm: 'Eval LLM', tts: 'TTS' };
+
+// Per-run waterfall: each run's total split into its step segments (eval + TTS),
+// scaled to the slowest run so runs are visually comparable.
+function TraceWaterfall({ traces }: { traces: PerfTrace[] }) {
+  const maxTotal = Math.max(1, ...traces.map((t) => t.total_ms));
+  return (
+    <div className="space-y-1.5">
+      {traces.map((t) => (
+        <div key={t.run} className="flex items-center gap-3 text-xs">
+          <span className="w-8 text-gray-400 tabular-nums">#{t.run}</span>
+          <div className="flex-1 flex h-6 rounded overflow-hidden bg-gray-100">
+            {t.steps.map((s, i) => (
+              <div key={i}
+                   className={`${STEP_COLORS[s.name] ?? 'bg-gray-400'} h-full flex items-center justify-center text-[10px] text-white whitespace-nowrap`}
+                   style={{ width: `${(s.ms / maxTotal) * 100}%` }}
+                   title={`${STEP_LABELS[s.name] ?? s.name}: ${s.ms} ms`}>
+                {s.ms / maxTotal > 0.12 ? `${(s.ms / 1000).toFixed(1)}s` : ''}
+              </div>
+            ))}
+          </div>
+          <span className="w-14 text-right tabular-nums text-gray-700">{secs(t.total_ms)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function StatCard({ icon: Icon, label, stat, tone = 'neutral', hint }: {
   icon: typeof Zap; label: string; stat: PerfStat; tone?: 'good' | 'warn' | 'bad' | 'neutral'; hint?: string;
@@ -132,6 +161,26 @@ export default function AdminPerformance() {
               </p>
             </div>
           </div>
+
+          {/* Per-run trace breakdown */}
+          {r.traces?.length > 0 && (
+            <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+              <h3 className="text-sm font-medium text-gray-700">Trace breakdown (per run)</h3>
+              <div className="flex items-center gap-4 text-[11px] text-gray-500">
+                <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-amber-500 inline-block" /> Eval LLM</span>
+                <span className="inline-flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-blue-500 inline-block" /> TTS</span>
+              </div>
+              <TraceWaterfall traces={r.traces} />
+              <div className="border-t border-gray-100 pt-3 text-xs text-gray-600 space-y-1.5">
+                <div><span className="text-gray-400">Test question:</span> {r.test_question}</div>
+                <div><span className="text-gray-400">Simulated answer:</span> {r.test_answer}</div>
+                {r.sample_probe && <div><span className="text-gray-400">Examiner probe (from eval):</span> {r.sample_probe}</div>}
+              </div>
+              <p className="text-[11px] text-gray-400">
+                Each step's latency is also logged to CloudWatch (filter <code>perf-trace</code>) for offline analysis.
+              </p>
+            </div>
+          )}
 
           <p className="text-xs text-gray-400">
             Measured server-side from the app environment (same region/network as production), averaged over {r.runs} run{r.runs === 1 ? '' : 's'}.
