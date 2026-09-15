@@ -179,6 +179,11 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
 _INFLIGHT_REBUILDS: Dict[str, str] = {}
 _INFLIGHT_LOCK = threading.Lock()
 
+# Admin performance probe results, kept in-memory (transient diagnostic; a single
+# ECS task serves the poll, so no shared store is needed). probe_id -> {status, ...}.
+_PERF_PROBES: Dict[str, dict] = {}
+_PERF_LOCK = threading.Lock()
+
 
 def _clear_stale_flag(settings, org_id: str, course_id: str) -> None:
     """Clear is_stale on a course's active graph (RLS-scoped to org_id)."""
@@ -6033,6 +6038,51 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
+    @app.post(R.ADMIN_PERF_PROBE)
+    def create_perf_probe(req: PerfProbeRequest, x_org_name: str = Header(...),
+                          x_user_id: str = Header("operator"),
+                          x_role: str = Header("platform_admin")):
+        """Start an end-to-end answer-flow latency probe (eval LLM + TTS per run,
+        plus a one-off expected_path generation). Runs in the background; poll the
+        GET endpoint for results."""
+        import uuid as _uuid
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                _admin_caller(api, x_user_id, x_role, x_org_name)  # platform_admin gate
+                probe_id = str(_uuid.uuid4())
+                with _PERF_LOCK:
+                    _PERF_PROBES[probe_id] = {"status": "running",
+                                              "progress": {"done": 0, "total": req.runs}}
+                threading.Thread(target=_run_perf_probe_bg,
+                                 args=(d["settings"], probe_id, req.runs), daemon=True).start()
+                return {"probe_id": probe_id, "status": "running", "runs": req.runs}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_PERF_PROBE_GET)
+    def get_perf_probe(probe_id: str, x_org_name: str = Header(...),
+                       x_user_id: str = Header("operator"),
+                       x_role: str = Header("platform_admin")):
+        """Poll a performance probe's status/results."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                _admin_caller(api, x_user_id, x_role, x_org_name)
+                with _PERF_LOCK:
+                    p = _PERF_PROBES.get(probe_id)
+                if not p:
+                    return {"probe_id": probe_id, "status": "not_found"}
+                return {"probe_id": probe_id, **p}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
 
 class QGTestRunRequest(BaseModel):
     """POST body to run the QG quality bench for one subject."""
@@ -6048,6 +6098,11 @@ class QGHumanEvalRequest(BaseModel):
     verdict: Optional[str] = Field(default=None, pattern=r"^(good|needs_edit|reject)$")
     rating: Optional[int] = Field(default=None, ge=1, le=5)
     notes: Optional[str] = Field(default=None, max_length=4000)
+
+
+class PerfProbeRequest(BaseModel):
+    """POST body: how many timed rounds the performance probe should run."""
+    runs: int = Field(default=3, ge=1, le=8)
 
 
 def _ensure_qg_test_table(repo) -> None:
@@ -6112,6 +6167,78 @@ def _persist_qg_questions(cur, run_id, org_id, course_id, questions, report):
                VALUES %s""",
             rows,
             template="(%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s)")
+
+
+def _run_perf_probe_bg(settings, probe_id, runs):
+    """Background: time the end-to-end student answer flow — the eval LLM call and
+    the TTS round-trip per run, plus a one-off expected_path generation (the cost
+    a first answer to an un-prebuilt question pays). Stores results in _PERF_PROBES.
+    Bounded work, off-request, so the probe itself never trips a gateway timeout."""
+    import time as _t, statistics as _st, json as _json
+    from backend.bedrock_helper import call_bedrock
+    from backend import tts_helper
+    try:
+        expected = {"nodes": [{"label": "Increase in supply", "definition": "more of the good is available"},
+                              {"label": "Equilibrium price", "definition": "price where supply meets demand"}],
+                    "edges": [{"src": "Increase in supply", "dst": "Equilibrium price", "link_type": "DECREASES",
+                               "explanation": "a rightward supply shift lowers the market-clearing price"}],
+                    "extensions": []}
+        system = ("You are an Epistemy Socratic oral examiner performing two tasks. TASK 1: evaluate the "
+                  "student's answer; when adequate=false give a probe. TASK 2: identify demonstrated "
+                  "nodes/edges. EXPECTED PATH:\n" + _json.dumps(expected) + "\nRespond ONLY with minified "
+                  'JSON: {"answered":true,"adequate":false,"feedback":"..","probe":"..","eds":{}}')
+        ctx = ("Exam question: How does an increase in supply affect the equilibrium price?\n\n"
+               "Student's latest answer: When supply goes up the price usually falls because there's more "
+               "of the good available than people want at the old price, so sellers cut prices to clear it.")
+        probe_text = ("You said the price falls, but can you explain the mechanism: what happens to the "
+                      "quantity supplied at the original price, and how does that push the equilibrium price down?")
+        eval_ms, tts_ms, total_ms = [], [], []
+        audio_bytes = 0
+        for i in range(runs):
+            t0 = _t.time()
+            try:
+                call_bedrock(settings, system, ctx, max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1)
+            except Exception:  # noqa: BLE001 - a failed call still yields a timing sample
+                pass
+            te = (_t.time() - t0) * 1000
+            t1 = _t.time()
+            try:
+                a = tts_helper.synthesize(settings, probe_text)
+                audio_bytes = len(a) if a else 0
+            except Exception:  # noqa: BLE001
+                pass
+            tt = (_t.time() - t1) * 1000
+            eval_ms.append(round(te)); tts_ms.append(round(tt)); total_ms.append(round(te + tt))
+            with _PERF_LOCK:
+                _PERF_PROBES[probe_id] = {"status": "running", "progress": {"done": i + 1, "total": runs}}
+        # First-answer penalty: expected_path generation (only paid once, on an un-prebuilt question).
+        pt0 = _t.time()
+        try:
+            _generate_expected_path(settings, "How does an increase in supply affect the equilibrium price?",
+                                    ["Increase in supply", "Equilibrium price"])
+        except Exception:  # noqa: BLE001
+            pass
+        path_ms = round((_t.time() - pt0) * 1000)
+
+        def _summ(xs):
+            return {"min": min(xs), "p50": round(_st.median(xs)), "max": max(xs), "runs": xs} if xs else {}
+        result = {
+            "runs": runs,
+            "provider": getattr(settings, "llm_provider", None),
+            "eval_model": getattr(settings, "anthropic_model", None),
+            "tts_model": getattr(settings, "elevenlabs_model", None),
+            "eval_ms": _summ(eval_ms),
+            "tts_ms": _summ(tts_ms),
+            "total_per_answer_ms": _summ(total_ms),
+            "first_answer_path_penalty_ms": path_ms,
+            "tts_audio_bytes": audio_bytes,
+        }
+        with _PERF_LOCK:
+            _PERF_PROBES[probe_id] = {"status": "completed", "result": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("perf probe %s failed: %s", probe_id[:8], exc, exc_info=True)
+        with _PERF_LOCK:
+            _PERF_PROBES[probe_id] = {"status": "failed", "error": str(exc)[:300]}
 
 
 def _run_qg_test_bg(d, org_id, run_id, course_id, course_name, difficulty,

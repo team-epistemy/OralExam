@@ -19,6 +19,7 @@ import AgentSimulations from './pages/admin/AgentSimulations';
 import AdminTasks from './pages/admin/AdminTasks';
 import AdminTesting from './pages/admin/AdminTesting';
 import AdminDirectory from './pages/admin/AdminDirectory';
+import AdminPerformance from './pages/admin/AdminPerformance';
 
 function getUser() {
   const raw = localStorage.getItem('user');
@@ -83,6 +84,10 @@ export const router = createBrowserRouter([
       {
         path: '/admin/directory',
         element: <RequireRole role="platform_admin"><AdminDirectory /></RequireRole>,
+      },
+      {
+        path: '/admin/performance',
+        element: <RequireRole role="platform_admin"><AdminPerformance /></RequireRole>,
       },
       {
         path: '/admin/simulations',

@@ -39,6 +39,7 @@ function AdminNav() {
     { to: '/admin/directory', label: 'Directory' },
     { to: '/admin/simulations', label: 'Simulations' },
     { to: '/admin/testing', label: 'Testing' },
+    { to: '/admin/performance', label: 'Performance' },
     { to: '/admin/tasks', label: 'Tasks' },
   ];
   return (
