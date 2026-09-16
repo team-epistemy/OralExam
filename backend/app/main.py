@@ -160,6 +160,12 @@ def migrate() -> None:
             print(f"applying {migration_021.name} ...")
             cur.execute(migration_021.read_text())
 
+        # Always apply migration_022 (perf_probe title + params columns; idempotent)
+        migration_022 = db_dir / "migration_022_perf_probe_fields.sql"
+        if migration_022.exists():
+            print(f"applying {migration_022.name} ...")
+            cur.execute(migration_022.read_text())
+
     conn.commit()
     print("all schemas applied")
 

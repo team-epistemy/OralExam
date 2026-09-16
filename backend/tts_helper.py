@@ -39,13 +39,14 @@ def _resolve_key(settings: Settings) -> Optional[str]:
         return None
 
 
-def synthesize(settings: Settings, text: str, voice_id: Optional[str] = None) -> Optional[bytes]:
+def synthesize(settings: Settings, text: str, voice_id: Optional[str] = None,
+               model: Optional[str] = None) -> Optional[bytes]:
     """Return MP3 audio bytes for `text`, or None if TTS is not configured / failed."""
     key = _resolve_key(settings)
     if not key:
         return None
     vid = voice_id or getattr(settings, "elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM")
-    model = getattr(settings, "elevenlabs_model", "eleven_turbo_v2_5")
+    model = model or getattr(settings, "elevenlabs_model", "eleven_turbo_v2_5")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{vid}"
     body = json.dumps({
         "text": text[:2500],

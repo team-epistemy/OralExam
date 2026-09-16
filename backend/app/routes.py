@@ -87,6 +87,7 @@ ADMIN_ACTIVE_TASKS = "/api/admin/active-tasks"                  # GET app backgr
 ADMIN_PROFESSORS = "/api/admin/professors"                      # GET professors → courses → enrolled students
 ADMIN_PERF_PROBE = "/api/admin/perf/probe"                      # POST start an end-to-end latency probe
 ADMIN_PERF_PROBES = "/api/admin/perf/probes"                    # GET saved probe history
+ADMIN_PERF_DEFAULTS = "/api/admin/perf/defaults"               # GET actual-implementation param defaults
 ADMIN_PERF_PROBE_GET = "/api/admin/perf/probe/{probe_id}"       # GET probe status + results
 ADMIN_ASSIGNMENTS = "/api/admin/assignments"                    # GET org assignments (picker)
 ADMIN_SIMULATIONS = "/api/admin/simulations"                    # POST create, GET list

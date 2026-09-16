@@ -38,6 +38,18 @@ export interface PerfResult {
   sample_probe: string;
   sample_feedback: string;
   traces: PerfTrace[];
+  params?: PerfParams;
+}
+
+export interface PerfParams {
+  runs: number;
+  eval_model: string;
+  eval_max_tokens: number;
+  eval_temperature: number;
+  tts_model: string;
+  tts_voice: string;
+  provider?: string;
+  expected_path_max_tokens?: number;
 }
 
 export interface PerfProbe {
@@ -45,10 +57,13 @@ export interface PerfProbe {
   status: 'running' | 'completed' | 'failed' | 'not_found';
   result?: PerfResult | null;
   error?: string | null;
+  title?: string | null;
+  params?: PerfParams | null;
 }
 
 export interface PerfListItem {
   probe_id: string;
+  title: string | null;
   runs: number;
   status: string;
   provider: string | null;
@@ -62,8 +77,13 @@ export interface PerfListItem {
   created_at: string | null;
 }
 
-export function startPerfProbe(runs: number): Promise<{ probe_id?: string; status: string; message?: string }> {
-  return post('/api/admin/perf/probe', { runs });
+export function getPerfDefaults(): Promise<{ defaults: PerfParams }> {
+  return get('/api/admin/perf/defaults');
+}
+
+export function startPerfProbe(body: { title?: string; params?: Partial<PerfParams> }):
+  Promise<{ probe_id?: string; status: string; message?: string }> {
+  return post('/api/admin/perf/probe', body);
 }
 
 export function getPerfProbe(id: string): Promise<PerfProbe> {

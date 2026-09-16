@@ -6040,7 +6040,7 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
         """Start an end-to-end answer-flow latency probe (eval LLM + TTS per run,
         plus a one-off expected_path generation). Runs in the background; poll the
         GET endpoint for results."""
-        import uuid as _uuid
+        import uuid as _uuid, json as _json
         def _do():
             d = deps()
             repo = _request_repo(d)
@@ -6049,20 +6049,23 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                 caller = _admin_caller(api, x_user_id, x_role, x_org_name)  # platform_admin gate
                 repo.set_tenant(caller.org_id)
                 probe_id = str(_uuid.uuid4())
+                provided = req.params if req.params is not None else {"runs": req.runs}
+                eff = _perf_effective_params(d["settings"], provided)
                 with repo.conn.cursor() as cur:
                     cur.execute("SELECT to_regclass('public.perf_probe')")
                     if cur.fetchone()[0] is None:
                         return {"status": "error",
                                 "message": "perf_probe table not present — run the migration."}
                     cur.execute(
-                        """INSERT INTO perf_probe (probe_id, org_id, runs, status, created_by)
-                           VALUES (%s::uuid, %s::uuid, %s, 'running', %s)""",
-                        (probe_id, caller.org_id, req.runs, caller.user_id))
+                        """INSERT INTO perf_probe (probe_id, org_id, runs, status, created_by, title, params)
+                           VALUES (%s::uuid, %s::uuid, %s, 'running', %s, %s, %s::jsonb)""",
+                        (probe_id, caller.org_id, eff["runs"], caller.user_id, req.title, _json.dumps(eff)))
                 repo.conn.commit()
                 threading.Thread(target=_run_perf_probe_bg,
-                                 args=(d["settings"], caller.org_id, probe_id, req.runs),
+                                 args=(d["settings"], caller.org_id, probe_id, eff),
                                  daemon=True).start()
-                return {"probe_id": probe_id, "status": "running", "runs": req.runs}
+                return {"probe_id": probe_id, "status": "running", "runs": eff["runs"],
+                        "title": req.title, "params": eff}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -6084,13 +6087,14 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                     if cur.fetchone()[0] is None:
                         return {"probe_id": probe_id, "status": "not_found"}
                     cur.execute(
-                        """SELECT status, result, error FROM perf_probe
+                        """SELECT status, result, error, title, params FROM perf_probe
                            WHERE probe_id = %s::uuid AND org_id = %s::uuid""",
                         (probe_id, caller.org_id))
                     row = cur.fetchone()
                 if not row:
                     return {"probe_id": probe_id, "status": "not_found"}
-                return {"probe_id": probe_id, "status": row[0], "result": row[1], "error": row[2]}
+                return {"probe_id": probe_id, "status": row[0], "result": row[1], "error": row[2],
+                        "title": row[3], "params": row[4]}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -6112,7 +6116,7 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                     if cur.fetchone()[0] is None:
                         return {"probes": []}
                     cur.execute(
-                        """SELECT probe_id, runs, status, provider, eval_model, tts_model,
+                        """SELECT probe_id, title, runs, status, provider, eval_model, tts_model,
                                   eval_p50_ms, tts_p50_ms, total_p50_ms, path_penalty_ms,
                                   created_by, created_at
                            FROM perf_probe WHERE org_id = %s::uuid
@@ -6126,6 +6130,23 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                         rec["created_at"] = rec["created_at"].isoformat() if rec["created_at"] else None
                         out.append(rec)
                 return {"probes": out}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_PERF_DEFAULTS)
+    def perf_defaults(x_org_name: str = Header(...),
+                      x_user_id: str = Header("operator"),
+                      x_role: str = Header("platform_admin")):
+        """The probe's default params, read from the ACTUAL backend implementation
+        (settings + constants) so the admin form is seeded with what really runs."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                _admin_caller(api, x_user_id, x_role, x_org_name)
+                return {"defaults": _perf_defaults(d["settings"])}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -6148,8 +6169,12 @@ class QGHumanEvalRequest(BaseModel):
 
 
 class PerfProbeRequest(BaseModel):
-    """POST body: how many timed rounds the performance probe should run."""
+    """POST body: an experiment title + the params to run the perf probe with.
+    Params are seeded client-side from GET /perf/defaults (the backend's actual
+    values) so admin perception stays in sync with the real implementation."""
     runs: int = Field(default=3, ge=1, le=8)
+    title: Optional[str] = Field(default=None, max_length=200)
+    params: Optional[Dict[str, object]] = None
 
 
 def _ensure_qg_test_table(repo) -> None:
@@ -6216,6 +6241,39 @@ def _persist_qg_questions(cur, run_id, org_id, course_id, questions, report):
             template="(%s::uuid,%s::uuid,%s::uuid,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s)")
 
 
+def _perf_defaults(settings) -> dict:
+    """The perf probe's params seeded from the ACTUAL implementation values, so the
+    admin form shows what the backend really uses (keeps perception in sync)."""
+    return {
+        "runs": 3,
+        "eval_model": getattr(settings, "anthropic_model", None),
+        "eval_max_tokens": LLM_MAX_TOKENS_EVALUATION,
+        "eval_temperature": 0.1,
+        "tts_model": getattr(settings, "elevenlabs_model", None),
+        "tts_voice": getattr(settings, "elevenlabs_voice_id", None),
+        "provider": getattr(settings, "llm_provider", None),
+        "expected_path_max_tokens": 3000,
+    }
+
+
+def _perf_effective_params(settings, provided: dict) -> dict:
+    """Merge admin-provided params over the backend defaults, clamped to safe ranges."""
+    eff = {**_perf_defaults(settings), **(provided or {})}
+    try:
+        eff["runs"] = max(1, min(8, int(eff.get("runs", 3))))
+    except (TypeError, ValueError):
+        eff["runs"] = 3
+    try:
+        eff["eval_max_tokens"] = max(64, min(4000, int(eff.get("eval_max_tokens", LLM_MAX_TOKENS_EVALUATION))))
+    except (TypeError, ValueError):
+        eff["eval_max_tokens"] = LLM_MAX_TOKENS_EVALUATION
+    try:
+        eff["eval_temperature"] = max(0.0, min(1.0, float(eff.get("eval_temperature", 0.1))))
+    except (TypeError, ValueError):
+        eff["eval_temperature"] = 0.1
+    return eff
+
+
 def _persist_perf_probe(settings, org_id, probe_id, status, result=None, error=None):
     """Update the perf_probe row (owner-migrated table) with a run's outcome.
     Best-effort: a missing table or write error is logged, not raised."""
@@ -6247,12 +6305,19 @@ def _persist_perf_probe(settings, org_id, probe_id, status, result=None, error=N
             conn.close()
 
 
-def _run_perf_probe_bg(settings, org_id, probe_id, runs):
+def _run_perf_probe_bg(settings, org_id, probe_id, params):
     """Background: time the end-to-end student answer flow — the eval LLM call and
     the TTS round-trip per run, plus a one-off expected_path generation (the cost
-    a first answer to an un-prebuilt question pays). Persists to the perf_probe
-    table. Bounded work, off-request, so the probe never trips a gateway timeout."""
+    a first answer to an un-prebuilt question pays). Runs with the experiment's
+    `params` (model/tokens/temp/voice), persists to perf_probe. Bounded work,
+    off-request, so the probe never trips a gateway timeout."""
     import time as _t, statistics as _st, json as _json
+    runs = int(params.get("runs", 3))
+    eval_model = params.get("eval_model") or None
+    eval_max_tokens = int(params.get("eval_max_tokens", LLM_MAX_TOKENS_EVALUATION))
+    eval_temp = float(params.get("eval_temperature", 0.1))
+    tts_model = params.get("tts_model") or None
+    tts_voice = params.get("tts_voice") or None
     from backend.bedrock_helper import call_bedrock
     from backend import tts_helper
     try:
@@ -6280,24 +6345,25 @@ def _run_perf_probe_bg(settings, org_id, probe_id, runs):
             # Step 1 — evaluation LLM (the response-processing cost); capture the probe it emits.
             t0 = _t.time(); probe_out = fb_out = ""
             try:
-                parsed = call_bedrock(settings, system, ctx, max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1)
+                parsed = call_bedrock(settings, system, ctx, max_tokens=eval_max_tokens,
+                                      temperature=eval_temp, model=eval_model)
                 if isinstance(parsed, dict):
                     probe_out = (parsed.get("probe") or "").strip()
                     fb_out = (parsed.get("feedback") or "").strip()
             except Exception:  # noqa: BLE001 - a failed call still yields a timing sample
                 pass
             te = round((_t.time() - t0) * 1000)
-            steps.append({"name": "eval_llm", "ms": te, "detail": getattr(settings, "anthropic_model", None)})
+            steps.append({"name": "eval_llm", "ms": te, "detail": eval_model or getattr(settings, "anthropic_model", None)})
             logger.info("perf-trace probe=%s run=%d step=eval_llm ms=%d", probe_id[:8], i + 1, te)
             # Step 2 — TTS the examiner's probe (what the eval actually produced).
             t1 = _t.time()
             try:
-                a = tts_helper.synthesize(settings, probe_out or fallback_probe)
+                a = tts_helper.synthesize(settings, probe_out or fallback_probe, voice_id=tts_voice, model=tts_model)
                 audio_bytes = len(a) if a else 0
             except Exception:  # noqa: BLE001
                 pass
             tt = round((_t.time() - t1) * 1000)
-            steps.append({"name": "tts", "ms": tt, "detail": getattr(settings, "elevenlabs_model", None)})
+            steps.append({"name": "tts", "ms": tt, "detail": tts_model or getattr(settings, "elevenlabs_model", None)})
             logger.info("perf-trace probe=%s run=%d step=tts ms=%d bytes=%d", probe_id[:8], i + 1, tt, audio_bytes)
 
             eval_ms.append(te); tts_ms.append(tt); total_ms.append(te + tt)
@@ -6320,8 +6386,9 @@ def _run_perf_probe_bg(settings, org_id, probe_id, runs):
         result = {
             "runs": runs,
             "provider": getattr(settings, "llm_provider", None),
-            "eval_model": getattr(settings, "anthropic_model", None),
-            "tts_model": getattr(settings, "elevenlabs_model", None),
+            "eval_model": eval_model or getattr(settings, "anthropic_model", None),
+            "tts_model": tts_model or getattr(settings, "elevenlabs_model", None),
+            "params": params,
             "eval_ms": _summ(eval_ms),
             "tts_ms": _summ(tts_ms),
             "total_per_answer_ms": _summ(total_ms),

@@ -87,6 +87,7 @@ def call_bedrock(
     temperature: float = 0.1,
     retries: int = 3,
     timeout: Optional[float] = None,
+    model: Optional[str] = None,
 ) -> dict:
     """Dispatch to Claude or Bedrock, then parse the JSON response. Name kept for compat.
 
@@ -105,8 +106,8 @@ def call_bedrock(
     for attempt in range(attempts):
         try:
             if anthropic_provider:
-                return _call_anthropic(settings, system_prompt, user_message, max_tokens, timeout)
-            return _call_bedrock_converse(settings, system_prompt, user_message, max_tokens, temperature, timeout)
+                return _call_anthropic(settings, system_prompt, user_message, max_tokens, timeout, model)
+            return _call_bedrock_converse(settings, system_prompt, user_message, max_tokens, temperature, timeout, model)
         except (json.JSONDecodeError, ValueError) as exc:
             last_err = exc
             logger.warning("LLM JSON parse failed (attempt %d/%d): %s", attempt + 1, attempts, exc)
@@ -115,13 +116,13 @@ def call_bedrock(
 
 def _call_anthropic(
     settings: Settings, system_prompt: str, user_message: str, max_tokens: int,
-    timeout: Optional[float] = None,
+    timeout: Optional[float] = None, model: Optional[str] = None,
 ) -> dict:
     """Call Claude via the Anthropic SDK. No temperature — removed on Opus 4.8."""
     client = _get_anthropic_client(settings)
     if timeout is not None:
         client = client.with_options(timeout=timeout)
-    model = getattr(settings, "anthropic_model", "claude-sonnet-4-6")
+    model = model or getattr(settings, "anthropic_model", "claude-sonnet-4-6")
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -135,11 +136,12 @@ def _call_anthropic(
 def _call_bedrock_converse(
     settings: Settings, system_prompt: str, user_message: str,
     max_tokens: int, temperature: float, timeout: Optional[float] = None,
+    model: Optional[str] = None,
 ) -> dict:
     """Call Bedrock Converse API, strip fences/thinking tags, parse JSON response."""
     client = _get_bedrock_client(settings.bedrock_region, read_timeout=timeout)
     response = client.converse(
-        modelId=getattr(settings, "llm_model", LLM_MODEL_ID),
+        modelId=model or getattr(settings, "llm_model", LLM_MODEL_ID),
         system=[{"text": system_prompt}],
         messages=[{"role": "user", "content": [{"text": user_message}]}],
         inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},

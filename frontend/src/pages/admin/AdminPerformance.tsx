@@ -3,8 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Gauge, Loader2, Play, AlertCircle, Zap, Mic, Timer, AlertTriangle, History } from 'lucide-react';
 import { ApiError } from '../../api/client';
 import {
-  startPerfProbe, getPerfProbe, listPerfProbes,
-  type PerfProbe, type PerfStat, type PerfTrace,
+  startPerfProbe, getPerfProbe, listPerfProbes, getPerfDefaults,
+  type PerfProbe, type PerfStat, type PerfTrace, type PerfParams,
 } from '../../api/adminPerf';
 
 function secs(ms: number) { return (ms / 1000).toFixed(2) + 's'; }
@@ -57,18 +57,28 @@ function StatCard({ icon: Icon, label, stat, tone = 'neutral', hint }: {
 
 export default function AdminPerformance() {
   const queryClient = useQueryClient();
-  const [runs, setRuns] = useState(3);
   const [probeId, setProbeId] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [title, setTitle] = useState('');
+  const [params, setParams] = useState<PerfParams | null>(null);
+
+  // Seed the editable params from the backend's ACTUAL implementation values.
+  const { data: defaultsData } = useQuery({ queryKey: ['perf-defaults'], queryFn: getPerfDefaults });
+  useEffect(() => {
+    if (defaultsData?.defaults && !params) setParams(defaultsData.defaults);
+  }, [defaultsData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const start = useMutation({
-    mutationFn: () => startPerfProbe(runs),
+    mutationFn: () => startPerfProbe({ title: title.trim() || undefined, params: params || undefined }),
     onSuccess: (res) => {
       if (res.status === 'error' || !res.probe_id) { setError(res.message || 'Could not start probe.'); return; }
       setError(''); setProbeId(res.probe_id);
     },
     onError: (e) => setError(e instanceof ApiError ? e.message : 'Failed to start probe.'),
   });
+
+  const setParam = (k: keyof PerfParams, v: string | number) =>
+    setParams((p) => (p ? { ...p, [k]: v } : p));
 
   const { data: probe } = useQuery<PerfProbe>({
     queryKey: ['perf-probe', probeId],
@@ -113,15 +123,49 @@ export default function AdminPerformance() {
       {/* Controls */}
       <div className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Timed rounds: <span className="font-bold text-navy">{runs}</span>
-          </label>
-          <input type="range" min={1} max={8} value={runs}
-            onChange={(e) => setRuns(Number(e.target.value))}
-            className="w-full accent-navy" disabled={running} />
-          <div className="flex justify-between text-[10px] text-gray-400 px-0.5">
-            {Array.from({ length: 8 }, (_, i) => <span key={i}>{i + 1}</span>)}
+          <label className="block text-sm font-medium text-gray-700 mb-1">Experiment title</label>
+          <input
+            type="text" value={title} onChange={(e) => setTitle(e.target.value)} disabled={running}
+            placeholder="e.g. sonnet-4-6 baseline, or haiku eval @800 tokens"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-navy/20"
+          />
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">Experiment params</label>
+            <button type="button" disabled={running || !defaultsData}
+              onClick={() => defaultsData && setParams(defaultsData.defaults)}
+              className="text-xs text-navy hover:underline disabled:opacity-40">Reset to backend defaults</button>
           </div>
+          <p className="text-[11px] text-gray-400 mb-2">Seeded from the backend's actual values — the probe runs with exactly these.</p>
+          {params && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {([
+                ['runs', 'Rounds', 'number'],
+                ['eval_max_tokens', 'Eval max tokens', 'number'],
+                ['eval_temperature', 'Eval temperature', 'number'],
+                ['eval_model', 'Eval model', 'text'],
+                ['tts_model', 'TTS model', 'text'],
+                ['tts_voice', 'TTS voice id', 'text'],
+              ] as [keyof PerfParams, string, string][]).map(([key, lbl, type]) => (
+                <div key={key}>
+                  <label className="block text-[11px] text-gray-500 mb-0.5">{lbl}</label>
+                  <input
+                    type={type}
+                    step={key === 'eval_temperature' ? '0.1' : undefined}
+                    value={String(params[key] ?? '')}
+                    onChange={(e) => setParam(key, type === 'number' ? Number(e.target.value) : e.target.value)}
+                    disabled={running}
+                    className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-navy/20"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+          {params?.provider && (
+            <p className="text-[11px] text-gray-400 mt-2">provider: {params.provider} · expected_path max tokens: {params.expected_path_max_tokens}</p>
+          )}
         </div>
 
         {error && (
@@ -148,6 +192,13 @@ export default function AdminPerformance() {
       {/* Results */}
       {r && (
         <div className="space-y-4">
+          <div className="bg-white border border-gray-200 rounded-lg p-3 text-sm">
+            <div className="font-semibold text-gray-900">{probe?.title || <span className="text-gray-400 italic">Untitled experiment</span>}</div>
+            <div className="text-[11px] text-gray-500 mt-0.5">
+              ran with: {r.params?.runs ?? r.runs} rounds · {r.eval_model} · {r.params?.eval_max_tokens} tok · temp {r.params?.eval_temperature} · tts {r.tts_model}
+              {r.params?.tts_voice ? ` · voice ${r.params.tts_voice}` : ''}
+            </div>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <StatCard icon={Timer} label="Total per answer" stat={r.total_per_answer_ms}
               tone={r.total_per_answer_ms.p50 > 5000 ? 'bad' : r.total_per_answer_ms.p50 > 3000 ? 'warn' : 'good'}
@@ -216,8 +267,9 @@ export default function AdminPerformance() {
                 onClick={() => { setProbeId(p.probe_id); setError(''); }}
                 className={`w-full text-left px-4 py-2.5 text-sm flex items-center gap-3 hover:bg-gray-50 ${p.probe_id === probeId ? 'bg-gray-50' : ''}`}
               >
-                <span className="text-xs text-gray-400 w-36 shrink-0">{p.created_at ? new Date(p.created_at).toLocaleString() : ''}</span>
-                <span className="text-xs text-gray-400 w-14">{p.runs} run{p.runs === 1 ? '' : 's'}</span>
+                <span className="text-xs text-gray-400 w-32 shrink-0">{p.created_at ? new Date(p.created_at).toLocaleString() : ''}</span>
+                <span className="text-gray-800 truncate max-w-[180px]">{p.title || <span className="text-gray-400 italic">untitled</span>}</span>
+                <span className="text-xs text-gray-400 w-12">{p.runs}r</span>
                 {p.status === 'running' && <span className="text-xs text-blue-600 inline-flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> running</span>}
                 {p.status === 'failed' && <span className="text-xs text-red-600">failed</span>}
                 <span className="flex-1" />
