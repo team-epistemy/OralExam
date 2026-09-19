@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone, timedelta, date
 import threading
 from typing import Dict, List, Optional
@@ -180,6 +181,9 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
 # any question that somehow still lacks one. The in-flight set stops concurrent
 # sub-turns (or two students on the same question) firing duplicate calls.
 _EXPECTED_PATH_TIMEOUT_S = 30
+# How long an answer will wait for an already-queued path rather than grade
+# without one. Bounded well under the ALB idle timeout.
+_EXPECTED_PATH_WAIT_S = 6.0
 _INFLIGHT_PATHS: set = set()
 _INFLIGHT_PATHS_LOCK = threading.Lock()
 
@@ -240,6 +244,71 @@ def _fill_expected_paths_async(settings, org_id: str, items: list) -> None:
         return
     threading.Thread(target=_fill_expected_paths_bg, args=(settings, org_id, fresh),
                      daemon=True).start()
+
+
+def _prefill_session_paths(repo, settings, org_id: str, qrows: list) -> None:
+    """Queue path generation for a starting session's questions that lack one.
+
+    Deliberately guarded and separate from the question SELECT: expected_path is a
+    later migration, and exam start must not break on a DB that predates it.
+    """
+    try:
+        ids = [str(qr[0]) for qr in qrows]
+        if not ids:
+            return
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                """SELECT question_id FROM question
+                   WHERE question_id = ANY(%s::uuid[])
+                     AND (expected_path IS NULL
+                          OR expected_path->'nodes' IS NULL
+                          OR jsonb_array_length(expected_path->'nodes') = 0)""",
+                (ids,),
+            )
+            missing = {str(r[0]) for r in cur.fetchall()}
+    except Exception as exc:  # noqa: BLE001 - un-migrated DB: nothing to prefill
+        repo.conn.rollback()
+        logger.info("expected_path prefill skipped: %s", exc)
+        return
+    items = [(str(qr[0]), qr[1], qr[2] if isinstance(qr[2], list) else [])
+             for qr in qrows if str(qr[0]) in missing]
+    if items:
+        logger.info("Prefilling %d expected paths at session start", len(items))
+        _fill_expected_paths_async(settings, org_id, items)
+
+
+def _read_expected_path(repo, question_id: str) -> dict:
+    """The question's stored expected_path, or {} when it has none yet."""
+    import json as _json
+    with repo.conn.cursor() as cur:
+        cur.execute("SELECT expected_path FROM question WHERE question_id = %s::uuid",
+                    (question_id,))
+        row = cur.fetchone()
+    if not row or not row[0]:
+        return {}
+    return row[0] if isinstance(row[0], dict) else _json.loads(row[0])
+
+
+def _await_expected_path(repo, question_id: str, budget_s: float) -> dict:
+    """Wait (bounded) for a queued fill to land, but only if one is in flight.
+
+    Grading a turn without the path costs real quality — no eds_components is
+    stored, so the NEXT probe can't tell what the student already covered and
+    the question's EDS union misses this turn. A few seconds here is cheaper
+    than that, and start_exam's pre-queue makes the wait usually zero. Polls
+    rather than signals so it works whichever worker thread is filling.
+    """
+    with _INFLIGHT_PATHS_LOCK:
+        if question_id not in _INFLIGHT_PATHS:
+            return {}
+    deadline = time.monotonic() + budget_s
+    while True:
+        # READ COMMITTED gives each statement a fresh snapshot, so a poll sees
+        # the worker's commit without this request ending its own transaction.
+        path = _read_expected_path(repo, question_id)
+        if path.get("nodes") or time.monotonic() >= deadline:
+            return path
+        time.sleep(0.5)
 
 
 # Course graph rebuilds run as background threads inside the web process. If the
@@ -4080,6 +4149,13 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "index": qr[3],
                     })
 
+                # Build any missing reasoning paths NOW, while the student is still
+                # reading and speaking their first answer — that is 30-60s of slack.
+                # Grading a turn without its path is not free: no eds_components is
+                # stored, so the next probe can't see what they already covered and
+                # the question's EDS union drops that turn.
+                _prefill_session_paths(repo, d["settings"], caller.org_id, qrows)
+
                 return {
                     "session_id": session_id,
                     "questions": questions,
@@ -4179,7 +4255,18 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     _fill_expected_paths_async(
                         settings, org_id,
                         [(question_id, question_text, concept_ids_for_question)])
-                    expected_path = {}
+                    # start_exam already queued this, so normally it has landed by now.
+                    # If it is still running, a few seconds is cheaper than grading
+                    # blind: without the path no eds_components is written, so the
+                    # next probe can't see what this answer covered and the question's
+                    # EDS union drops the turn. Past the budget, degrade and move on.
+                    expected_path = _await_expected_path(
+                        repo, question_id, _EXPECTED_PATH_WAIT_S)
+                    if not expected_path.get("nodes"):
+                        logger.warning("No expected_path for question %s after %.0fs — "
+                                       "grading this turn on the no-path rubric",
+                                       question_id[:8], _EXPECTED_PATH_WAIT_S)
+                        expected_path = {}
 
                 # ── Multi-turn: insert new sub-turn row ──────────────────
                 turn_id = str(_uuid.uuid4())
