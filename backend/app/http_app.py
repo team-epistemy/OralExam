@@ -163,11 +163,83 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
         "Produce the expected reasoning path (at most 5 nodes and 5 edges)."
     )
     try:
-        # Bounded path + token headroom so this single call finishes fast and never
-        # truncates → no 3x retry, so the first answer to a question can't time out.
-        return call_bedrock(settings, system_prompt, user_msg, max_tokens=3000, temperature=0.1)
+        # Token headroom stays generous (max_tokens is a ceiling, not a cost — only
+        # tokens actually generated take time) so the JSON never truncates. What IS
+        # bounded is the retry budget and the wall clock: a malformed sample used to
+        # cost up to 3 sequential ~10s calls, which is what pushed a first answer
+        # past the ALB idle timeout.
+        return call_bedrock(settings, system_prompt, user_msg, max_tokens=3000,
+                            temperature=0.1, retries=1,
+                            timeout=_EXPECTED_PATH_TIMEOUT_S)
     except Exception:
         return {"nodes": [], "edges": [], "extensions": []}
+
+
+# Expected-path generation is a ~10s Claude call, so it never runs inside a request:
+# assign_questions queues it right after the insert, and submit_answer queues it for
+# any question that somehow still lacks one. The in-flight set stops concurrent
+# sub-turns (or two students on the same question) firing duplicate calls.
+_EXPECTED_PATH_TIMEOUT_S = 30
+_INFLIGHT_PATHS: set = set()
+_INFLIGHT_PATHS_LOCK = threading.Lock()
+
+
+def _store_expected_path(conn, settings, qid: str, text: str, concepts: list) -> None:
+    """Generate one question's expected path and commit it."""
+    import json as _json
+    path = _generate_expected_path(settings, text, concepts)
+    if not path.get("nodes"):
+        logger.warning("expected_path came back empty for question %s — EDS degrades "
+                       "to the no-path Socratic rubric", qid[:8])
+        return
+    with conn.cursor() as cur:
+        cur.execute("UPDATE question SET expected_path = %s::jsonb "
+                    "WHERE question_id = %s::uuid", (_json.dumps(path), qid))
+    conn.commit()
+    logger.info("expected_path stored for question %s: %d nodes, %d edges", qid[:8],
+                len(path.get("nodes", [])), len(path.get("edges", [])))
+
+
+def _fill_expected_paths_bg(settings, org_id: str, items: list) -> None:
+    """Generate + persist expected_path for each (question_id, text, concepts).
+
+    Opens its own connection — the request's is long gone. One question's failure
+    never stops the rest. Runs synchronously; callers wrap it in a thread.
+    """
+    conn = None
+    try:
+        conn = factory.db_connection(settings)
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('app.org_id', %s, false)", (org_id,))
+        conn.commit()
+        for qid, text, concepts in items:
+            try:
+                _store_expected_path(conn, settings, qid, text, concepts)
+            except Exception as exc:  # noqa: BLE001 - one question isn't the batch
+                logger.warning("expected_path failed for question %s: %s", qid[:8], exc)
+                conn.rollback()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("expected_path fill aborted for org %s: %s", org_id[:8], exc)
+    finally:
+        with _INFLIGHT_PATHS_LOCK:
+            for it in items:
+                _INFLIGHT_PATHS.discard(it[0])
+        if conn is not None:
+            conn.close()
+
+
+def _fill_expected_paths_async(settings, org_id: str, items: list) -> None:
+    """Queue expected-path generation off the request path, skipping in-flight ids."""
+    fresh = []
+    with _INFLIGHT_PATHS_LOCK:
+        for it in items:
+            if it[0] not in _INFLIGHT_PATHS:
+                _INFLIGHT_PATHS.add(it[0])
+                fresh.append(it)
+    if not fresh:
+        return
+    threading.Thread(target=_fill_expected_paths_bg, args=(settings, org_id, fresh),
+                     daemon=True).start()
 
 
 # Course graph rebuilds run as background threads inside the web process. If the
@@ -2408,44 +2480,6 @@ def _generate_concept_banks(settings, concepts: list, relations: list, difficult
     return merge_generated_banks(concepts, data, difficulty)
 
 
-def _generate_expected_paths(settings, questions: list, concepts: list, relations: list) -> dict:
-    """Claude-generate an expected reasoning path per question (for EDS scoring).
-
-    Grounds nodes/edges in the course concept graph. Returns {index: {nodes,edges,extensions}};
-    empty on any failure so assignment still succeeds (EDS just degrades on those questions).
-    """
-    if not questions:
-        return {}
-    concept_lines = "\n".join(f"- {c.get('label')}: {c.get('definition', '')}" for c in concepts)
-    rel_lines = "\n".join(
-        f"- {r.get('src')} {r.get('edge_type')} {r.get('dst')}" for r in relations)
-    q_lines = "\n".join(f"{i}. {q.q}" for i, q in enumerate(questions))
-    system_prompt = (
-        "For each oral-exam question, produce the EXPECTED REASONING PATH a strong answer must "
-        "demonstrate, grounded in the course concept graph. For each question return: "
-        '"nodes" (key concepts that must be DEMONSTRATED with understanding, each {"label","definition"}), '
-        '"edges" (causal links that must be ARTICULATED, each {"src","dst",'
-        '"link_type":"CAUSES|ENABLES|PREVENTS|INCREASES|DECREASES","explanation"}), and '
-        '"extensions" (1-3 bonus concepts, each {"label","connection"}). Prefer concepts from the graph. '
-        'Return ONLY JSON: {"paths": [{"index": 0, "nodes": [...], "edges": [...], "extensions": [...]}]}'
-    )
-    user = (f"Concept graph:\n{concept_lines}\n\nRelations:\n{rel_lines}\n\n"
-            f"Questions:\n{q_lines}")
-    try:
-        data = call_bedrock(settings, system_prompt, user,
-                            max_tokens=LLM_MAX_TOKENS_GENERATION, temperature=0.2)
-        out = {}
-        for p in (data.get("paths") or []):
-            idx = p.get("index")
-            if isinstance(idx, int):
-                out[idx] = {"nodes": p.get("nodes", []), "edges": p.get("edges", []),
-                            "extensions": p.get("extensions", [])}
-        return out
-    except Exception as exc:  # noqa: BLE001 - EDS degrades, assignment still succeeds
-        logger.warning("expected_path generation failed: %s", exc)
-        return {}
-
-
 # ── M5 Questions ─────────────────────────────────────────────────────────────
 
 class UpdateQuestionRequest(BaseModel):
@@ -2866,8 +2900,8 @@ def _register_questions(app: FastAPI, deps) -> None:
                     "level": req.difficulty,
                     "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(req.difficulty, 0.55),
                 })
-                # Expected reasoning paths are filled in lazily on the first answer
-                # to each question (see submit_answer's backfill). Generating them
+                # Questions are inserted with an empty expected_path and filled by a
+                # background thread queued after the commit below. Generating them
                 # synchronously here — one large Claude call for every question —
                 # blew past the 60s ALB idle timeout and 504'd the assign request.
                 paths: dict = {}
@@ -2943,6 +2977,15 @@ def _register_questions(app: FastAPI, deps) -> None:
                         cur.execute("UPDATE assignment SET assignment_type = %s WHERE assignment_id = %s::uuid",
                                     (req.assignment_type, assignment_id))
                 repo.conn.commit()
+                # Now that the questions are committed, build their expected paths in
+                # the background. This is the whole point: by the time a student opens
+                # the assignment the paths are already there, so no answer pays for
+                # one mid-exam.
+                if has_ep:
+                    _fill_expected_paths_async(
+                        d["settings"], caller.org_id,
+                        [(qid, q.q, [q.concept_id or q.topic or "general"])
+                         for qid, q in zip(question_ids, req.questions)])
                 return {"status": "completed", "assignment_id": assignment_id,
                         "question_count": len(question_ids)}
             finally:
@@ -4126,30 +4169,17 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     if ep_row and ep_row[0]:
                         expected_path = ep_row[0] if isinstance(ep_row[0], dict) else _json.loads(ep_row[0])
 
-                # Questions generated before expected_path existed have none; build it
-                # once on first use and commit, or every turn pays for a Bedrock call.
+                # A missing path used to be generated right here, so the first answer
+                # to a question paid ~10s (up to 3x that on a malformed sample) while
+                # the student waited. Queue it in the background instead and grade
+                # THIS turn on the no-path Socratic rubric below — which submit_answer
+                # already supports via use_eds_formula=False. Later turns, and every
+                # other student, get full EDS once the thread lands.
                 if not expected_path.get("nodes"):
-                    try:
-                        expected_path = _generate_expected_path(
-                            settings, question_text, concept_ids_for_question
-                        )
-                        if expected_path.get("nodes"):
-                            with repo.conn.cursor() as cur:
-                                cur.execute(
-                                    "UPDATE question SET expected_path = %s::jsonb WHERE question_id = %s::uuid",
-                                    (_json.dumps(expected_path), question_id),
-                                )
-                            repo.conn.commit()
-                            logger.info("Generated expected_path for question %s: %d nodes, %d edges",
-                                        question_id[:8], len(expected_path.get("nodes", [])),
-                                        len(expected_path.get("edges", [])))
-                        else:
-                            logger.warning("expected_path generation returned no nodes for question %s "
-                                           "— EDS will score 0", question_id[:8])
-                    except Exception as exc:
-                        logger.warning("expected_path generation failed for question %s: %s",
-                                       question_id[:8], exc)
-                        expected_path = {}
+                    _fill_expected_paths_async(
+                        settings, org_id,
+                        [(question_id, question_text, concept_ids_for_question)])
+                    expected_path = {}
 
                 # ── Multi-turn: insert new sub-turn row ──────────────────
                 turn_id = str(_uuid.uuid4())
