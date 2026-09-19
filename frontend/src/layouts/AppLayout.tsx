@@ -40,6 +40,7 @@ function AdminNav() {
     { to: '/admin/simulations', label: 'Simulations' },
     { to: '/admin/testing', label: 'Testing' },
     { to: '/admin/performance', label: 'Performance' },
+    { to: '/admin/tone-lab', label: 'Tone Lab' },
     { to: '/admin/tasks', label: 'Tasks' },
   ];
   return (

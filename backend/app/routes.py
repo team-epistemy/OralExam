@@ -101,6 +101,17 @@ ADMIN_TESTING_RUN = "/api/admin/testing/runs/{run_id}"          # GET one run's 
 ADMIN_TESTING_RUN_QUESTIONS = "/api/admin/testing/runs/{run_id}/questions"  # GET per-question + human eval
 ADMIN_TESTING_QUESTION_EVAL = "/api/admin/testing/questions/{question_id}/eval"  # PUT human eval
 
+# ── Admin: Examiner Tone Lab (eval endpoints + experiment tracking + governance) ────
+ADMIN_EVAL_PROMPT = "/api/admin/eval/examiner-prompt"          # GET live-rendered production examiner prompt
+ADMIN_EVAL_CASES = "/api/admin/eval/cases"                     # GET curated question stems + context graphs
+ADMIN_EVAL_EXPERIMENTS = "/api/admin/eval/experiments"         # POST save a run (+recommendation), GET history
+ADMIN_EVAL_EXPERIMENT = "/api/admin/eval/experiments/{experiment_id}"  # GET one saved experiment
+ADMIN_EVAL_OVERRIDES = "/api/admin/eval/prompt-override"       # POST create draft, GET list + active
+ADMIN_EVAL_OVERRIDE_APPROVE = "/api/admin/eval/prompt-override/{override_id}/approve"    # POST draft->approved
+ADMIN_EVAL_OVERRIDE_ACTIVATE = "/api/admin/eval/prompt-override/{override_id}/activate"  # POST approved->active
+ADMIN_EVAL_OVERRIDE_REVERT = "/api/admin/eval/prompt-override/{override_id}/revert"      # POST active->archived (back to default)
+ADMIN_EVAL_OVERRIDE_REJECT = "/api/admin/eval/prompt-override/{override_id}/reject"      # POST draft->rejected
+
 
 def frontend_config() -> dict:
     """Path/header constants served to the browser so it never hardcodes them."""

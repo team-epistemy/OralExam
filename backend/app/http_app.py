@@ -100,6 +100,90 @@ def _prior_coverage(repo, session_id: str, question_index: int) -> tuple:
     return nodes, edges
 
 
+# The production examiner evaluation prompt (EDS variant), as a template. The tokens
+# {{QUESTION_TEXT}}, {{EXPECTED_PATH_JSON}} and {{PROBE_DIRECTIVE}} are filled by
+# build_examiner_eval_prompt(), so the live answer flow and the admin tone-lab endpoint
+# render the SAME bytes. Kept whitespace-identical to the string that shipped inline in
+# the answer handler — do not reformat, the tone eval measures exactly what production
+# sends. Literal { } are JSON in the output contract, so interpolation is by str.replace
+# on the {{...}} tokens, never str.format.
+EXAMINER_EVAL_TEMPLATE = (
+    "You are an Epistemy Socratic oral examiner performing two tasks:\n\n"
+    "TASK 1: SOCRATIC EVALUATION\n"
+    "The exam question is: \"{{QUESTION_TEXT}}\"\n"
+    "Evaluate the student's answer. When adequate=false, provide a scaffolding probe.\n\n"
+    "TASK 2: EDS COMPONENT EXTRACTION\n"
+    "Given the expected reasoning path below, identify which concepts and causal links "
+    "the student DEMONSTRATED WITH UNDERSTANDING (not just named).\n\n"
+    "EXPECTED PATH:\n{{EXPECTED_PATH_JSON}}\n\n"
+    "SCORING RULES:\n"
+    "- A node is 'demonstrated' only if the student shows understanding of WHAT it means\n"
+    "- An edge is 'demonstrated' only if the student articulates the CAUSAL MECHANISM between src and dst\n"
+    "- recitation_score: 0.0=fully authentic reasoning, 1.0=pure keyword recitation without understanding\n"
+    "- novel_extensions: valid concepts/links beyond the expected path\n\n"
+    "CRITICAL: adequate=true ONLY if student shows clear mechanistic/causal reasoning.\n"
+    "ALWAYS provide a probe sub-question that is grounded in THIS student's actual "
+    "answer: quote or paraphrase the specific thing they said (or the exact step they "
+    "skipped) and push on that precise gap or next causal link. Do NOT emit a generic, "
+    "reusable phrase like 'tell me more', 'explain the mechanism', or 'why does that "
+    "matter' — the probe must only make sense as a reply to what they just said.\n"
+    "{{PROBE_DIRECTIVE}}\n"
+    "Respond ONLY with minified JSON, no prose, no code fences:\n"
+    '{"clarify": false, "answered": true, "adequate": false, '
+    '"feedback": "one sentence", "probe": "follow-up question", '
+    '"eds": {"nodes_demonstrated": ["list of node labels demonstrated"], '
+    '"edges_demonstrated": [0, 1], '
+    '"recitation_score": 0.3, '
+    '"novel_extensions": ["any valid concepts beyond expected path"]}}'
+)
+
+
+def build_examiner_eval_prompt(repo, org_id, question_text, expected_path,
+                               probe_directive=""):
+    """Assemble the production examiner evaluation system prompt (EDS variant).
+
+    Single source of truth for the string the answer-flow model receives, so the admin
+    tone-lab endpoint can render it byte-identically (same code path). If an approved
+    override is active for this org it supplies the template; otherwise the shipped
+    default (EXAMINER_EVAL_TEMPLATE) is used.
+
+    Returns (system_prompt, prompt_version). prompt_version is "active:<id8>" when an
+    override is live, else "default:<sha8>" of the shipped template — so editing the
+    template constant changes the version with no other edit. Pass repo=None to force
+    the default without touching the DB.
+    """
+    import json as _json, hashlib as _hashlib
+    template = EXAMINER_EVAL_TEMPLATE
+    version = "default:" + _hashlib.sha1(
+        EXAMINER_EVAL_TEMPLATE.encode("utf-8")).hexdigest()[:8]
+    if repo is not None and org_id is not None:
+        try:
+            with repo.conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.examiner_prompt_override')")
+                if cur.fetchone()[0] is not None:
+                    cur.execute(
+                        """SELECT override_id, template FROM examiner_prompt_override
+                           WHERE status = 'active' AND org_id = %s::uuid
+                           ORDER BY activated_at DESC LIMIT 1""",
+                        (org_id,))
+                    row = cur.fetchone()
+                    if row and row[1]:
+                        template = row[1]
+                        version = "active:" + str(row[0])[:8]
+        except Exception:
+            # Un-migrated table or a transient read error must never break the answer
+            # flow: fall back to the shipped default.
+            try:
+                repo.conn.rollback()
+            except Exception:
+                pass
+    system = (template
+              .replace("{{QUESTION_TEXT}}", question_text or "")
+              .replace("{{EXPECTED_PATH_JSON}}", _json.dumps(expected_path or {}))
+              .replace("{{PROBE_DIRECTIVE}}", probe_directive or ""))
+    return system, version
+
+
 def _probe_target(expected_path: dict, seen_nodes: set, seen_edges: set) -> str:
     """Name the next uncovered concept or causal link, as a directive for the prompt.
 
@@ -4216,35 +4300,10 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         probe_directive = f"\nPROBE TARGET (choose your probe to address this):\n{target}\n"
 
                     # ── Combined Socratic + EDS evaluation prompt ─────────
-                    system_prompt = (
-                        "You are an Epistemy Socratic oral examiner performing two tasks:\n\n"
-                        "TASK 1: SOCRATIC EVALUATION\n"
-                        f"The exam question is: \"{question_text}\"\n"
-                        "Evaluate the student's answer. When adequate=false, provide a scaffolding probe.\n\n"
-                        "TASK 2: EDS COMPONENT EXTRACTION\n"
-                        "Given the expected reasoning path below, identify which concepts and causal links "
-                        "the student DEMONSTRATED WITH UNDERSTANDING (not just named).\n\n"
-                        f"EXPECTED PATH:\n{_json.dumps(expected_path)}\n\n"
-                        "SCORING RULES:\n"
-                        "- A node is 'demonstrated' only if the student shows understanding of WHAT it means\n"
-                        "- An edge is 'demonstrated' only if the student articulates the CAUSAL MECHANISM between src and dst\n"
-                        "- recitation_score: 0.0=fully authentic reasoning, 1.0=pure keyword recitation without understanding\n"
-                        "- novel_extensions: valid concepts/links beyond the expected path\n\n"
-                        "CRITICAL: adequate=true ONLY if student shows clear mechanistic/causal reasoning.\n"
-                        "ALWAYS provide a probe sub-question that is grounded in THIS student's actual "
-                        "answer: quote or paraphrase the specific thing they said (or the exact step they "
-                        "skipped) and push on that precise gap or next causal link. Do NOT emit a generic, "
-                        "reusable phrase like 'tell me more', 'explain the mechanism', or 'why does that "
-                        "matter' — the probe must only make sense as a reply to what they just said.\n"
-                        + probe_directive + "\n"
-                        "Respond ONLY with minified JSON, no prose, no code fences:\n"
-                        '{"clarify": false, "answered": true, "adequate": false, '
-                        '"feedback": "one sentence", "probe": "follow-up question", '
-                        '"eds": {"nodes_demonstrated": ["list of node labels demonstrated"], '
-                        '"edges_demonstrated": [0, 1], '
-                        '"recitation_score": 0.3, '
-                        '"novel_extensions": ["any valid concepts beyond expected path"]}}'
-                    )
+                    # Assembled by the shared builder so the admin tone-lab endpoint
+                    # renders byte-identically (and an approved override can retune it).
+                    system_prompt, _ = build_examiner_eval_prompt(
+                        repo, org_id, question_text, expected_path, probe_directive)
                 else:
                     # ── Legacy Socratic-only prompt (no expected_path) ────
                     system_prompt = (
@@ -6151,6 +6210,342 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
+    # ── Examiner Tone Lab ────────────────────────────────────────────────────
+    # Read-only eval endpoints (the live examiner prompt + curated cases) plus the
+    # experiment-tracking and prompt-override governance surface for /admin/tone-lab.
+
+    @app.get(R.ADMIN_EVAL_PROMPT)
+    def eval_examiner_prompt(course: str = "", instructor: str = "", question_id: str = "",
+                             x_org_name: str = Header(...),
+                             x_user_id: str = Header("operator"),
+                             x_role: str = Header("platform_admin")):
+        """Return the examiner evaluation system prompt exactly as production renders it
+        (same code path via build_examiner_eval_prompt), so the tone lab's A0 baseline
+        never drifts from what ships. Reflects an active override if one is live."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                qtext, epath, resolved_qid = _resolve_examiner_case(
+                    repo, caller.org_id, question_id)
+                system, version = build_examiner_eval_prompt(
+                    repo, caller.org_id, qtext, epath, "")
+                settings = d["settings"]
+                return {
+                    "system": system,
+                    "prompt_version": version,
+                    "model": getattr(settings, "anthropic_model", None),
+                    "temperature": 0.1,          # matches the answer-flow call_bedrock
+                    "input_mode": "block",       # question in system, answer in user msg
+                    "source": "render",
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "context": {
+                        "org": x_org_name,
+                        "course": course or None,
+                        "instructor": instructor or None,
+                        "question_id": resolved_qid,
+                        "has_expected_path": bool((epath or {}).get("nodes")),
+                        "note": ("probe_directive rendered empty (the turn-0 production "
+                                 "value); it steers probe target selection, not tone."),
+                    },
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_EVAL_CASES)
+    def eval_cases(x_org_name: str = Header(...),
+                   x_user_id: str = Header("operator"),
+                   x_role: str = Header("platform_admin")):
+        """Return the org's curated question stems + expected-path context graphs, the
+        way the examiner is actually given them, for the lab to merge by question id."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                return {"cases": _build_eval_cases(repo, caller.org_id)}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.ADMIN_EVAL_EXPERIMENTS)
+    def save_tone_experiment(req: ToneExperimentSaveRequest,
+                             x_org_name: str = Header(...),
+                             x_user_id: str = Header("operator"),
+                             x_role: str = Header("platform_admin")):
+        """Persist a completed tone-lab run and compute a server-side recommendation."""
+        import uuid as _uuid, json as _json
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                recommendation = _tone_recommendation(req.summary or {})
+                experiment_id = str(_uuid.uuid4())
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.tone_experiment')")
+                    if cur.fetchone()[0] is None:
+                        return {"status": "error",
+                                "message": "tone_experiment table not present — run migration_023."}
+                    cur.execute(
+                        """INSERT INTO tone_experiment
+                           (experiment_id, org_id, title, prompt_version, config,
+                            summary, recommendation, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s, %s, %s::jsonb, %s::jsonb,
+                                   %s::jsonb, %s)""",
+                        (experiment_id, caller.org_id, req.title, req.prompt_version,
+                         _json.dumps(req.config or {}), _json.dumps(req.summary or {}),
+                         _json.dumps(recommendation), caller.user_id))
+                repo.conn.commit()
+                return {"experiment_id": experiment_id, "status": "saved",
+                        "recommendation": recommendation}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_EVAL_EXPERIMENTS)
+    def list_tone_experiments(x_org_name: str = Header(...),
+                              x_user_id: str = Header("operator"),
+                              x_role: str = Header("platform_admin")):
+        """Saved tone-lab experiment history (newest first) for the dashboard table."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.tone_experiment')")
+                    if cur.fetchone()[0] is None:
+                        return {"experiments": []}
+                    cur.execute(
+                        """SELECT experiment_id, title, prompt_version, summary,
+                                  recommendation, created_by, created_at
+                           FROM tone_experiment WHERE org_id = %s::uuid
+                           ORDER BY created_at DESC LIMIT 50""",
+                        (caller.org_id,))
+                    rows = cur.fetchall()
+                return {"experiments": [
+                    {"experiment_id": str(r[0]), "title": r[1], "prompt_version": r[2],
+                     "summary": r[3], "recommendation": r[4], "created_by": r[5],
+                     "created_at": r[6].isoformat() if r[6] else None}
+                    for r in rows]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_EVAL_EXPERIMENT)
+    def get_tone_experiment(experiment_id: str, x_org_name: str = Header(...),
+                            x_user_id: str = Header("operator"),
+                            x_role: str = Header("platform_admin")):
+        """One saved experiment's full config, summary and recommendation."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.tone_experiment')")
+                    if cur.fetchone()[0] is None:
+                        return {"status": "not_found"}
+                    cur.execute(
+                        """SELECT experiment_id, title, prompt_version, config, summary,
+                                  recommendation, created_by, created_at
+                           FROM tone_experiment
+                           WHERE experiment_id = %s::uuid AND org_id = %s::uuid""",
+                        (experiment_id, caller.org_id))
+                    r = cur.fetchone()
+                if not r:
+                    return {"status": "not_found"}
+                return {"experiment_id": str(r[0]), "title": r[1], "prompt_version": r[2],
+                        "config": r[3], "summary": r[4], "recommendation": r[5],
+                        "created_by": r[6],
+                        "created_at": r[7].isoformat() if r[7] else None}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.ADMIN_EVAL_OVERRIDES)
+    def create_prompt_override(req: PromptOverrideCreateRequest,
+                               x_org_name: str = Header(...),
+                               x_user_id: str = Header("operator"),
+                               x_role: str = Header("platform_admin")):
+        """Create a DRAFT examiner-prompt override. Validates the template carries the
+        placeholder tokens so activation can never brick the answer flow."""
+        import uuid as _uuid
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                missing = [t for t in _OVERRIDE_REQUIRED_TOKENS if t not in (req.template or "")]
+                if missing:
+                    return {"status": "invalid",
+                            "message": "template is missing required tokens: " + ", ".join(missing)}
+                override_id = str(_uuid.uuid4())
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.examiner_prompt_override')")
+                    if cur.fetchone()[0] is None:
+                        return {"status": "error",
+                                "message": "examiner_prompt_override table not present — run migration_023."}
+                    cur.execute(
+                        """INSERT INTO examiner_prompt_override
+                           (override_id, org_id, template, notes, status,
+                            based_on_experiment_id, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s, %s, 'draft', %s, %s)""",
+                        (override_id, caller.org_id, req.template, req.notes,
+                         req.based_on_experiment_id, caller.user_id))
+                repo.conn.commit()
+                return {"override_id": override_id, "status": "draft"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.ADMIN_EVAL_OVERRIDES)
+    def list_prompt_overrides(x_org_name: str = Header(...),
+                              x_user_id: str = Header("operator"),
+                              x_role: str = Header("platform_admin")):
+        """List examiner-prompt overrides (newest first) + the shipped default version."""
+        import hashlib as _hashlib
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                default_version = "default:" + _hashlib.sha1(
+                    EXAMINER_EVAL_TEMPLATE.encode("utf-8")).hexdigest()[:8]
+                overrides = []
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.examiner_prompt_override')")
+                    if cur.fetchone()[0] is not None:
+                        cur.execute(
+                            """SELECT override_id, notes, status, based_on_experiment_id,
+                                      created_by, created_at, reviewed_by, reviewed_at,
+                                      activated_at
+                               FROM examiner_prompt_override WHERE org_id = %s::uuid
+                               ORDER BY created_at DESC LIMIT 50""",
+                            (caller.org_id,))
+                        for r in cur.fetchall():
+                            overrides.append({
+                                "override_id": str(r[0]), "notes": r[1], "status": r[2],
+                                "based_on_experiment_id": str(r[3]) if r[3] else None,
+                                "created_by": r[4],
+                                "created_at": r[5].isoformat() if r[5] else None,
+                                "reviewed_by": r[6],
+                                "reviewed_at": r[7].isoformat() if r[7] else None,
+                                "activated_at": r[8].isoformat() if r[8] else None,
+                            })
+                active = next((o for o in overrides if o["status"] == "active"), None)
+                return {"overrides": overrides, "default_version": default_version,
+                        "active_version": ("active:" + active["override_id"][:8]) if active
+                                          else default_version,
+                        "default_template": EXAMINER_EVAL_TEMPLATE}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    def _override_transition(override_id, x_user_id, x_role, x_org_name,
+                             *, from_status, to_status, stamp):
+        """Shared status-transition for the override lifecycle. `stamp` names the audit
+        column to set to NOW() with the caller (reviewed_by / activated)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.examiner_prompt_override')")
+                    if cur.fetchone()[0] is None:
+                        return {"status": "error",
+                                "message": "examiner_prompt_override table not present — run migration_023."}
+                    cur.execute(
+                        """SELECT status FROM examiner_prompt_override
+                           WHERE override_id = %s::uuid AND org_id = %s::uuid""",
+                        (override_id, caller.org_id))
+                    row = cur.fetchone()
+                    if not row:
+                        return {"status": "not_found"}
+                    if from_status is not None and row[0] != from_status:
+                        return {"status": "conflict",
+                                "message": f"override is '{row[0]}', expected '{from_status}'"}
+                    # Activation is exclusive: archive whatever is currently active first,
+                    # so the one-active-per-org unique index is never violated.
+                    if to_status == "active":
+                        cur.execute(
+                            """UPDATE examiner_prompt_override SET status = 'archived'
+                               WHERE org_id = %s::uuid AND status = 'active'""",
+                            (caller.org_id,))
+                    sets = ["status = %s"]
+                    vals = [to_status]
+                    if stamp == "reviewed":
+                        sets += ["reviewed_by = %s", "reviewed_at = NOW()"]
+                        vals += [caller.user_id]
+                    elif stamp == "activated":
+                        sets += ["activated_at = NOW()"]
+                    cur.execute(
+                        "UPDATE examiner_prompt_override SET " + ", ".join(sets) +
+                        " WHERE override_id = %s::uuid AND org_id = %s::uuid",
+                        (*vals, override_id, caller.org_id))
+                repo.conn.commit()
+                return {"override_id": override_id, "status": to_status}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.ADMIN_EVAL_OVERRIDE_APPROVE)
+    def approve_prompt_override(override_id: str, x_org_name: str = Header(...),
+                                x_user_id: str = Header("operator"),
+                                x_role: str = Header("platform_admin")):
+        """Review gate: draft → approved (records reviewer)."""
+        return _override_transition(override_id, x_user_id, x_role, x_org_name,
+                                    from_status="draft", to_status="approved",
+                                    stamp="reviewed")
+
+    @app.post(R.ADMIN_EVAL_OVERRIDE_ACTIVATE)
+    def activate_prompt_override(override_id: str, x_org_name: str = Header(...),
+                                 x_user_id: str = Header("operator"),
+                                 x_role: str = Header("platform_admin")):
+        """Go live: approved → active. The prior active override is archived atomically."""
+        return _override_transition(override_id, x_user_id, x_role, x_org_name,
+                                    from_status="approved", to_status="active",
+                                    stamp="activated")
+
+    @app.post(R.ADMIN_EVAL_OVERRIDE_REVERT)
+    def revert_prompt_override(override_id: str, x_org_name: str = Header(...),
+                               x_user_id: str = Header("operator"),
+                               x_role: str = Header("platform_admin")):
+        """Instant revert: active → archived, so the answer flow falls back to the
+        shipped default template."""
+        return _override_transition(override_id, x_user_id, x_role, x_org_name,
+                                    from_status="active", to_status="archived",
+                                    stamp=None)
+
+    @app.post(R.ADMIN_EVAL_OVERRIDE_REJECT)
+    def reject_prompt_override(override_id: str, x_org_name: str = Header(...),
+                               x_user_id: str = Header("operator"),
+                               x_role: str = Header("platform_admin")):
+        """Discard a proposal: draft → rejected."""
+        return _override_transition(override_id, x_user_id, x_role, x_org_name,
+                                    from_status="draft", to_status="rejected",
+                                    stamp="reviewed")
+
 
 class QGTestRunRequest(BaseModel):
     """POST body to run the QG quality bench for one subject."""
@@ -6175,6 +6570,142 @@ class PerfProbeRequest(BaseModel):
     runs: int = Field(default=3, ge=1, le=8)
     title: Optional[str] = Field(default=None, max_length=200)
     params: Optional[Dict[str, object]] = None
+
+
+# ── Examiner Tone Lab: request models + helpers ─────────────────────────────
+_OVERRIDE_REQUIRED_TOKENS = ("{{QUESTION_TEXT}}", "{{EXPECTED_PATH_JSON}}",
+                             "{{PROBE_DIRECTIVE}}")
+
+
+class ToneExperimentSaveRequest(BaseModel):
+    """POST body: a completed tone-lab run to persist. `summary` is the per-arm tally
+    the lab computed; the server derives the recommendation from it."""
+    title: Optional[str] = Field(default=None, max_length=200)
+    prompt_version: Optional[str] = Field(default=None, max_length=120)
+    config: Optional[Dict[str, object]] = None
+    summary: Optional[Dict[str, object]] = None
+
+
+class PromptOverrideCreateRequest(BaseModel):
+    """POST body: a proposed examiner-prompt override template (created as a draft)."""
+    template: str = Field(min_length=40, max_length=20000)
+    notes: Optional[str] = Field(default=None, max_length=4000)
+    based_on_experiment_id: Optional[str] = Field(default=None, max_length=64)
+
+
+def _tone_recommendation(summary: dict) -> dict:
+    """Deterministically rank arms by combined leakage + tone-violation penalty and
+    pick the best. `summary["arms"]` is a list of per-arm metric dicts from the lab."""
+    arms = (summary or {}).get("arms") or []
+    scored = []
+    for a in arms:
+        lr = float(a.get("leak_rate", 0) or 0)
+        pen = (lr * 100
+               + 3 * int(a.get("evaluative", 0) or 0)
+               + 3 * int(a.get("confirms", 0) or 0)
+               + 1 * int(a.get("compound", 0) or 0)
+               + 2 * int(a.get("empty_probe", 0) or 0)
+               + 5 * int(a.get("parse_fails", 0) or 0))
+        scored.append({"arm": a.get("arm"), "penalty": round(pen, 2), "leak_rate": lr,
+                       "evaluative": int(a.get("evaluative", 0) or 0),
+                       "confirms": int(a.get("confirms", 0) or 0)})
+    scored.sort(key=lambda x: x["penalty"])
+    if not scored:
+        return {"pick": None, "rationale": "No per-arm metrics were provided.", "ranking": []}
+    best = scored[0]
+    baseline = next((s for s in scored if s["arm"] == "A0"), None)
+    rationale = (f"{best['arm']} scores lowest on the combined leakage + tone-violation "
+                 f"penalty ({best['penalty']}).")
+    if best["arm"] == "A0":
+        rationale += " The shipped baseline already wins on this run — no change recommended yet."
+    elif baseline is not None:
+        delta = round(baseline["penalty"] - best["penalty"], 2)
+        rationale += (f" It beats the shipped A0 baseline by {delta} "
+                      f"(A0 leak rate {baseline['leak_rate']:.0%}, "
+                      f"{best['arm']} {best['leak_rate']:.0%}).")
+    return {"pick": best["arm"], "rationale": rationale, "ranking": scored}
+
+
+def _resolve_examiner_case(repo, org_id, question_id: str):
+    """Resolve (question_text, expected_path, question_id) for the prompt endpoint.
+
+    With a question_id, return that question. Otherwise pick the org's most recent
+    question that already has a non-empty expected_path (so A0 renders a real graph
+    without a Bedrock generation side effect). Falls back to a placeholder when the
+    org has no questions yet. Defensive against an un-migrated expected_path column.
+    """
+    import json as _json
+    def _epath(val):
+        if not val:
+            return {}
+        return val if isinstance(val, dict) else _json.loads(val)
+    with repo.conn.cursor() as cur:
+        try:
+            if question_id:
+                cur.execute(
+                    """SELECT text, expected_path FROM question
+                       WHERE question_id = %s::uuid AND org_id = %s::uuid""",
+                    (question_id, org_id))
+                row = cur.fetchone()
+                if row:
+                    return row[0], _epath(row[1]), question_id
+            cur.execute(
+                """SELECT question_id, text, expected_path FROM question
+                   WHERE org_id = %s::uuid AND expected_path IS NOT NULL
+                         AND jsonb_array_length(COALESCE(expected_path->'nodes', '[]'::jsonb)) > 0
+                   ORDER BY created_at DESC LIMIT 1""",
+                (org_id,))
+            row = cur.fetchone()
+            if row:
+                return row[1], _epath(row[2]), str(row[0])
+            # No graph-backed question: return any question's stem so A0 still renders.
+            cur.execute(
+                """SELECT question_id, text FROM question WHERE org_id = %s::uuid
+                   ORDER BY created_at DESC LIMIT 1""",
+                (org_id,))
+            row = cur.fetchone()
+            if row:
+                return row[1], {}, str(row[0])
+        except Exception:
+            repo.conn.rollback()  # un-migrated expected_path column, etc.
+    return ("(no questions in this org yet — showing the prompt skeleton)", {}, None)
+
+
+def _build_eval_cases(repo, org_id) -> dict:
+    """Build the tone-lab cases map from the org's graph-backed questions. Each case is
+    {domain, stem, graph:[{id,eps,text}]}, derived from question.text + expected_path."""
+    import json as _json
+    cases = {}
+    with repo.conn.cursor() as cur:
+        try:
+            cur.execute(
+                """SELECT q.question_id, q.text, q.expected_path, c.name
+                   FROM question q LEFT JOIN course c ON c.course_id = q.course_id
+                   WHERE q.org_id = %s::uuid AND q.expected_path IS NOT NULL
+                         AND jsonb_array_length(COALESCE(q.expected_path->'nodes', '[]'::jsonb)) > 0
+                   ORDER BY q.created_at DESC LIMIT 50""",
+                (org_id,))
+            rows = cur.fetchall()
+        except Exception:
+            repo.conn.rollback()  # expected_path column not present yet
+            return cases
+    for qid, text, epath_raw, course_name in rows:
+        epath = epath_raw if isinstance(epath_raw, dict) else _json.loads(epath_raw or "{}")
+        edges = epath.get("edges") or []
+        graph = []
+        for i, e in enumerate(edges):
+            src, dst = e.get("src", ""), e.get("dst", "")
+            if not src or not dst:
+                continue
+            expl = (e.get("explanation") or "").strip()
+            text_edge = f"{src} -> {dst}" + (f", {expl}" if expl else "")
+            # expected_path carries no saliency; approximate a descending epsilon by
+            # position so the lab's highest-first probe ordering has something to sort on.
+            eps = round(max(0.5, 0.9 - 0.1 * i), 2)
+            graph.append({"id": f"E{i + 1}", "eps": eps, "text": text_edge})
+        cases[str(qid)] = {"domain": course_name or "Course",
+                           "stem": text, "graph": graph}
+    return cases
 
 
 def _ensure_qg_test_table(repo) -> None:

@@ -166,6 +166,12 @@ def migrate() -> None:
             print(f"applying {migration_022.name} ...")
             cur.execute(migration_022.read_text())
 
+        # Always apply migration_023 (tone-lab experiments + examiner override; idempotent)
+        migration_023 = db_dir / "migration_023_tone_lab.sql"
+        if migration_023.exists():
+            print(f"applying {migration_023.name} ...")
+            cur.execute(migration_023.read_text())
+
     conn.commit()
     print("all schemas applied")
 

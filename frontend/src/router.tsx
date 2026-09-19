@@ -20,6 +20,7 @@ import AdminTasks from './pages/admin/AdminTasks';
 import AdminTesting from './pages/admin/AdminTesting';
 import AdminDirectory from './pages/admin/AdminDirectory';
 import AdminPerformance from './pages/admin/AdminPerformance';
+import AdminToneLab from './pages/admin/AdminToneLab';
 
 function getUser() {
   const raw = localStorage.getItem('user');
@@ -88,6 +89,10 @@ export const router = createBrowserRouter([
       {
         path: '/admin/performance',
         element: <RequireRole role="platform_admin"><AdminPerformance /></RequireRole>,
+      },
+      {
+        path: '/admin/tone-lab',
+        element: <RequireRole role="platform_admin"><AdminToneLab /></RequireRole>,
       },
       {
         path: '/admin/simulations',
