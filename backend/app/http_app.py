@@ -389,6 +389,36 @@ def _run_hybrid_eds_bg(settings, org_id, course_id, student_id, session_id,
             conn.close()
 
 
+# LLM warm-start readiness. A fresh task's first eval otherwise pays ~2s of Secrets
+# Manager fetch + SDK import + first-TLS cold-start; we pay it at boot instead and keep
+# /health at 503 until warm so the ALB doesn't route a cold task (see _warmup_llm).
+_LLM_READY = False
+
+
+def _warmup_llm(settings) -> None:
+    """Pre-build the Anthropic client and open a keep-alive connection for both the
+    Haiku (hybrid probe) and Sonnet (eval/EDS) models at task start. Best-effort:
+    readiness flips in `finally` regardless, so a warmup failure never bricks the task
+    (a cold task still works, just pays the first-call penalty)."""
+    global _LLM_READY
+    from backend.bedrock_helper import _get_anthropic_client
+    sonnet = getattr(settings, "anthropic_model", "claude-sonnet-4-6")
+    try:
+        client = _get_anthropic_client(settings)  # SM fetch + import + construct
+        for model in (HYBRID_PROBE_MODEL, sonnet):
+            try:
+                client.with_options(timeout=15).messages.create(
+                    model=model, max_tokens=1,
+                    messages=[{"role": "user", "content": "warmup"}])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("LLM warmup ping failed (%s): %s", model, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM warmup failed: %s", exc)
+    finally:
+        _LLM_READY = True
+        logger.info("LLM warmup complete — task ready")
+
+
 def _probe_target(expected_path: dict, seen_nodes: set, seen_edges: set) -> str:
     """Name the next uncovered concept or causal link, as a directive for the prompt.
 
@@ -727,6 +757,22 @@ def create_app() -> FastAPI:
     )
     _register_routes(app, deps)
     _mount_demo(app)
+
+    @app.on_event("startup")
+    def _warm_llm_on_start() -> None:
+        """Warm the LLM client before the task takes traffic. /health stays 503 until
+        ready (below), so the ALB won't route a cold task; a 20s backstop flips ready
+        even if warmup hangs, so a bad warmup can never hold the task unhealthy."""
+        threading.Thread(target=_warmup_llm, args=(settings,), daemon=True).start()
+
+        def _backstop() -> None:
+            global _LLM_READY
+            if not _LLM_READY:
+                logger.warning("LLM warmup backstop fired (20s) — marking ready")
+                _LLM_READY = True
+        timer = threading.Timer(20.0, _backstop)
+        timer.daemon = True
+        timer.start()
 
     @app.on_event("shutdown")
     def _clear_interrupted_rebuilds() -> None:
@@ -1559,7 +1605,10 @@ def _register_auth(app: FastAPI, deps) -> None:
 def _register_health(app: FastAPI, deps) -> None:
     @app.get(R.HEALTH)
     def health():
-        """Deep health check: verifies DB connectivity. Returns 503 if DB is down."""
+        """Deep health check: verifies DB connectivity. Returns 503 if DB is down, or
+        while the LLM client is still warming (so the ALB doesn't route a cold task)."""
+        if not _LLM_READY:
+            raise HTTPException(status_code=503, detail="warming up")
         try:
             d = deps()
             pool = d["pool"]
