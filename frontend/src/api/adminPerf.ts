@@ -1,4 +1,22 @@
-import { get, post } from './client';
+import { get, post, put } from './client';
+
+// Answer-flow evaluation mode: 'sonnet' (single Sonnet call, higher fidelity, ~3s) or
+// 'hybrid' (fast Haiku spoken probe + async Sonnet EDS scoring, ~1.5–2s).
+export interface EvalMode {
+  eval_mode: 'sonnet' | 'hybrid';
+  updated_by: string | null;
+  updated_at: string | null;
+  available: string[];
+}
+
+export function getEvalMode(): Promise<EvalMode> {
+  return get('/api/admin/examiner/eval-mode');
+}
+
+export function setEvalMode(eval_mode: 'sonnet' | 'hybrid'):
+  Promise<{ eval_mode: string; status: string; message?: string }> {
+  return put('/api/admin/examiner/eval-mode', { eval_mode });
+}
 
 // Admin performance probe: times the end-to-end student answer flow (eval LLM +
 // TTS per run) plus a one-off expected_path generation, run in the background.

@@ -111,6 +111,7 @@ ADMIN_EVAL_OVERRIDE_APPROVE = "/api/admin/eval/prompt-override/{override_id}/app
 ADMIN_EVAL_OVERRIDE_ACTIVATE = "/api/admin/eval/prompt-override/{override_id}/activate"  # POST approved->active
 ADMIN_EVAL_OVERRIDE_REVERT = "/api/admin/eval/prompt-override/{override_id}/revert"      # POST active->archived (back to default)
 ADMIN_EVAL_OVERRIDE_REJECT = "/api/admin/eval/prompt-override/{override_id}/reject"      # POST draft->rejected
+ADMIN_EXAMINER_EVAL_MODE = "/api/admin/examiner/eval-mode"     # GET current eval mode, PUT set ('sonnet'|'hybrid')
 
 
 def frontend_config() -> dict:

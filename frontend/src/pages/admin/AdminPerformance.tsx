@@ -4,6 +4,7 @@ import { Gauge, Loader2, Play, AlertCircle, Zap, Mic, Timer, AlertTriangle, Hist
 import { ApiError } from '../../api/client';
 import {
   startPerfProbe, getPerfProbe, listPerfProbes, getPerfDefaults,
+  getEvalMode, setEvalMode,
   type PerfProbe, type PerfStat, type PerfTrace, type PerfParams,
 } from '../../api/adminPerf';
 
@@ -51,6 +52,48 @@ function StatCard({ icon: Icon, label, stat, tone = 'neutral', hint }: {
       <div className="mt-2 text-3xl font-bold text-gray-900 tabular-nums">{secs(stat.p50)}</div>
       <div className="text-xs text-gray-500 mt-0.5">median · min {secs(stat.min)} · max {secs(stat.max)}</div>
       {hint && <div className="text-[11px] text-gray-400 mt-1.5 leading-snug">{hint}</div>}
+    </div>
+  );
+}
+
+// Flip switch: answer-flow eval mode. Sonnet (default, ~3s) ⇄ Hybrid (Haiku probe +
+// async Sonnet EDS, ~1.5–2s). Effective on the next student turn — no redeploy.
+function EvalModeToggle() {
+  const qc = useQueryClient();
+  const { data } = useQuery({ queryKey: ['eval-mode'], queryFn: getEvalMode });
+  const mut = useMutation({
+    mutationFn: (m: 'sonnet' | 'hybrid') => setEvalMode(m),
+    onSuccess: (r) => { if (r.message) alert(r.message); qc.invalidateQueries({ queryKey: ['eval-mode'] }); },
+  });
+  const hybrid = (data?.eval_mode ?? 'sonnet') === 'hybrid';
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <div className="text-sm font-medium text-gray-800">Examiner eval mode</div>
+          <p className="text-xs text-gray-500 mt-0.5 max-w-xl">
+            <b>Sonnet</b>: one Sonnet call (probe + EDS together), higher fidelity, ~3 s.{' '}
+            <b>Hybrid</b>: fast Haiku spoken probe + Sonnet EDS scored asynchronously, ~1.5–2 s
+            (the score lands a beat after the probe).
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className={`text-xs font-medium ${!hybrid ? 'text-navy' : 'text-gray-400'}`}>Sonnet · ~3s</span>
+          <button
+            role="switch" aria-checked={hybrid} disabled={mut.isPending}
+            onClick={() => mut.mutate(hybrid ? 'sonnet' : 'hybrid')}
+            className={`relative w-12 h-6 rounded-full transition-colors ${hybrid ? 'bg-gold' : 'bg-gray-300'} disabled:opacity-50`}
+            title="Toggle examiner eval mode">
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${hybrid ? 'translate-x-6' : ''}`} />
+          </button>
+          <span className={`text-xs font-medium ${hybrid ? 'text-navy' : 'text-gray-400'}`}>Hybrid · ~1.5–2s</span>
+        </div>
+      </div>
+      {data?.updated_by && (
+        <div className="text-[11px] text-gray-400 mt-2">
+          last changed by {data.updated_by}{data.updated_at ? ` · ${new Date(data.updated_at).toLocaleString()}` : ''}
+        </div>
+      )}
     </div>
   );
 }
@@ -119,6 +162,8 @@ export default function AdminPerformance() {
           </p>
         </div>
       </div>
+
+      <EvalModeToggle />
 
       {/* Controls */}
       <div className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">

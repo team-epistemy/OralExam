@@ -172,6 +172,12 @@ def migrate() -> None:
             print(f"applying {migration_023.name} ...")
             cur.execute(migration_023.read_text())
 
+        # Always apply migration_024 (examiner_config eval_mode toggle; idempotent)
+        migration_024 = db_dir / "migration_024_examiner_config.sql"
+        if migration_024.exists():
+            print(f"applying {migration_024.name} ...")
+            cur.execute(migration_024.read_text())
+
     conn.commit()
     print("all schemas applied")
 
