@@ -199,19 +199,23 @@ EXAMINER_PROBE_TEMPLATE = (
     "relevant content) and adequate (true ONLY for clear mechanistic/causal reasoning). "
     "Treat \"I don't know\", refusals, gibberish, or off-topic replies as not answered. "
     "When adequate is false, produce a scaffolding probe.\n\n"
+    "OUTPUT FIELDS:\n"
+    "- feedback: a one-sentence internal assessment (for scoring only; NOT spoken to the "
+    "student). Never merge it into the probe.\n"
+    "- probe: the spoken turn — exactly ONE question, and nothing else.\n\n"
     "SPOKEN RULES for the probe (hard):\n"
-    "- At most 25 words: one warm acknowledgment (at most eight words, attached to the "
-    "student's EFFORT only, never evaluating the correctness or quality of what they said) "
-    "then ONE question.\n"
-    "- Never restate or summarize their answer, and never point out what they did not say.\n"
+    "- The probe is ONE question, at most 25 words, and nothing else: NO acknowledgment, "
+    "NO preamble, no praise, no 'good effort'/'nice'/'thanks', no meta-commentary.\n"
+    "- Do NOT evaluate, confirm, or deny the correctness of what they said, and do NOT "
+    "restate or summarize their answer or point out what they did not say.\n"
+    "- Ground it in what they actually said: push on the specific gap or next causal link.\n"
     "- Never name, define, or hint at a concept the student has not already produced.\n"
-    "- Exactly ONE question; never join two questions with \"and\", \"or\", or \"also\". "
-    "Plain spoken sentences only.\n"
+    "- Never join two questions with \"and\", \"or\", or \"also\". Plain spoken sentence.\n"
     "{{PROBE_DIRECTIVE}}\n"
     "Respond ONLY with minified JSON, no prose, no code fences:\n"
     '{"clarify": false, "answered": true, "adequate": false, '
-    '"feedback": "one-sentence assessment, always present", '
-    '"probe": "<=8-word warm acknowledgment then ONE question"}'
+    '"feedback": "one-sentence internal assessment, always present", '
+    '"probe": "ONE grounded question, <=25 words, no acknowledgment"}'
 )
 
 # EDS-only prompt (no probe): the scoring extraction, run async on Sonnet. Tokens
@@ -4640,9 +4644,14 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         h_answered, h_adequate, h_feedback, h_probe = _heuristic_eval(
                             req.answer_text)
                     # Preliminary evaluation row; EDS score filled in by the async worker.
+                    # eds_bucket must satisfy evaluation_bucket_chk (low|medium|high), so use
+                    # a provisional bucket from answered/adequate; the async EDS overwrites it.
+                    # `eds_pending` in raw_llm_output is the real "not yet scored" signal.
                     prelim = {"answered": h_answered, "adequate": h_adequate,
                               "feedback": h_feedback, "probe": h_probe,
                               "eds_pending": True, "eval_mode": "hybrid"}
+                    prelim_bucket = ("high" if h_adequate
+                                     else ("medium" if h_answered else "low"))
                     with repo.conn.cursor() as cur:
                         cur.execute(
                             """INSERT INTO evaluation
@@ -4653,7 +4662,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                                ON CONFLICT (turn_id) DO UPDATE
                                SET raw_llm_output = EXCLUDED.raw_llm_output""",
                             (str(_uuid.uuid4()), actual_turn_id, org_id, course_id,
-                             caller.user_id, question_id, 0.0, "pending",
+                             caller.user_id, question_id, 0.0, prelim_bucket,
                              _json.dumps(prelim)),
                         )
                     repo.conn.commit()

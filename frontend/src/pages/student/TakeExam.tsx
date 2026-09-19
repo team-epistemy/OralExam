@@ -797,13 +797,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       const maxed = attempt >= MAX_TURNS;
       const advance = maxed;
 
+      // Show the student ONLY the examiner's spoken probe. `feedback` is an internal
+      // grader assessment (used for scoring/professor review), never surfaced here.
       let bubble: string;
       if (advance) {
-        bubble = data.feedback || 'Answer recorded.';
+        bubble = 'Answer recorded.';
       } else {
-        bubble = data.feedback && data.probe
-          ? `${data.feedback}\n\n${data.probe}`
-          : data.probe || data.feedback || 'Tell me more about your reasoning.';
+        bubble = data.probe || 'Could you say more about your reasoning?';
       }
 
       const commit = () => {
