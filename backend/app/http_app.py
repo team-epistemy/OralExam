@@ -259,6 +259,30 @@ def get_eval_mode(repo, org_id) -> str:
     return "sonnet"
 
 
+def get_text_first(repo, org_id) -> bool:
+    """Return the org's text-first render flag (default True). True = the student UI
+    shows the probe immediately + plays TTS async; False = reveal text with audio.
+    Guarded/safe on an un-migrated DB (missing table or column) → True."""
+    if repo is None or org_id is None:
+        return True
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.examiner_config')")
+            if cur.fetchone()[0] is None:
+                return True
+            cur.execute("SELECT text_first FROM examiner_config WHERE org_id = %s::uuid",
+                        (org_id,))
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return bool(row[0])
+    except Exception:
+        try:
+            repo.conn.rollback()
+        except Exception:
+            pass
+    return True
+
+
 def build_examiner_probe_prompt(question_text, probe_directive="") -> str:
     """Assemble the Haiku probe-only system prompt (hybrid fast path)."""
     return (EXAMINER_PROBE_TEMPLATE
@@ -3847,6 +3871,8 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     "created_by": row[6],
                     "created_at": row[7].isoformat() if row[7] else None,
                     "assignment_type": row[8] or "assignment",
+                    # Org UI flag: does the student exam render the probe before TTS audio.
+                    "text_first": get_text_first(repo, caller.org_id),
                 }
             finally:
                 _release_repo(d, repo)
@@ -6870,8 +6896,39 @@ def _register_admin_simulations(app: FastAPI, deps) -> None:
                             mode = row[0]
                             updated_by = row[1]
                             updated_at = row[2].isoformat() if row[2] else None
-                return {"eval_mode": mode, "updated_by": updated_by,
-                        "updated_at": updated_at, "available": ["sonnet", "hybrid"]}
+                return {"eval_mode": mode, "text_first": get_text_first(repo, caller.org_id),
+                        "updated_by": updated_by, "updated_at": updated_at,
+                        "available": ["sonnet", "hybrid"]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.put(R.ADMIN_EXAMINER_TEXT_FIRST)
+    def set_examiner_text_first(req: TextFirstRequest, x_org_name: str = Header(...),
+                                x_user_id: str = Header("operator"),
+                                x_role: str = Header("platform_admin")):
+        """Toggle the student-UI text-first render (probe shown before vs with TTS audio)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = _admin_caller(api, x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.examiner_config')")
+                    if cur.fetchone()[0] is None:
+                        return {"status": "error",
+                                "message": "examiner_config table not present — run migration_024/025."}
+                    cur.execute(
+                        """INSERT INTO examiner_config (org_id, text_first, updated_by, updated_at)
+                           VALUES (%s::uuid, %s, %s, NOW())
+                           ON CONFLICT (org_id) DO UPDATE
+                           SET text_first = EXCLUDED.text_first, updated_by = EXCLUDED.updated_by,
+                               updated_at = NOW()""",
+                        (caller.org_id, req.text_first, caller.user_id))
+                repo.conn.commit()
+                return {"text_first": req.text_first, "status": "updated"}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -6956,6 +7013,11 @@ class PromptOverrideCreateRequest(BaseModel):
 class EvalModeRequest(BaseModel):
     """PUT body: the answer-flow evaluation mode toggle."""
     eval_mode: str = Field(pattern=r"^(sonnet|hybrid)$")
+
+
+class TextFirstRequest(BaseModel):
+    """PUT body: the student-UI text-first render toggle."""
+    text_first: bool
 
 
 def _tone_recommendation(summary: dict) -> dict:

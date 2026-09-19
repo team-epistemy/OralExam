@@ -4,6 +4,7 @@ import { get, post, put } from './client';
 // 'hybrid' (fast Haiku spoken probe + async Sonnet EDS scoring, ~1.5–2s).
 export interface EvalMode {
   eval_mode: 'sonnet' | 'hybrid';
+  text_first: boolean;
   updated_by: string | null;
   updated_at: string | null;
   available: string[];
@@ -16,6 +17,13 @@ export function getEvalMode(): Promise<EvalMode> {
 export function setEvalMode(eval_mode: 'sonnet' | 'hybrid'):
   Promise<{ eval_mode: string; status: string; message?: string }> {
   return put('/api/admin/examiner/eval-mode', { eval_mode });
+}
+
+// Text-first render toggle: true = student UI shows the probe immediately and plays
+// TTS async (~instant text); false = probe text is revealed together with the audio.
+export function setTextFirst(text_first: boolean):
+  Promise<{ text_first: boolean; status: string; message?: string }> {
+  return put('/api/admin/examiner/text-first', { text_first });
 }
 
 // Admin performance probe: times the end-to-end student answer flow (eval LLM +

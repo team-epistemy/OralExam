@@ -4,7 +4,7 @@ import { Gauge, Loader2, Play, AlertCircle, Zap, Mic, Timer, AlertTriangle, Hist
 import { ApiError } from '../../api/client';
 import {
   startPerfProbe, getPerfProbe, listPerfProbes, getPerfDefaults,
-  getEvalMode, setEvalMode,
+  getEvalMode, setEvalMode, setTextFirst,
   type PerfProbe, type PerfStat, type PerfTrace, type PerfParams,
 } from '../../api/adminPerf';
 
@@ -65,7 +65,12 @@ function EvalModeToggle() {
     mutationFn: (m: 'sonnet' | 'hybrid') => setEvalMode(m),
     onSuccess: (r) => { if (r.message) alert(r.message); qc.invalidateQueries({ queryKey: ['eval-mode'] }); },
   });
+  const tfMut = useMutation({
+    mutationFn: (v: boolean) => setTextFirst(v),
+    onSuccess: (r) => { if (r.message) alert(r.message); qc.invalidateQueries({ queryKey: ['eval-mode'] }); },
+  });
   const hybrid = (data?.eval_mode ?? 'sonnet') === 'hybrid';
+  const textFirst = data?.text_first ?? true;
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-4">
       <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -87,6 +92,27 @@ function EvalModeToggle() {
             <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${hybrid ? 'translate-x-6' : ''}`} />
           </button>
           <span className={`text-xs font-medium ${hybrid ? 'text-navy' : 'text-gray-400'}`}>Hybrid · ~1.5–2s</span>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-4 flex-wrap mt-4 pt-4 border-t border-gray-100">
+        <div>
+          <div className="text-sm font-medium text-gray-800">Text-first render</div>
+          <p className="text-xs text-gray-500 mt-0.5 max-w-xl">
+            <b>On</b>: the student sees the examiner's probe immediately; TTS audio plays a moment
+            later.{' '}<b>Off</b>: the probe text is revealed together with the audio (falls back to
+            immediate if audio is muted, unavailable, or slow).
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className={`text-xs font-medium ${!textFirst ? 'text-navy' : 'text-gray-400'}`}>Off</span>
+          <button
+            role="switch" aria-checked={textFirst} disabled={tfMut.isPending}
+            onClick={() => tfMut.mutate(!textFirst)}
+            className={`relative w-12 h-6 rounded-full transition-colors ${textFirst ? 'bg-gold' : 'bg-gray-300'} disabled:opacity-50`}
+            title="Toggle text-first render">
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${textFirst ? 'translate-x-6' : ''}`} />
+          </button>
+          <span className={`text-xs font-medium ${textFirst ? 'text-navy' : 'text-gray-400'}`}>On</span>
         </div>
       </div>
       {data?.updated_by && (

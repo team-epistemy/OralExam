@@ -88,14 +88,16 @@ interface AssignmentMeta {
   duration_minutes: number | null;
   question_count: number | null;
   assignment_type: string;
+  text_first: boolean;
 }
 
 async function fetchAssignmentMeta(assignmentId: string): Promise<AssignmentMeta> {
-  const data = await get<{ config?: { time_limit_minutes?: number; max_questions?: number }; assignment_type?: string }>(`/api/assignments/${assignmentId}`);
+  const data = await get<{ config?: { time_limit_minutes?: number; max_questions?: number }; assignment_type?: string; text_first?: boolean }>(`/api/assignments/${assignmentId}`);
   return {
     duration_minutes: data.config?.time_limit_minutes ?? null,
     question_count: data.config?.max_questions ?? null,
     assignment_type: data.assignment_type ?? 'assignment',
+    text_first: data.text_first ?? true,
   };
 }
 
@@ -396,6 +398,10 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const recognitionRef = useRef<{ stop: () => void; start: () => void } | null>(null);
   const spokenRef = useRef<string>('');
+  // Org "text-first render" flag (from assignment meta): true = show probe immediately +
+  // play TTS async; false = reveal probe text together with the audio. Kept in a ref so
+  // the answer-mutation callback reads the current value.
+  const textFirstRef = useRef<boolean>(true);
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [ttsOn, setTtsOn] = useState(true);
@@ -419,9 +425,11 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     return () => { cancelled = true; };
   }, [assignmentId]);
 
-  const speak = useCallback(async (text: string) => {
+  // Fetch TTS audio without playing it (so callers can control when playback starts —
+  // e.g. reveal-with-audio mode). Returns null when TTS is off/unavailable/errors.
+  const fetchTTS = useCallback(async (text: string): Promise<HTMLAudioElement | null> => {
     const spoken = speechFriendly(text);
-    if (!ttsOn || !spoken) return;
+    if (!ttsOn || !spoken) return null;
     try {
       const token = localStorage.getItem('token');
       const resp = await fetch(`${API_BASE_URL}/api/tts`, {
@@ -433,16 +441,23 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         // 503 = TTS not configured server-side. Make it honest instead of silent:
         // flag audio as unavailable so the UI stops implying questions are spoken.
         if (resp.status === 503) setTtsAvailable(false);
-        return;
+        return null;
       }
       setTtsAvailable(true);
-      const url = URL.createObjectURL(await resp.blob());
-      audioRef.current?.pause();
-      const audio = new Audio(url);
-      audioRef.current = audio;
-      audio.play().catch(() => { /* autoplay may be blocked until a gesture */ });
-    } catch { /* network / unsupported -> silent */ }
+      return new Audio(URL.createObjectURL(await resp.blob()));
+    } catch { return null; /* network / unsupported -> silent */ }
   }, [ttsOn]);
+
+  const playAudio = useCallback((audio: HTMLAudioElement | null) => {
+    if (!audio) return;
+    audioRef.current?.pause();
+    audioRef.current = audio;
+    audio.play().catch(() => { /* autoplay may be blocked until a gesture */ });
+  }, []);
+
+  const speak = useCallback(async (text: string) => {
+    playAudio(await fetchTTS(text));
+  }, [fetchTTS, playAudio]);
 
   // Fully stop dictation. Called on toggle-off, on submit, and on question
   // change so one answer's speech never bleeds into the next (issue: spillover).
@@ -568,6 +583,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         const meta = await fetchAssignmentMeta(assignmentId);
         if (cancelled) return;
         setMeta(meta);
+        textFirstRef.current = meta.text_first;
 
         // Check for saved state first — never resume/load in preview (start fresh).
         if (!preview) {
@@ -790,21 +806,45 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           : data.probe || data.feedback || 'Tell me more about your reasoning.';
       }
 
-      setQData((prev) =>
-        prev.map((q, idx) => {
-          if (idx !== questionIndex) return q;
-          return {
-            ...q,
-            turns: [...q.turns, { role: 'evaluator', text: bubble }],
-            attempts: attempt,
-            attempted: true,
-            done: advance,
-            score: data.eds_question ?? Math.min(1, q.score + data.eds_delta / 10),
-            edsComponents: data.eds_components ?? null,
-          };
-        }),
-      );
-      scrollBottom();
+      const commit = () => {
+        setQData((prev) =>
+          prev.map((q, idx) => {
+            if (idx !== questionIndex) return q;
+            return {
+              ...q,
+              turns: [...q.turns, { role: 'evaluator', text: bubble }],
+              attempts: attempt,
+              attempted: true,
+              done: advance,
+              score: data.eds_question ?? Math.min(1, q.score + data.eds_delta / 10),
+              edsComponents: data.eds_components ?? null,
+            };
+          }),
+        );
+        scrollBottom();
+      };
+
+      const canTts = ttsOn && ttsAvailable;
+      if (textFirstRef.current || !canTts) {
+        // Text-first (or TTS unusable): show the probe immediately; the speak effect
+        // narrates it once the audio arrives.
+        commit();
+      } else {
+        // Reveal-with-audio: withhold the probe text until TTS is ready, then reveal +
+        // play together. Fallbacks so the probe is never lost — reveal on error, or
+        // after 2.5s if audio is slow.
+        let revealed = false;
+        const reveal = () => {
+          if (revealed) return;
+          revealed = true;
+          spokenRef.current = bubble;   // stop the speak effect double-narrating
+          commit();
+        };
+        const timer = setTimeout(reveal, 2500);
+        fetchTTS(bubble)
+          .then((audio) => { clearTimeout(timer); reveal(); playAudio(audio); })
+          .catch(() => { clearTimeout(timer); reveal(); });
+      }
     },
     onError: (err: Error) => {
       setError(err.message);
