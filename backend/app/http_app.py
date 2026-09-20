@@ -5860,6 +5860,15 @@ def _guard(deps, fn):
 
 
 
+# Shown when the evaluation LLM is unreachable and grading falls back to keyword
+# matching. Deliberately says the SYSTEM struggled, not the student: this path fires
+# on a bad API key, a 429, a timeout or unparseable JSON, none of which say anything
+# about the answer. The old "Good attempt." read as a verdict on a response nothing
+# had actually assessed.
+_FALLBACK_FEEDBACK = "I had difficulty processing your response."
+_FALLBACK_PROBE = "Can you explain your answer further?"
+
+
 def _heuristic_eval(answer_text: str) -> tuple:
     """Fallback answer evaluation when Bedrock is unavailable."""
     answer_lower = answer_text.strip().lower()
@@ -5873,8 +5882,8 @@ def _heuristic_eval(answer_text: str) -> tuple:
     ]
     has_causal = any(m in answer_lower for m in causal_markers)
     adequate = has_causal and len(answer_lower) > 40
-    feedback = "Good attempt." if not adequate else ""
-    probe = "Can you explain the causal mechanism behind your answer?" if not adequate else ""
+    feedback = _FALLBACK_FEEDBACK if not adequate else ""
+    probe = _FALLBACK_PROBE if not adequate else ""
     return True, adequate, feedback, probe
 
 
