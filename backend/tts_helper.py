@@ -39,6 +39,12 @@ def _resolve_key(settings: Settings) -> Optional[str]:
         return None
 
 
+# 64 kbps mono MP3 at 44.1 kHz. Speech at conversational bitrates is
+# indistinguishable from the previous default here, and the smaller body is less to
+# generate and less to transfer on every single turn of every exam.
+OUTPUT_FORMAT = "mp3_44100_64"
+
+
 def synthesize(settings: Settings, text: str, voice_id: Optional[str] = None,
                model: Optional[str] = None) -> Optional[bytes]:
     """Return MP3 audio bytes for `text`, or None if TTS is not configured / failed."""
@@ -46,8 +52,11 @@ def synthesize(settings: Settings, text: str, voice_id: Optional[str] = None,
     if not key:
         return None
     vid = voice_id or getattr(settings, "elevenlabs_voice_id", "21m00Tcm4TlvDq8ikWAM")
-    model = model or getattr(settings, "elevenlabs_model", "eleven_turbo_v2_5")
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{vid}"
+    model = model or getattr(settings, "elevenlabs_model", "eleven_flash_v2_5")
+    # The /stream variant returns audio as it is generated rather than buffering the
+    # whole clip server-side first, so our proxy starts receiving bytes sooner.
+    url = (f"https://api.elevenlabs.io/v1/text-to-speech/{vid}/stream"
+           f"?output_format={OUTPUT_FORMAT}")
     body = json.dumps({
         "text": text[:2500],
         "model_id": model,

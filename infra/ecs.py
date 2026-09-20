@@ -14,12 +14,24 @@ def ensure_cluster(ecs, name: str) -> str:
     return ecs.create_cluster(clusterName=name)["cluster"]["clusterArn"]
 
 
+LOG_RETENTION_DAYS = 7
+
+
 def ensure_log_group(logs, name: str) -> None:
-    """Create the CloudWatch log group, tolerating prior existence."""
+    """Create the CloudWatch log group, tolerating prior existence.
+
+    Retention is set every run, not just on creation: a group created without it
+    keeps events forever, which is unbounded cost for logs nobody reads after a week.
+    """
     try:
         logs.create_log_group(logGroupName=name)
     except ClientError:
         pass
+    try:
+        logs.put_retention_policy(logGroupName=name,
+                                  retentionInDays=LOG_RETENTION_DAYS)
+    except ClientError:
+        pass  # group may be managed elsewhere; retention is not worth failing a deploy
 
 
 def register_task_def(ecs, family: str, image: str, role_arn: str,

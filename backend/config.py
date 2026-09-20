@@ -37,7 +37,9 @@ class Settings:
     # ElevenLabs TTS: Secrets Manager id for the API key, voice, and model.
     elevenlabs_secret: str = os.getenv("EPISTEMY_ELEVENLABS_SECRET", "")
     elevenlabs_voice_id: str = os.getenv("EPISTEMY_ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
-    elevenlabs_model: str = os.getenv("EPISTEMY_ELEVENLABS_MODEL", "eleven_turbo_v2_5")
+    # flash, not turbo: turbo_v2_5 is deprecated and roughly 3x the model latency of
+    # flash_v2_5 (~75ms), which every answer of every exam pays.
+    elevenlabs_model: str = os.getenv("EPISTEMY_ELEVENLABS_MODEL", "eleven_flash_v2_5")
     embed_model: str = os.getenv("EPISTEMY_EMBED_MODEL", EMBED_MODEL_ID)
     embed_dims: int = int(os.getenv("EPISTEMY_EMBED_DIMS", "1024"))
     bedrock_region: str = os.getenv("EPISTEMY_BEDROCK_REGION", "us-west-2")
