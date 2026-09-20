@@ -913,6 +913,12 @@ class DemoLinkCreateRequest(BaseModel):
     max_attempts: int = Field(default=10, ge=1, le=500)
 
 
+class DemoLinkOptionsRequest(BaseModel):
+    """POST body (assignment-scoped mint): expiry + attempt-cap knobs (defaults 10/10)."""
+    days: int = Field(default=10, ge=1, le=60)
+    max_attempts: int = Field(default=10, ge=1, le=500)
+
+
 class DemoTTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
 
@@ -1113,6 +1119,39 @@ def _register_demo(app: FastAPI, deps) -> None:
                 repo.conn.commit()
                 return {"token": token, "url": DEMO_URL_BASE + token,
                         "assignment_id": req.assignment_id, "max_attempts": req.max_attempts, "days": req.days}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.ASSIGNMENT_DEMO_LINK)
+    def create_assignment_demo_link(assignment_id: str, req: DemoLinkOptionsRequest,
+                                    x_org_name: str = Header(...),
+                                    x_user_id: str = Header("operator"),
+                                    x_role: str = Header("professor")):
+        """Professor mints a credential-free demo link for one of their org's assignments."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role not in (Role.PROFESSOR, Role.PLATFORM_ADMIN):
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)  # RLS scopes the assignment to the caller's org
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.demo_link')")
+                    if cur.fetchone()[0] is None:
+                        return {"status": "error", "message": "demo_link table not present — run migration_026."}
+                    cur.execute("SELECT title FROM assignment WHERE assignment_id = %s::uuid", (assignment_id,))
+                    arow = cur.fetchone()
+                    if not arow:
+                        raise AuthorizationError("assignment not found")
+                    token = _secrets.token_urlsafe(16)
+                    cur.execute("""INSERT INTO demo_link (token, org_id, assignment_id, max_attempts, expires_at, created_by)
+                                   VALUES (%s, %s::uuid, %s::uuid, %s, NOW() + (%s || ' days')::interval, %s)""",
+                                (token, caller.org_id, assignment_id, req.max_attempts, req.days, caller.user_id))
+                repo.conn.commit()
+                return {"token": token, "url": DEMO_URL_BASE + token, "title": arow[0],
+                        "assignment_id": assignment_id, "days": req.days, "max_attempts": req.max_attempts}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

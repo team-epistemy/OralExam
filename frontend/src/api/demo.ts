@@ -1,5 +1,15 @@
 import { API_BASE_URL } from '../config';
+import { post } from './client';
 import type { StartExamResponse, AnswerResponse, SessionStatus, CaseMaterial } from './exam';
+
+// Professor mints a credential-free demo link for one of their assignments (authed).
+export interface DemoLinkCreated {
+  url: string; token: string; title?: string; days?: number; max_attempts?: number;
+  status?: string; message?: string;
+}
+export function createAssignmentDemoLink(assignmentId: string): Promise<DemoLinkCreated> {
+  return post(`/api/assignments/${assignmentId}/demo-link`, {});
+}
 
 // Credential-free demo API. These hit the public /api/demo/<token>/* endpoints with
 // NO Authorization header (the token in the path is the auth). Kept separate from

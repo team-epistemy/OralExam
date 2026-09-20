@@ -116,6 +116,7 @@ ADMIN_EXAMINER_TEXT_FIRST = "/api/admin/examiner/text-first"   # PUT set text-fi
 
 # ── Admin: create credential-free demo links ────────────────────────────────
 ADMIN_DEMO_LINKS = "/api/admin/demo-links"                    # POST mint a demo link, GET list
+ASSIGNMENT_DEMO_LINK = "/api/assignments/{assignment_id}/demo-link"  # POST: professor mints a demo link for own assignment
 
 # ── Public demo (credential-free, token-scoped, self-authenticating) ─────────
 DEMO_META = "/api/demo/{token}"                                # GET demo meta (no attempt consumed)
