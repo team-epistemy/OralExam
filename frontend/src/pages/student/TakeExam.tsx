@@ -6,6 +6,7 @@ import { downloadTranscriptPdf, examTranscript } from '../../transcript';
 import { typeNoun, typeNounLower } from '../../assignmentType';
 import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft } from '../../api/exam';
 import type { CaseMaterial } from '../../api/exam';
+import { demoMeta, demoCase, demoStart, demoAnswer, demoComplete, demoTts } from '../../api/demo';
 import { get } from '../../api/client';
 import { API_BASE_URL } from '../../config';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
@@ -361,10 +362,12 @@ function speechFriendly(raw: string): string {
   return t;
 }
 
-export default function TakeExam(props: { assignmentId?: string; preview?: boolean; onExit?: () => void } = {}) {
+export default function TakeExam(props: { assignmentId?: string; preview?: boolean; demoToken?: string; onExit?: () => void } = {}) {
   const params = useParams<{ assignmentId: string }>();
   const assignmentId = props.assignmentId ?? params.assignmentId;
   const preview = !!props.preview;
+  const demoToken = props.demoToken;
+  const isDemo = !!demoToken;
   const navigate = useNavigate();
 
   // Session state
@@ -419,7 +422,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   useEffect(() => {
     if (!assignmentId) return;
     let cancelled = false;
-    getAssignmentCase(assignmentId)
+    (isDemo ? demoCase(demoToken!) : getAssignmentCase(assignmentId))
       .then((mats) => { if (!cancelled) setCaseMaterials(mats); })
       .catch(() => { if (!cancelled) setCaseMaterials([]); });
     return () => { cancelled = true; };
@@ -430,6 +433,11 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const fetchTTS = useCallback(async (text: string): Promise<HTMLAudioElement | null> => {
     const spoken = speechFriendly(text);
     if (!ttsOn || !spoken) return null;
+    if (isDemo) {
+      const a = await demoTts(demoToken!, spoken);
+      setTtsAvailable(!!a);
+      return a;
+    }
     try {
       const token = localStorage.getItem('token');
       const resp = await fetch(`${API_BASE_URL}/api/tts`, {
@@ -580,13 +588,21 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       try {
         // Load metadata up front (both resume and fresh paths need it — e.g. to
         // know whether this is a practice test, which changes the copy + retake).
-        const meta = await fetchAssignmentMeta(assignmentId);
+        let meta: AssignmentMeta;
+        if (isDemo) {
+          const dm = await demoMeta(demoToken!);
+          if (dm.status && dm.status !== 'ok') throw new Error(dm.message || 'This demo link is not available.');
+          meta = { duration_minutes: null, question_count: dm.question_count,
+                   assignment_type: 'practice', text_first: dm.text_first };
+        } else {
+          meta = await fetchAssignmentMeta(assignmentId);
+        }
         if (cancelled) return;
         setMeta(meta);
         textFirstRef.current = meta.text_first;
 
-        // Check for saved state first — never resume/load in preview (start fresh).
-        if (!preview) {
+        // Check for saved state first — never resume/load in preview or demo (start fresh).
+        if (!preview && !isDemo) {
           const saved = loadExamState(assignmentId);
           if (saved) {
             // Verify session is still valid server-side
@@ -635,7 +651,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     setStarting(true);
     setError('');
     try {
-      const res = await startExamSession(assignmentId);
+      const res = isDemo ? await demoStart(demoToken!) : await startExamSession(assignmentId);
+      const demoErr = res as { status?: string; message?: string };
+      if (demoErr.status && demoErr.status !== 'ok') {
+        setError(demoErr.message || 'This demo is no longer available.');
+        setStarting(false);
+        return;
+      }
       const now = Date.now();
       // Practice with the timer opted out → untimed (null disables the countdown,
       // auto-submit, and all timer-expiry gates). Graded work stays timed.
@@ -654,7 +676,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       setStartTime(now);
       setDurationMinutes(dur);
       setPhase('taking');
-      if (!preview) saveExamState(assignmentId, {
+      if (!preview && !isDemo) saveExamState(assignmentId, {
         version: EXAM_STATE_VERSION,
         sessionId: res.session_id,
         questions: res.questions,
@@ -709,7 +731,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const [persistWarning, setPersistWarning] = useState(false);
 
   useEffect(() => {
-    if (preview || !assignmentId || !sessionId || phase !== 'taking') return;
+    if (preview || isDemo || !assignmentId || !sessionId || phase !== 'taking') return;
     const ok = saveExamState(assignmentId, {
       version: EXAM_STATE_VERSION,
       sessionId,
@@ -789,7 +811,8 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const answerMutation = useMutation({
     mutationFn: async ({ questionIndex, text }: { questionIndex: number; text: string }) => {
       if (!sessionId) throw new Error('No session');
-      return submitAnswer(sessionId, questionIndex, text);
+      return isDemo ? demoAnswer(demoToken!, sessionId, questionIndex, text)
+                    : submitAnswer(sessionId, questionIndex, text);
     },
     onSuccess: (data: AnswerResponse, variables) => {
       const { questionIndex } = variables;
@@ -896,7 +919,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const confirmSubmit = async () => {
     stopSpeech();
     if (sessionId) {
-      try { await completeSession(sessionId); } catch { /* best-effort */ }
+      try { await (isDemo ? demoComplete(demoToken!, sessionId) : completeSession(sessionId)); } catch { /* best-effort */ }
     }
     if (assignmentId && !preview) clearExamState(assignmentId);
     if (timerRef.current) clearInterval(timerRef.current);

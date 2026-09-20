@@ -21,6 +21,7 @@ import AdminTesting from './pages/admin/AdminTesting';
 import AdminDirectory from './pages/admin/AdminDirectory';
 import AdminPerformance from './pages/admin/AdminPerformance';
 import AdminToneLab from './pages/admin/AdminToneLab';
+import DemoExam from './pages/student/DemoExam';
 
 function getUser() {
   const raw = localStorage.getItem('user');
@@ -70,6 +71,8 @@ export const router = createBrowserRouter([
       { path: '/callback', element: <Callback /> },
     ],
   },
+  // Public, credential-free demo — no RequireAuth.
+  { path: '/demo/:token', element: <DemoExam /> },
   {
     element: (
       <RequireAuth>

@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 # ?token= query param (EventSource cannot set headers) — see the middleware.
 _PUBLIC_PATH_PREFIXES = (
     "/api/auth/config", "/api/auth/invitations/redeem",
+    "/api/demo/",  # credential-free demo links; endpoints self-authenticate via token
     "/health", "/config", "/app", "/static",
     "/docs", "/openapi.json", "/redoc", "/favicon",
 )
@@ -897,6 +898,366 @@ def _release_repo(deps_cache: dict, repo: PostgresRepository) -> None:
         pass
 
 
+# ── Credential-free demo links ──────────────────────────────────────────────
+# Fully isolated from the live student answer path (option 1b): the demo has its own
+# orchestration below and reuses only pure, read-only helpers (prompt builder, EDS
+# math, probe target). A demo bug can never touch a real exam/session/grade — demo
+# sessions use throwaway anonymous student ids and are practice-mode only.
+DEMO_URL_BASE = "https://www.epistemy.ai/app/demo/"
+
+
+class DemoLinkCreateRequest(BaseModel):
+    """POST body: mint a demo link for one assignment."""
+    assignment_id: str
+    days: int = Field(default=10, ge=1, le=60)
+    max_attempts: int = Field(default=10, ge=1, le=500)
+
+
+class DemoTTSRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+def _demo_link_or_error(cur, token: str):
+    """Fetch + validate a demo link. Returns the row or a dict error the caller returns.
+    Row: (token, org_id, assignment_id, max_attempts, attempts_used, expires_at)."""
+    cur.execute("SELECT to_regclass('public.demo_link')")
+    if cur.fetchone()[0] is None:
+        return None, {"status": "error", "message": "demo not available"}
+    cur.execute("""SELECT token, org_id, assignment_id, max_attempts, attempts_used, expires_at
+                   FROM demo_link WHERE token = %s""", (token,))
+    row = cur.fetchone()
+    if not row:
+        return None, {"status": "not_found", "message": "This demo link is invalid."}
+    if row[5] is not None and row[5] < datetime.now(timezone.utc):
+        return None, {"status": "expired", "message": "This demo link has expired."}
+    if row[4] >= row[3]:
+        return None, {"status": "exhausted",
+                      "message": "This demo has reached its attempt limit."}
+    return row, None
+
+
+def _demo_answer_turn(repo, settings, org_id, course_id, student_id, session_id,
+                      question_set_id, question_index, answer_text):
+    """Isolated copy of the answer turn for demo sessions (option 1b). Reuses pure
+    helpers; persists under the demo identity. Returns the AnswerResponse dict."""
+    import json as _json, uuid as _uuid
+    with repo.conn.cursor() as cur:
+        cur.execute("""SELECT q.question_id, q.text, q.concept_ids, q.expected_path
+                       FROM question_set_membership qsm JOIN question q ON q.question_id = qsm.question_id
+                       WHERE qsm.question_set_id = %s::uuid AND qsm.position = %s""",
+                    (question_set_id, question_index))
+        row = cur.fetchone()
+    if not row:
+        raise AuthorizationError(f"no question at index {question_index}")
+    question_id = str(row[0]); question_text = row[1]
+    concept_ids = row[2] if isinstance(row[2], list) else []
+    expected_path = row[3] if isinstance(row[3], dict) else (_json.loads(row[3]) if row[3] else {})
+    if not expected_path.get("nodes"):
+        try:
+            expected_path = _generate_expected_path(settings, question_text, concept_ids)
+        except Exception:
+            expected_path = {}
+
+    turn_id = str(_uuid.uuid4()); now = datetime.now(timezone.utc)
+    with repo.conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM session_turn WHERE session_id = %s::uuid AND turn_index = %s",
+                    (session_id, question_index))
+        sub = cur.fetchone()[0]
+        cur.execute("""INSERT INTO session_turn
+                       (turn_id, session_id, org_id, turn_index, sub_turn_index, question_id, student_answer, answered_at)
+                       VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid, %s, %s)
+                       ON CONFLICT (session_id, turn_index, sub_turn_index)
+                       DO UPDATE SET student_answer = EXCLUDED.student_answer, answered_at = EXCLUDED.answered_at
+                       RETURNING turn_id""",
+                    (turn_id, session_id, org_id, question_index, sub, question_id, answer_text, now))
+        actual_turn_id = str(cur.fetchone()[0])
+        cur.execute("UPDATE exam_session SET current_turn_index = GREATEST(current_turn_index, %s + 1) WHERE session_id = %s::uuid",
+                    (question_index, session_id))
+    repo.conn.commit()
+
+    with repo.conn.cursor() as cur:
+        cur.execute("""SELECT student_answer FROM session_turn
+                       WHERE session_id = %s::uuid AND question_id = %s::uuid AND turn_id != %s::uuid
+                       ORDER BY answered_at""",
+                    (session_id, question_id, actual_turn_id))
+        prior = [r[0] for r in cur.fetchall() if r[0]]
+
+    use_eds = bool(expected_path.get("nodes"))
+    probe_directive = ""
+    if use_eds:
+        seen_n, seen_e = _prior_coverage(repo, session_id, question_index)
+        target = _probe_target(expected_path, seen_n, seen_e)
+        if target:
+            probe_directive = f"\nPROBE TARGET (choose your probe to address this):\n{target}\n"
+        system_prompt, _ = build_examiner_eval_prompt(repo, org_id, question_text, expected_path, probe_directive)
+    else:
+        system_prompt = ("You are an Epistemy Socratic oral examiner. "
+                         f"The current exam question is: \"{question_text}\". "
+                         "When the answer is incomplete, ask ONE short guiding sub-question. "
+                         "Respond ONLY with minified JSON: "
+                         '{"clarify": false, "answered": true, "adequate": false, '
+                         '"feedback": "one sentence", "probe": "one short follow-up"}')
+
+    ctx = f"Exam question: {question_text}\n\n"
+    if prior:
+        ctx += "Prior exchanges on this question:\n" + "".join(f"Student: {p}\n" for p in prior) + "\n"
+    ctx += f"Student's latest answer: {answer_text}"
+
+    answered = adequate = False; feedback = probe = ""; parsed = {}
+    try:
+        parsed = call_bedrock(settings, system_prompt, ctx,
+                              max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1)
+        answered = bool(parsed.get("answered", False)); adequate = bool(parsed.get("adequate", False))
+        feedback = (parsed.get("feedback") or "").strip(); probe = (parsed.get("probe") or "").strip()
+    except Exception:
+        answered, adequate, feedback, probe = _heuristic_eval(answer_text)
+
+    if not use_eds:
+        eds_delta = 0 if not answered else (10 if adequate else 4)
+        with repo.conn.cursor() as cur:
+            cur.execute("""INSERT INTO evaluation
+                           (evaluation_id, turn_id, org_id, course_id, student_id, question_id, eds_score, eds_bucket, raw_llm_output)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s::uuid, %s, %s::uuid, %s, %s, %s::jsonb)
+                           ON CONFLICT (turn_id) DO UPDATE SET eds_score = EXCLUDED.eds_score,
+                               eds_bucket = EXCLUDED.eds_bucket, raw_llm_output = EXCLUDED.raw_llm_output""",
+                        (str(_uuid.uuid4()), actual_turn_id, org_id, course_id, student_id, question_id,
+                         eds_delta / 10.0, "high" if adequate else ("medium" if answered else "low"),
+                         _json.dumps({"answered": answered, "adequate": adequate, "feedback": feedback, "probe": probe})))
+        repo.conn.commit()
+        return {"answered": answered, "adequate": adequate, "feedback": feedback,
+                "probe": probe, "eds_delta": eds_delta}
+
+    eds_raw = parsed.get("eds", {}) if isinstance(parsed, dict) else {}
+    exp_nodes = expected_path.get("nodes", []); exp_edges = expected_path.get("edges", [])
+    exp_ext = expected_path.get("extensions", [])
+    nodes_dem = eds_raw.get("nodes_demonstrated", []); edges_dem = eds_raw.get("edges_demonstrated", [])
+    recit = float(eds_raw.get("recitation_score", 0.5)); novel = eds_raw.get("novel_extensions", [])
+    R = 1.0 - recit
+    node_score = len(nodes_dem) / max(len(exp_nodes), 1)
+    edge_score = len(edges_dem) / max(len(exp_edges), 1)
+    gen_norm = min(1.0, len(novel) / max(len(exp_ext), 3))
+    with repo.conn.cursor() as cur:
+        cur.execute("""SELECT e.eds_components FROM evaluation e JOIN session_turn st ON st.turn_id = e.turn_id
+                       WHERE st.session_id = %s::uuid AND st.turn_index = %s AND e.turn_id != %s::uuid
+                       ORDER BY st.answered_at""",
+                    (session_id, question_index, actual_turn_id))
+        prior_comp = [r[0] for r in cur.fetchall() if r[0]]
+    all_n, all_e, all_x = set(), set(), set(); min_recit = recit
+    for pc in prior_comp:
+        if isinstance(pc, str): pc = _json.loads(pc)
+        all_n.update(pc.get("nodes_detected", [])); all_e.update(pc.get("edges_demonstrated", []))
+        all_x.update(pc.get("novel_extensions", [])); min_recit = min(min_recit, pc.get("raw_probe_score", 1.0))
+    all_n.update(nodes_dem); all_e.update(edges_dem); all_x.update(novel); min_recit = min(min_recit, recit)
+    agg_R = 1.0 - min_recit
+    agg_node = len(all_n) / max(len(exp_nodes), 1); agg_edge = len(all_e) / max(len(exp_edges), 1)
+    agg_gen = min(1.0, len(all_x) / max(len(exp_ext), 3)); agg_cov = (agg_node + agg_edge) / 2.0
+    eds_q = agg_R * (EDS_ALPHA * agg_node + EDS_BETA * agg_edge) + EDS_GAMMA * (1.0 - agg_R * agg_cov) * agg_gen
+    eds_q = round(min(1.0, max(0.0, eds_q)), 4)
+    comp = {"node_score": node_score, "edge_score": edge_score, "r_gate": R, "gen_score_norm": gen_norm,
+            "nodes_detected": list(nodes_dem), "edges_demonstrated": list(edges_dem),
+            "novel_extensions": list(novel), "raw_probe_score": recit}
+    with repo.conn.cursor() as cur:
+        cur.execute("""INSERT INTO evaluation
+                       (evaluation_id, turn_id, org_id, course_id, student_id, question_id, eds_score, eds_bucket, raw_llm_output, eds_components)
+                       VALUES (%s::uuid, %s::uuid, %s::uuid, %s::uuid, %s, %s::uuid, %s, %s, %s::jsonb, %s::jsonb)
+                       ON CONFLICT (turn_id) DO UPDATE SET eds_score = EXCLUDED.eds_score, eds_bucket = EXCLUDED.eds_bucket,
+                           raw_llm_output = EXCLUDED.raw_llm_output, eds_components = EXCLUDED.eds_components""",
+                    (str(_uuid.uuid4()), actual_turn_id, org_id, course_id, student_id, question_id, eds_q,
+                     "high" if eds_q >= 0.7 else ("medium" if eds_q >= 0.3 else "low"),
+                     _json.dumps({"answered": answered, "adequate": adequate, "feedback": feedback,
+                                  "probe": probe, "eds_question": eds_q}), _json.dumps(comp)))
+        try:
+            cur.execute("""INSERT INTO question_eds_aggregate
+                           (session_id, question_id, org_id, node_score, edge_score, r_gate, gen_score_norm, coverage, final_eds, turn_details)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                           ON CONFLICT (session_id, question_id) DO UPDATE SET node_score = EXCLUDED.node_score,
+                               edge_score = EXCLUDED.edge_score, r_gate = EXCLUDED.r_gate, gen_score_norm = EXCLUDED.gen_score_norm,
+                               coverage = EXCLUDED.coverage, final_eds = EXCLUDED.final_eds, turn_details = EXCLUDED.turn_details, computed_at = NOW()""",
+                        (session_id, question_id, org_id, agg_node, agg_edge, agg_R, agg_gen, agg_cov, eds_q, _json.dumps(comp)))
+        except Exception:
+            repo.conn.rollback()
+    repo.conn.commit()
+    return {"answered": answered, "adequate": adequate, "feedback": feedback, "probe": probe,
+            "eds_delta": int(eds_q * 10), "eds_question": eds_q,
+            "eds_components": {"node_score": agg_node, "edge_score": agg_edge, "r_gate": agg_R, "gen_score": agg_gen}}
+
+
+def _register_demo(app: FastAPI, deps) -> None:
+    """Admin link-minting (authenticated) + public token-scoped demo endpoints."""
+    import uuid as _uuid, secrets as _secrets, json as _json
+
+    @app.post(R.ADMIN_DEMO_LINKS)
+    def create_demo_link(req: DemoLinkCreateRequest, x_org_name: str = Header(...),
+                         x_user_id: str = Header("operator"),
+                         x_role: str = Header("platform_admin")):
+        """Mint a credential-free demo link for one assignment (platform_admin)."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PLATFORM_ADMIN:
+                    raise AuthorizationError("platform_admin role required")
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.demo_link')")
+                    if cur.fetchone()[0] is None:
+                        return {"status": "error", "message": "demo_link table not present — run migration_026."}
+                    cur.execute("SELECT 1 FROM assignment WHERE assignment_id = %s::uuid", (req.assignment_id,))
+                    if not cur.fetchone():
+                        return {"status": "error", "message": "assignment not found"}
+                    token = _secrets.token_urlsafe(16)
+                    cur.execute("""INSERT INTO demo_link (token, org_id, assignment_id, max_attempts, expires_at, created_by)
+                                   VALUES (%s, %s::uuid, %s::uuid, %s, NOW() + (%s || ' days')::interval, %s)""",
+                                (token, caller.org_id, req.assignment_id, req.max_attempts, req.days, caller.user_id))
+                repo.conn.commit()
+                return {"token": token, "url": DEMO_URL_BASE + token,
+                        "assignment_id": req.assignment_id, "max_attempts": req.max_attempts, "days": req.days}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    def _with_demo(token, fn):
+        """Open a repo, validate the link, set tenant, and run fn(d, repo, link)."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                with repo.conn.cursor() as cur:
+                    link, err = _demo_link_or_error(cur, token)
+                if err:
+                    return err
+                repo.set_tenant(link[1])  # org_id
+                return fn(d, repo, link)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.DEMO_META)
+    def demo_meta(token: str):
+        """Demo landing info (does NOT consume an attempt)."""
+        def _fn(d, repo, link):
+            org_id, assignment_id = link[1], str(link[2])
+            with repo.conn.cursor() as cur:
+                cur.execute("""SELECT a.title, a.question_set_id FROM assignment a WHERE a.assignment_id = %s::uuid""",
+                            (assignment_id,))
+                a = cur.fetchone()
+                cur.execute("SELECT COUNT(*) FROM question_set_membership WHERE question_set_id = %s::uuid",
+                            (str(a[1]),) if a else (None,))
+                qc = cur.fetchone()[0] if a else 0
+            return {"assignment_id": assignment_id, "title": a[0] if a else "Demo",
+                    "question_count": qc, "attempts_remaining": link[3] - link[4],
+                    "text_first": get_text_first(repo, org_id)}
+        return _with_demo(token, _fn)
+
+    @app.get(R.DEMO_CASE)
+    def demo_case(token: str):
+        def _fn(d, repo, link):
+            assignment_id = str(link[2])
+            mats = []
+            try:
+                with repo.conn.cursor() as cur:
+                    cur.execute("""SELECT m.material_id, mv.material_version_id, m.file_name, m.source_type
+                                   FROM assignment_case ac
+                                   JOIN material_version mv ON mv.material_version_id = ac.material_version_id
+                                   JOIN material m ON m.material_id = mv.material_id
+                                   WHERE ac.assignment_id = %s::uuid""", (assignment_id,))
+                    mats = [{"material_id": str(r[0]), "version_id": str(r[1]),
+                             "file_name": r[2], "source_type": r[3]} for r in cur.fetchall()]
+            except Exception:
+                repo.conn.rollback()
+            return {"materials": mats}
+        return _with_demo(token, _fn)
+
+    @app.post(R.DEMO_START)
+    def demo_start(token: str):
+        """Start a demo session (consumes one attempt). Anonymous throwaway identity."""
+        def _fn(d, repo, link):
+            org_id, assignment_id = link[1], str(link[2])
+            with repo.conn.cursor() as cur:
+                # Consume an attempt atomically (re-check cap under the row lock).
+                cur.execute("""UPDATE demo_link SET attempts_used = attempts_used + 1
+                               WHERE token = %s AND attempts_used < max_attempts RETURNING attempts_used""",
+                            (link[0],))
+                got = cur.fetchone()
+                if not got:
+                    repo.conn.rollback()
+                    return {"status": "exhausted", "message": "This demo has reached its attempt limit."}
+                cur.execute("SELECT course_id, question_set_id FROM assignment WHERE assignment_id = %s::uuid",
+                            (assignment_id,))
+                arow = cur.fetchone()
+            repo.conn.commit()
+            course_id = str(arow[0]); question_set_id = str(arow[1])
+            student_id = f"demo:{link[0][:10]}:{_uuid.uuid4().hex[:8]}"
+            session_id = str(_uuid.uuid4())
+            with repo.conn.cursor() as cur:
+                cur.execute("""INSERT INTO exam_session
+                               (session_id, assignment_id, student_id, org_id, course_id, status, current_turn_index, questions_delivered, concepts_covered, is_preview)
+                               VALUES (%s::uuid, %s::uuid, %s, %s::uuid, %s::uuid, 'active', 0, '[]'::jsonb, '[]'::jsonb, false)""",
+                            (session_id, assignment_id, student_id, org_id, course_id))
+                cur.execute("""SELECT q.question_id, q.text, q.concept_ids, qsm.position
+                               FROM question_set_membership qsm JOIN question q ON q.question_id = qsm.question_id
+                               WHERE qsm.question_set_id = %s::uuid ORDER BY qsm.position""", (question_set_id,))
+                qrows = cur.fetchall()
+            repo.conn.commit()
+            questions = [{"question_id": str(q[0]), "topic": (q[2][0] if isinstance(q[2], list) and q[2] else "general"),
+                          "text": q[1], "index": q[3]} for q in qrows]
+            return {"session_id": session_id, "questions": questions, "demo_student_id": student_id}
+        return _with_demo(token, _fn)
+
+    @app.post(R.DEMO_ANSWER)
+    def demo_answer(token: str, req: SubmitAnswerRequest, session_id: str):
+        """Submit a demo answer. session_id (query) must belong to this token."""
+        def _fn(d, repo, link):
+            org_id, assignment_id = link[1], str(link[2])
+            with repo.conn.cursor() as cur:
+                cur.execute("""SELECT student_id, course_id FROM exam_session
+                               WHERE session_id = %s::uuid AND assignment_id = %s::uuid AND org_id = %s::uuid""",
+                            (session_id, assignment_id, org_id))
+                srow = cur.fetchone()
+            if not srow or not str(srow[0]).startswith(f"demo:{link[0][:10]}:"):
+                return {"status": "forbidden", "message": "session does not belong to this demo"}
+            with repo.conn.cursor() as cur:
+                cur.execute("SELECT question_set_id FROM assignment WHERE assignment_id = %s::uuid", (assignment_id,))
+                qset = str(cur.fetchone()[0])
+            return _demo_answer_turn(repo, d["settings"], str(org_id), str(srow[1]), str(srow[0]),
+                                     session_id, qset, req.question_index, req.answer_text)
+        return _with_demo(token, _fn)
+
+    @app.get(R.DEMO_STATUS)
+    def demo_status(token: str, session_id: str):
+        def _fn(d, repo, link):
+            with repo.conn.cursor() as cur:
+                cur.execute("SELECT status, current_turn_index FROM exam_session WHERE session_id = %s::uuid AND org_id = %s::uuid",
+                            (session_id, link[1]))
+                s = cur.fetchone()
+            if not s:
+                return {"status": "not_found"}
+            return {"session_id": session_id, "status": s[0], "current_turn": s[1] or 0,
+                    "total_questions": 0, "eds_score": 0.0, "turns": []}
+        return _with_demo(token, _fn)
+
+    @app.post(R.DEMO_COMPLETE)
+    def demo_complete(token: str, session_id: str):
+        def _fn(d, repo, link):
+            with repo.conn.cursor() as cur:
+                cur.execute("UPDATE exam_session SET status = 'completed' WHERE session_id = %s::uuid AND org_id = %s::uuid",
+                            (session_id, link[1]))
+            repo.conn.commit()
+            return {"status": "completed"}
+        return _with_demo(token, _fn)
+
+    @app.post(R.DEMO_TTS)
+    def demo_tts(token: str, req: DemoTTSRequest):
+        from backend import tts_helper
+        def _fn(d, repo, link):
+            audio = tts_helper.synthesize(d["settings"], req.text)
+            if not audio:
+                raise HTTPException(status_code=503, detail="tts unavailable")
+            from fastapi import Response
+            return Response(content=audio, media_type="audio/mpeg")
+        return _with_demo(token, _fn)
+
+
 def _register_routes(app: FastAPI, deps) -> None:
     """Attach all module endpoints."""
     _register_auth(app, deps)
@@ -917,6 +1278,7 @@ def _register_routes(app: FastAPI, deps) -> None:
     _register_tts(app, deps)
     _register_admin_simulations(app, deps)
     _register_admin_testing(app, deps)
+    _register_demo(app, deps)
 
 
 class CourseCreateRequest(BaseModel):
