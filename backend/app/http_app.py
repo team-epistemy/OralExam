@@ -4,6 +4,7 @@ TODO(prod): Extract route handlers into domain service classes to improve testab
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -527,18 +528,46 @@ def _generate_expected_path(settings, question_text: str, concept_labels: list) 
 # assign_questions queues it right after the insert, and submit_answer queues it for
 # any question that somehow still lacks one. The in-flight set stops concurrent
 # sub-turns (or two students on the same question) firing duplicate calls.
-# 60s, not a request-sized budget: this call runs in a background thread, so the
-# 60s CloudFront origin read timeout that bounds student traffic does not apply to
-# it, and a student's exposure is capped separately by _EXPECTED_PATH_WAIT_S below.
+# Not a request-sized budget: this call runs in a background thread, so the 60s
+# CloudFront origin read timeout that bounds student traffic does not apply to it,
+# and a student's exposure is capped separately by _EXPECTED_PATH_WAIT_S below.
 # Killing a slow generation early only means the rubric is missing for the next
-# turn too, so err on letting it land.
-_EXPECTED_PATH_TIMEOUT_S = 60
+# turn too, so the budget is generous relative to the ~10s a healthy call takes —
+# but it stays under 60s so the number can never be mistaken for a request budget
+# if this ever moves onto a request path.
+_EXPECTED_PATH_TIMEOUT_S = 40
 # How long an answer will wait for an already-queued path rather than grade
 # without one. This one IS inside a request, so it stays far under the 60s
 # CloudFront origin timeout.
 _EXPECTED_PATH_WAIT_S = 6.0
+# The per-turn evaluation call, which every answer pays. A healthy one is ~2-4s
+# (max_tokens is only 500), so 20s is well clear of normal variance while keeping a
+# stalled call from riding to CloudFront's 60s cut-off and 504ing mid-exam.
+_EVAL_TIMEOUT_S = 20
 _INFLIGHT_PATHS: set = set()
 _INFLIGHT_PATHS_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _timed(step: str, **fields):
+    """Log a real student turn's wall-clock for one step of submit_answer.
+
+    The admin perf probe measures a synthetic turn (fixed short question,
+    admin-triggered); actual student turns were never timed, so every latency
+    number for them was an estimate. These lines are the measurement.
+
+    Emitted on the way out even when the step raises, because a step that failed
+    slowly is exactly the case worth seeing. One fixed prefix and key=value pairs
+    so a CloudWatch metric filter can pick them up without matching HTTP access
+    lines by accident (logging is not structured yet — see BACKLOG item 4).
+    """
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        extra = "".join(f" {k}={v}" for k, v in fields.items())
+        logger.info("turn-timing step=%s ms=%d%s", step,
+                    int((time.monotonic() - start) * 1000), extra)
 
 
 def _store_expected_path(conn, settings, qid: str, text: str, concepts: list) -> None:
@@ -1752,7 +1781,8 @@ def _register_tts(app: FastAPI, deps) -> None:
         x_user_id: str = Header("student"),
         x_role: str = Header("student"),
     ):
-        audio = tts_helper.synthesize(deps()["settings"], req.text, req.voice_id)
+        with _timed("tts", chars=len(req.text or "")):
+            audio = tts_helper.synthesize(deps()["settings"], req.text, req.voice_id)
         if not audio:
             raise HTTPException(status_code=503, detail="TTS is not configured")
         return Response(content=audio, media_type="audio/mpeg",
@@ -4644,8 +4674,9 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     # blind: without the path no eds_components is written, so the
                     # next probe can't see what this answer covered and the question's
                     # EDS union drops the turn. Past the budget, degrade and move on.
-                    expected_path = _await_expected_path(
-                        repo, question_id, _EXPECTED_PATH_WAIT_S)
+                    with _timed("rubric_wait", qid=question_id[:8]):
+                        expected_path = _await_expected_path(
+                            repo, question_id, _EXPECTED_PATH_WAIT_S)
                     if not expected_path.get("nodes"):
                         logger.warning("No expected_path for question %s after %.0fs — "
                                        "grading this turn on the no-path rubric",
@@ -4817,10 +4848,18 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 parsed = {}
 
                 try:
-                    parsed = call_bedrock(
-                        settings, system_prompt, ctx,
-                        max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1,
-                    )
+                    # Bounded, unlike before: this call had no timeout at all, so it
+                    # inherited the SDK's 600s default and a hung connection rode
+                    # until CloudFront cut the student off at 60s with a 504. The
+                    # retry budget was 3, and since call_bedrock only retries JSON
+                    # parse failures, three bad samples ran back to back while the
+                    # student waited. One attempt, 20s ceiling, then degrade.
+                    with _timed("eval_llm", eds=use_eds_formula):
+                        parsed = call_bedrock(
+                            settings, system_prompt, ctx,
+                            max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1,
+                            retries=1, timeout=_EVAL_TIMEOUT_S,
+                        )
                     answered = bool(parsed.get("answered", False))
                     adequate = bool(parsed.get("adequate", False))
                     feedback = (parsed.get("feedback") or "").strip()
