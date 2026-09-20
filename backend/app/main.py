@@ -184,6 +184,12 @@ def migrate() -> None:
             print(f"applying {migration_025.name} ...")
             cur.execute(migration_025.read_text())
 
+        # Always apply migration_026 (public demo_link table; idempotent)
+        migration_026 = db_dir / "migration_026_demo_link.sql"
+        if migration_026.exists():
+            print(f"applying {migration_026.name} ...")
+            cur.execute(migration_026.read_text())
+
     conn.commit()
     print("all schemas applied")
 

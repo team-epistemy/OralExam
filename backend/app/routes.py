@@ -114,6 +114,19 @@ ADMIN_EVAL_OVERRIDE_REJECT = "/api/admin/eval/prompt-override/{override_id}/reje
 ADMIN_EXAMINER_EVAL_MODE = "/api/admin/examiner/eval-mode"     # GET current eval mode, PUT set ('sonnet'|'hybrid')
 ADMIN_EXAMINER_TEXT_FIRST = "/api/admin/examiner/text-first"   # PUT set text-first render toggle (bool)
 
+# ── Admin: create credential-free demo links ────────────────────────────────
+ADMIN_DEMO_LINKS = "/api/admin/demo-links"                    # POST mint a demo link, GET list
+ASSIGNMENT_DEMO_LINK = "/api/assignments/{assignment_id}/demo-link"  # POST: professor mints a demo link for own assignment
+
+# ── Public demo (credential-free, token-scoped, self-authenticating) ─────────
+DEMO_META = "/api/demo/{token}"                                # GET demo meta (no attempt consumed)
+DEMO_CASE = "/api/demo/{token}/case"                           # GET case materials
+DEMO_START = "/api/demo/{token}/start"                         # POST start a demo session (consumes an attempt)
+DEMO_ANSWER = "/api/demo/{token}/answer"                       # POST submit an answer
+DEMO_STATUS = "/api/demo/{token}/status"                       # GET session status
+DEMO_COMPLETE = "/api/demo/{token}/complete"                   # POST complete a demo session
+DEMO_TTS = "/api/demo/{token}/tts"                             # POST text-to-speech proxy
+
 
 def frontend_config() -> dict:
     """Path/header constants served to the browser so it never hardcodes them."""
