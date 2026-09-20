@@ -1197,7 +1197,8 @@ def _demo_answer_turn(repo, settings, org_id, course_id, student_id, session_id,
     answered = adequate = False; feedback = probe = ""; parsed = {}
     try:
         parsed = call_bedrock(settings, system_prompt, ctx,
-                              max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1)
+                              max_tokens=LLM_MAX_TOKENS_EVALUATION, temperature=0.1,
+                              retries=1, timeout=_EVAL_TIMEOUT_S)
         answered = bool(parsed.get("answered", False)); adequate = bool(parsed.get("adequate", False))
         feedback = (parsed.get("feedback") or "").strip(); probe = (parsed.get("probe") or "").strip()
     except Exception:
@@ -5199,7 +5200,8 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     try:
                         pj = call_bedrock(settings, probe_sys, ctx,
                                           max_tokens=LLM_MAX_TOKENS_EVALUATION,
-                                          temperature=0.2, model=HYBRID_PROBE_MODEL)
+                                          temperature=0.2, model=HYBRID_PROBE_MODEL,
+                                          retries=1, timeout=_EVAL_TIMEOUT_S)
                         h_answered = bool(pj.get("answered", False))
                         h_adequate = bool(pj.get("adequate", False))
                         h_feedback = (pj.get("feedback") or "").strip()
