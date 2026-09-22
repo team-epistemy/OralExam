@@ -9,13 +9,11 @@ import json
 from collections import defaultdict
 
 # (key, label, description, EDS-component field). The aspect→component mapping:
-# Recall=Concepts, Application=Causal Links, In-depth=Novel Insight, plus an
-# Authenticity signal. Surfaced in the UI so it's transparent.
+# Recall=Concepts, Application=Causal Links. Surfaced in the UI so the
+# correctness-only EDS rubric is transparent. (Novel Insight/gen was retired.)
 ASPECTS = [
     ("recall", "Recall", "Named and defined the right concepts", "node_score"),
     ("application", "Application", "Connected and applied concepts (incl. case scenarios)", "edge_score"),
-    ("depth", "In-depth Understanding", "Went beyond the basics with novel insight", "gen_score"),
-    ("authenticity", "Authenticity", "Reasoning was genuine, not guessed", "r_gate"),
 ]
 
 

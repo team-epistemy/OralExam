@@ -29,12 +29,8 @@ def test_aspect_percentages_and_averages():
     assert _aspect(out, "application") == {"key": "application", "label": "Application",
         "description": "Connected and applied concepts (incl. case scenarios)",
         "pct_students": 0.5, "avg_score": 0.3}
-    # in-depth = gen: nobody at/above bar → 0.0; class avg 0.075
-    assert _aspect(out, "depth")["pct_students"] == 0.0
-    assert _aspect(out, "depth")["avg_score"] == 0.075
-    # authenticity = r_gate: both at/above bar → 1.0; class avg 0.725
-    assert _aspect(out, "authenticity")["pct_students"] == 1.0
-    assert _aspect(out, "authenticity")["avg_score"] == 0.725
+    # Novel Insight (gen) and Authenticity (r_gate) are no longer rubric aspects.
+    assert not any(a["key"] in ("depth", "authenticity") for a in out["aspects"])
 
 
 def test_topic_coverage_and_labels():
@@ -54,7 +50,7 @@ def test_empty_rows_yield_zeroed_stats():
     assert out["practice_takers"] == 0
     assert out["topics"] == []
     assert all(a["pct_students"] == 0.0 and a["avg_score"] == 0.0 for a in out["aspects"])
-    assert [a["key"] for a in out["aspects"]] == ["recall", "application", "depth", "authenticity"]
+    assert [a["key"] for a in out["aspects"]] == ["recall", "application"]
 
 
 def test_concept_ids_as_json_string_is_parsed():

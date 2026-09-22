@@ -52,8 +52,22 @@ EDS_ALPHA = 0.4
 # Edge (causal link) coverage weight in the EDS formula.
 EDS_BETA = 0.6
 
-# Generativity bonus weight for novel extensions beyond expected path.
-EDS_GAMMA = 0.15
+# Generativity (novel-insight) weight. Set to 0: "Novel Insight" was retired from
+# the rubric, so gen no longer affects the score — node + edge are the only signals.
+EDS_GAMMA = 0.0
+
+
+def compute_eds(node_score: float, edge_score: float, gen_score: float = 0.0) -> float:
+    """Correctness-only EDS in [0, 1] = clamp01(α·node + β·edge + γ·gen).
+
+    Two scored signals: concepts named correctly (node) and multi-concept / causal
+    links correct (edge). γ is 0, so ``gen_score`` (novel insight) is accepted for
+    signature/telemetry compatibility but does not affect the score. There is no
+    authenticity/recitation gate — genuineness is not part of the rubric.
+    """
+    eds = EDS_ALPHA * node_score + EDS_BETA * edge_score + EDS_GAMMA * gen_score
+    return round(min(1.0, max(0.0, eds)), 4)
+
 
 # -- Upload / Ingestion Limits -------------------------------------------------
 

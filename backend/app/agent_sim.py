@@ -21,7 +21,7 @@ import math
 import statistics
 from typing import Callable, List
 
-from backend.constants import EDS_ALPHA, EDS_BETA, EDS_GAMMA
+from backend.constants import EDS_ALPHA, EDS_BETA, EDS_GAMMA, compute_eds
 
 # Competence is a skill in [SKILL_LO, SKILL_HI]; 0 ≈ struggling, 1 ≈ mastery.
 SKILL_LO, SKILL_HI = 0.05, 0.95
@@ -79,8 +79,9 @@ def eds_from_components(expected_path: dict, nodes_sets: List[list],
     """Per-question EDS in [0,1], accumulated across a question's sub-turns.
 
     Same formula as the live answer endpoint: union node/edge/extension coverage
-    across sub-turns, take the least recitation (best authenticity), then
-    R·(α·node + β·edge) + γ·(1 − R·coverage)·gen."""
+    across sub-turns, then the correctness-only score α·node + β·edge + γ·gen (no
+    authenticity/recitation gate — see constants.compute_eds). ``recitation_scores``
+    is accepted for signature compatibility but no longer affects the score."""
     exp_nodes = expected_path.get("nodes", []) or []
     exp_edges = expected_path.get("edges", []) or []
     exp_ext = expected_path.get("extensions", []) or []
@@ -92,16 +93,11 @@ def eds_from_components(expected_path: dict, nodes_sets: List[list],
         all_edges.update(s or [])
     for s in extension_sets:
         all_ext.update(s or [])
-    min_recit = min(recitation_scores) if recitation_scores else 0.5
 
-    R = 1.0 - min_recit
     node_score = len(all_nodes) / max(len(exp_nodes), 1)
     edge_score = len(all_edges) / max(len(exp_edges), 1)
     gen = min(1.0, len(all_ext) / max(len(exp_ext), 3))
-    coverage = (node_score + edge_score) / 2.0
-    eds = R * (EDS_ALPHA * node_score + EDS_BETA * edge_score) + \
-        EDS_GAMMA * (1.0 - R * coverage) * gen
-    return round(min(1.0, max(0.0, eds)), 4)
+    return compute_eds(node_score, edge_score, gen)
 
 
 def _legacy_score(answered: bool, adequate: bool) -> float:
@@ -210,7 +206,8 @@ def take_question(question: dict, directive: str, answer_fn: Callable,
 def _score_breakdown(expected: dict, nodes_sets: List[list], edge_idx_sets: List[list],
                      recitation_scores: List[float], extension_sets: List[list]) -> dict:
     """Explain the EDS score: which expected nodes/edges the agent demonstrated
-    (union across turns), the authenticity factor R, and each formula term."""
+    (union across turns) and each formula term. ``recitation_scores`` is accepted
+    for signature compatibility but no longer contributes to the score."""
     exp_nodes = [_node_label(n) for n in (expected.get("nodes") or [])]
     exp_edges = expected.get("edges", []) or []
     exp_ext = expected.get("extensions", []) or []
@@ -221,12 +218,9 @@ def _score_breakdown(expected: dict, nodes_sets: List[list], edge_idx_sets: List
         all_edges.update(s or [])
     for s in extension_sets:
         all_ext.update(s or [])
-    min_recit = min(recitation_scores) if recitation_scores else 0.5
-    R = 1.0 - min_recit
     node_score = len(all_nodes) / max(len(exp_nodes), 1)
     edge_score = len(all_edges) / max(len(exp_edges), 1)
     gen = min(1.0, len(all_ext) / max(len(exp_ext), 3))
-    coverage = (node_score + edge_score) / 2.0
     demonstrated_edges = []
     for i in sorted(x for x in all_edges if isinstance(x, int) and 0 <= x < len(exp_edges)):
         e = _edge_descriptor(exp_edges[i])
@@ -239,11 +233,9 @@ def _score_breakdown(expected: dict, nodes_sets: List[list], edge_idx_sets: List
         "edges_demonstrated": demonstrated_edges,
         "node_score": round(node_score, 3),
         "edge_score": round(edge_score, 3),
-        "recitation_min": round(min_recit, 3),
-        "authenticity_R": round(R, 3),
         "generativity": round(gen, 3),
         "novel_extensions": sorted(all_ext),
-        "formula": ("EDS = R·(α·node + β·edge) + γ·(1−R·coverage)·gen  "
+        "formula": ("EDS = α·node + β·edge + γ·gen  "
                     f"[α={EDS_ALPHA}, β={EDS_BETA}, γ={EDS_GAMMA}]"),
     }
 

@@ -25,7 +25,7 @@ from backend.constants import (
     MAX_CHUNKS_FOR_GRAPH, MAX_CHUNKS_FOR_GENERATION,
     MAX_QUESTION_COUNT, MAX_ANSWER_LENGTH, LLM_MAX_TOKENS_GENERATION,
     LLM_MAX_TOKENS_EVALUATION, LLM_MAX_TOKENS_GRAPH,
-    EDS_ALPHA, EDS_BETA, EDS_GAMMA,
+    compute_eds,
 )
 from backend.models import Role, IngestRequest, NON_GRAPH_SOURCE_TYPES
 from backend.api.service import AuthorizationError
@@ -365,9 +365,9 @@ def _run_hybrid_eds_bg(settings, org_id, course_id, student_id, session_id,
         agg_edge_score = len(all_edge_indices) / max(len(expected_edges), 1)
         agg_gen = min(1.0, len(all_extensions) / max(len(expected_extensions), 3))
         agg_coverage = (agg_node_score + agg_edge_score) / 2.0
-        eds_question = (agg_R * (EDS_ALPHA * agg_node_score + EDS_BETA * agg_edge_score)
-                        + EDS_GAMMA * (1.0 - agg_R * agg_coverage) * agg_gen)
-        eds_question = round(min(1.0, max(0.0, eds_question)), 4)
+        # Correctness-only EDS: concepts (node) + multi-concept links (edge) +
+        # depth (gen). No authenticity/R gate — see constants.compute_eds.
+        eds_question = compute_eds(agg_node_score, agg_edge_score, agg_gen)
 
         eds_components_data = {
             "node_score": node_score, "edge_score": edge_score, "r_gate": R,
@@ -1243,8 +1243,8 @@ def _demo_answer_turn(repo, settings, org_id, course_id, student_id, session_id,
     agg_R = 1.0 - min_recit
     agg_node = len(all_n) / max(len(exp_nodes), 1); agg_edge = len(all_e) / max(len(exp_edges), 1)
     agg_gen = min(1.0, len(all_x) / max(len(exp_ext), 3)); agg_cov = (agg_node + agg_edge) / 2.0
-    eds_q = agg_R * (EDS_ALPHA * agg_node + EDS_BETA * agg_edge) + EDS_GAMMA * (1.0 - agg_R * agg_cov) * agg_gen
-    eds_q = round(min(1.0, max(0.0, eds_q)), 4)
+    # Correctness-only EDS (node + edge + gen); no authenticity/R gate.
+    eds_q = compute_eds(agg_node, agg_edge, agg_gen)
     comp = {"node_score": node_score, "edge_score": edge_score, "r_gate": R, "gen_score_norm": gen_norm,
             "nodes_detected": list(nodes_dem), "edges_demonstrated": list(edges_dem),
             "novel_extensions": list(novel), "raw_probe_score": recit}
@@ -2764,29 +2764,20 @@ def _threshold_rationale(score: float, bucket: str, comp: dict, feedback: str) -
     """Explain, in plain language, why an answer landed in its EDS band.
 
     Combines the model's qualitative feedback with the quantitative EDS drivers
-    (authenticity gate, concept coverage, causal-link coverage) so a professor
-    can see *why* a score sits at a given threshold, not just the number.
+    (concept coverage, causal-link coverage) so a professor can see *why* a score
+    sits at a given threshold, not just the number.
     """
     pct = round(score * 100)
     if not comp:
         lead = (feedback or "").strip()
         return (f"{lead} " if lead else "") + f"Scored {pct}/100 ({bucket} band)."
 
-    r = comp.get("r_gate")
     node = comp.get("node_score")
     edge = comp.get("edge_score")
     nodes_n = len(comp.get("nodes_detected") or [])
     edges_n = len(comp.get("edges_demonstrated") or [])
 
     parts = []
-    if r is not None:
-        if r >= 0.75:
-            auth = "authentic reasoning"
-        elif r >= 0.4:
-            auth = "partly recited"
-        else:
-            auth = "mostly keyword recitation"
-        parts.append(f"authenticity gate R={round(r, 2)} ({auth})")
     if node is not None:
         parts.append(f"concept coverage {round(node * 100)}% ({nodes_n} nodes)")
     if edge is not None:
@@ -2804,9 +2795,8 @@ def _query_course_performance(repo, org_id: str, course_id: str) -> dict:
     Aggregates the per-answer EDS components across every completed practice
     session into class-level figures — no per-student rows ever leave here:
       - aspects: Recall (Concepts / node), Application (Causal Links / edge),
-        In-depth Understanding (Novel Insight / gen), plus an Authenticity signal
-        (r_gate). For each: the % of students at/above a mastery bar, and the
-        class average.
+        In-depth Understanding (Novel Insight / gen). For each: the % of students
+        at/above a mastery bar, and the class average.
       - topics: for each concept examined, the % of students who demonstrated it.
     """
     # Pretty topic names: map stored concept id/label -> the graph's label.
@@ -2903,7 +2893,7 @@ def _query_exam_results(repo, assignment_id: str, student_id: str,
     q_results, answered, score_sum = [], 0, 0.0
     # Carry the same EDS component breakdown the in-exam gauge shows, so Results
     # speaks one vocabulary: per-question components + an averaged aggregate.
-    comp_keys = ("node_score", "edge_score", "r_gate", "gen_score")
+    comp_keys = ("node_score", "edge_score", "gen_score")
     comp_sums = {k: 0.0 for k in comp_keys}
     comp_n = 0
     for r in rows:
@@ -5375,12 +5365,9 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 agg_gen = min(1.0, len(all_extensions) / max(len(expected_extensions), 3))
                 agg_coverage = (agg_node_score + agg_edge_score) / 2.0
 
-                # Apply the EDS formula
-                eds_question = (
-                    agg_R * (EDS_ALPHA * agg_node_score + EDS_BETA * agg_edge_score)
-                    + EDS_GAMMA * (1.0 - agg_R * agg_coverage) * agg_gen
-                )
-                eds_question = round(min(1.0, max(0.0, eds_question)), 4)
+                # Correctness-only EDS: concepts (node) + multi-concept links
+                # (edge) + depth (gen). No authenticity/R gate — compute_eds.
+                eds_question = compute_eds(agg_node_score, agg_edge_score, agg_gen)
 
                 # ── Store EDS components in evaluation ────────────────────
                 eds_components_data = {

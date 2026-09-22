@@ -5,7 +5,7 @@ EDS scoring (must match the live grader's formula), and the orchestration /
 report — deterministically and without spending tokens.
 """
 from backend.app import agent_sim as S
-from backend.constants import EDS_ALPHA, EDS_BETA, EDS_GAMMA
+from backend.constants import EDS_ALPHA, EDS_BETA, compute_eds
 
 
 def test_skill_curve_linear_bounds_and_order():
@@ -35,23 +35,41 @@ def test_skill_curve_clamps_to_1_to_10():
 
 def test_eds_formula_matches_hand_computation():
     expected = {"nodes": ["a", "b"], "edges": [{}, {}], "extensions": ["x"]}
-    # one sub-turn: 1 of 2 nodes, 1 of 2 edges, no extensions, recitation 0.0
+    # one sub-turn: 1 of 2 nodes, 1 of 2 edges, no extensions
     eds = S.eds_from_components(expected, [["a"]], [[0]], [0.0], [[]])
-    R = 1.0
-    node_score, edge_score = 0.5, 0.5
-    coverage = 0.5
-    gen = 0.0
-    want = R * (EDS_ALPHA * node_score + EDS_BETA * edge_score) + \
-        EDS_GAMMA * (1 - R * coverage) * gen
-    assert abs(eds - round(min(1, max(0, want)), 4)) < 1e-6
+    # Correctness-only: α·node + β·edge + γ·gen, no authenticity gate.
+    node_score, edge_score, gen = 0.5, 0.5, 0.0
+    assert eds == compute_eds(node_score, edge_score, gen)
+    assert eds == round(EDS_ALPHA * 0.5 + EDS_BETA * 0.5, 4)
 
 
 def test_eds_unions_across_subturns():
     expected = {"nodes": ["a", "b"], "edges": [{}, {}], "extensions": []}
     # two sub-turns each covering a different node/edge → full coverage
     eds = S.eds_from_components(expected, [["a"], ["b"]], [[0], [1]], [0.2, 0.0], [[], []])
-    # R uses the BEST (lowest) recitation = 0.0 → R=1, full node+edge coverage
+    # full node+edge coverage, no extensions → α + β
+    assert eds == compute_eds(1.0, 1.0, 0.0)
     assert eds == round(EDS_ALPHA * 1.0 + EDS_BETA * 1.0, 4)
+
+
+def test_eds_ignores_recitation_authenticity():
+    """EDS depends only on correctness — recitation_score must not change it."""
+    expected = {"nodes": ["a", "b"], "edges": [{}, {}], "extensions": ["x"]}
+    authentic = S.eds_from_components(expected, [["a", "b"]], [[0, 1]], [0.0], [["x"]])
+    recited = S.eds_from_components(expected, [["a", "b"]], [[0, 1]], [1.0], [["x"]])
+    assert authentic == recited == compute_eds(1.0, 1.0, 1.0)
+
+
+def test_eds_is_monotonic_in_node_edge_and_ignores_gen():
+    expected = {"nodes": ["a", "b"], "edges": [{}, {}], "extensions": ["x", "y", "z"]}
+    base = S.eds_from_components(expected, [["a"]], [[]], [0.5], [[]])
+    more_nodes = S.eds_from_components(expected, [["a", "b"]], [[]], [0.5], [[]])
+    more_edges = S.eds_from_components(expected, [["a"]], [[0]], [0.5], [[]])
+    more_gen = S.eds_from_components(expected, [["a"]], [[]], [0.5], [["x"]])
+    # Node and edge coverage raise the score; Novel Insight (gen) is retired (γ=0)
+    # so adding a novel extension must not move the score.
+    assert more_nodes > base and more_edges > base
+    assert more_gen == base
 
 
 # ── Fakes: answer carries the persona band; eval maps band → components ────────
