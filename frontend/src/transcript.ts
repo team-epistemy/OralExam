@@ -10,6 +10,9 @@ export interface TranscriptEntry {
   question: string;
   attempted?: boolean;
   score?: number | null;
+  // Grader's formative feedback for this question — only present when scores are
+  // shown (practice / released), so the transcript never leaks an unreleased draft.
+  feedback?: string;
   exchange: { who: string; text: string }[];
 }
 
@@ -129,6 +132,24 @@ export function downloadTranscriptPdf(meta: TranscriptMeta, entries: TranscriptE
       });
     }
 
+    // Formative feedback block (practice / preview only — see examTranscript).
+    if (t.feedback) {
+      checkPageBreak(10);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(GOLD);
+      doc.text('Feedback:', margin + 5, y);
+      y += 4;
+      doc.setFont('helvetica', 'italic');
+      doc.setTextColor(BLACK);
+      doc.splitTextToSize(t.feedback, contentWidth - 10).forEach((line: string) => {
+        checkPageBreak(5);
+        doc.text(line, margin + 10, y);
+        y += 4;
+      });
+      y += 3;
+    }
+
     // Footer line per question — omitted entirely when there is no score to show.
     const bits: string[] = [];
     if (t.score != null) bits.push(`Score: +${Math.round(t.score)} EDS`);
@@ -158,7 +179,7 @@ export function downloadTranscriptPdf(meta: TranscriptMeta, entries: TranscriptE
 // Results page — the in-app score is a draft until the professor releases it.
 export function examTranscript(
   questions: { topic?: string; text: string }[],
-  qData: { attempted: boolean; score: number; turns: { role: string; text: string }[] }[],
+  qData: { attempted: boolean; score: number; feedback?: string; turns: { role: string; text: string }[] }[],
   opts: { showDraftScores: boolean; overallScore: number; answered: number },
 ): { meta: TranscriptMeta; entries: TranscriptEntry[] } {
   const entries = qData.map((q, i) => ({
@@ -169,6 +190,9 @@ export function examTranscript(
     // q.score is 0..1 in the exam; the transcript speaks the 0-100 EDS the rest
     // of the app shows (it used to print Math.round(0.8) = 1).
     score: opts.showDraftScores ? Math.round(q.score * 100) : null,
+    // Feedback rides along only when draft scores are visible (practice / preview),
+    // matching the score-visibility rule so unreleased graded work leaks nothing.
+    feedback: opts.showDraftScores && q.attempted ? (q.feedback || undefined) : undefined,
     // turns[0] is the question itself, already carried by `question`.
     exchange: q.turns
       .slice(1)

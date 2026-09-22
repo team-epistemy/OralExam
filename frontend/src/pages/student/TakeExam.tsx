@@ -27,6 +27,9 @@ interface QuestionState {
   done: boolean;
   score: number;
   edsComponents: EDSComponents | null;
+  // Grader's per-answer assessment (AnswerResponse.feedback). Never shown mid-exam
+  // — surfaced only on the practice done-screen so students get formative feedback.
+  feedback: string;
 }
 
 type Phase = 'loading' | 'ready' | 'taking' | 'review' | 'done';
@@ -472,7 +475,11 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const stopMic = useCallback(() => {
     const rec = recognitionRef.current as any;
     recognitionRef.current = null;
-    if (rec) { try { rec.onend = null; rec.stop(); } catch { /* already stopped */ } }
+    // Detach ALL callbacks before stopping: the Web Speech API flushes a final
+    // onresult asynchronously after stop(), which would otherwise re-write the
+    // (already-cleared) draft with the just-submitted answer — the box "not
+    // refreshing" at end of turn. onerror is dropped for the same reason.
+    if (rec) { try { rec.onresult = null; rec.onerror = null; rec.onend = null; rec.stop(); } catch { /* already stopped */ } }
     setListening(false);
     setSpeaking(false);
   }, []);
@@ -669,6 +676,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         done: false,
         score: 0,
         edsComponents: null,
+        feedback: '',
       }));
       setSessionId(res.session_id);
       setQuestions(res.questions);
@@ -841,6 +849,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               done: advance,
               score: data.eds_question ?? Math.min(1, q.score + data.eds_delta / 10),
               edsComponents: data.eds_components ?? null,
+              // Keep the latest non-empty assessment (the final answer's, once the
+              // question is done). Shown on the practice done-screen, not mid-exam.
+              feedback: (data.feedback || '').trim() || q.feedback,
             };
           }),
         );
@@ -923,6 +934,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     }
     if (assignmentId && !preview) clearExamState(assignmentId);
     if (timerRef.current) clearInterval(timerRef.current);
+    // Practice/preview: reveal the transcript (which now carries per-question
+    // feedback) by default, so formative feedback is seen without a hunt.
+    if (showDraftScores) setShowTranscript(true);
     setPhase('done');
   };
   const backToExam = () => {
@@ -1228,7 +1242,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               onClick={() => setShowTranscript((s) => !s)}
               className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
             >
-              {showTranscript ? 'Hide Transcript' : 'View Transcript'}
+              {showDraftScores
+                ? (showTranscript ? 'Hide Feedback & Transcript' : 'View Feedback & Transcript')
+                : (showTranscript ? 'Hide Transcript' : 'View Transcript')}
             </button>
             <button
               onClick={downloadTranscript}
@@ -1259,6 +1275,12 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                         <span className="text-gray-800 whitespace-pre-wrap">{e.text}</span>
                       </div>
                     ))
+                  )}
+                  {t.feedback && (
+                    <div className="mt-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wide text-amber-700">Feedback</span>
+                      <p className="text-sm text-gray-800 leading-relaxed mt-0.5 whitespace-pre-wrap">{t.feedback}</p>
+                    </div>
                   )}
                   <div className="text-xs text-gray-400 mt-2">
                     {t.attempted ? 'Answered' : 'Skipped'}{t.score != null && ` · EDS +${t.score}`}
