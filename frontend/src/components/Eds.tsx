@@ -53,7 +53,6 @@ export function EDSGauge({ score }: { score: number }) {
 const EDS_PARTS: { key: keyof EDSComponents; label: string; color: string }[] = [
   { key: 'node_score', label: 'Concepts', color: 'bg-blue-500' },
   { key: 'edge_score', label: 'Causal Links', color: 'bg-purple-500' },
-  { key: 'r_gate', label: 'Authenticity', color: 'bg-green-500' },
   { key: 'gen_score', label: 'Novel Insight', color: 'bg-amber-500' },
 ];
 
@@ -87,7 +86,7 @@ export function EDSExplainer({ className = '' }: { className?: string }) {
     <p className={`text-xs text-gray-500 leading-relaxed ${className}`}>
       <span className="font-semibold text-gray-600">Epistemic Depth Score (EDS)</span> rates the
       reasoning in your answers out of 100 — the concepts you covered, the causal links you
-      explained, how authentic the reasoning was, and any novel insight.
+      explained, and any novel insight beyond the basics.
     </p>
   );
 }
