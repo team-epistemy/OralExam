@@ -16,11 +16,15 @@ DIFFICULTY_FOCUS = {
 }
 
 # A concept's authored bank is tagged by depth. Difficulty Focus selects which
-# tiers to draw from (target tier first so small counts favor it).
+# tiers to draw from, listed in draw order — the FIRST tier wins when a concept
+# gets only one question (the common case, since ~12 questions spread across
+# 8-14 concepts). So the lead tier sets the exam's character. "balanced" leads
+# with application/in_depth (conceptual, contextual) and keeps recall LAST as a
+# fallback, so exams aren't fixated on definitions/formulas.
 DEPTH_TIERS = ("recall", "application", "in_depth", "case")
 _DIFFICULTY_TIERS = {
     "recall": ("recall", "application"),
-    "balanced": ("recall", "application", "in_depth", "case"),
+    "balanced": ("application", "in_depth", "case", "recall"),
     "deep": ("in_depth", "case", "application"),
 }
 

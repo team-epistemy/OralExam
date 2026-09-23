@@ -3408,9 +3408,10 @@ def _build_question_dicts(settings, *, concepts, chunks, difficulty, domain, cou
     """Author `count` oral-exam questions for the given concepts + chunks via
     Bedrock and parse them into question dicts — NO DB writes.
 
-    This is the single source of truth for the generation prompt and parse. Both
-    the professor `generate_questions` endpoint and the admin QG test bench call
-    it, so the bench grades the EXACT questions students would get, not a copy.
+    Used by the professor `generate_questions` materials-task endpoint. NOTE: the
+    assignment flow students actually take does NOT use this — build_exam assembles
+    from the per-concept banks (see exam_questions/assemble_questions). The QG test
+    bench now grades that bank path, not this prompt.
 
     Returns a list of dicts:
       {question_id, topic, question, difficulty, concept_ids, expected_path}
@@ -7946,11 +7947,13 @@ def _run_perf_probe_bg(settings, org_id, probe_id, params):
 
 def _run_qg_test_bg(d, org_id, run_id, course_id, course_name, difficulty,
                     count, concept_ids, domain):
-    """Background: generate a batch with the real generator, embed + grade it,
-    and persist the report + per-question rows. Updates the qg_test_run row to
-    'completed'/'failed'. Run off-request so a slow LLM batch can't hold the
-    HTTP connection past CloudFront's origin timeout (→ 504)."""
-    import json as _json
+    """Background: assemble a batch via the REAL student path (build_exam's
+    per-concept bank assembly), generate each question's expected_path the way
+    exam start does, then embed + grade it and persist the report + per-question
+    rows. Updates the qg_test_run row to 'completed'/'failed'. Run off-request so
+    a slow LLM batch can't hold the HTTP connection past CloudFront's origin
+    timeout (→ 504)."""
+    import json as _json, uuid as _uuid
     from backend.app import qg_bench
     settings = d["settings"]
     repo = _request_repo(d)
@@ -7962,16 +7965,33 @@ def _run_qg_test_bg(d, org_id, run_id, course_id, course_name, difficulty,
             sel = set(concept_ids)
             concepts = [c for c in concepts
                         if c.get("label") in sel or c.get("id") in sel]
-        with repo.conn.cursor() as cur:
-            cur.execute("SELECT text FROM chunk WHERE course_id = %s ORDER BY chunk_index",
-                        (course_id,))
-            chunks = [row[0] for row in cur.fetchall()]
 
-        questions = _build_question_dicts(
-            settings, concepts=concepts, chunks=chunks,
-            difficulty=difficulty, domain=domain, count=count)
-        if not questions:
-            raise RuntimeError("The generator returned no usable questions.")
+        # Assemble EXACTLY what students get: bank questions per concept (build_exam),
+        # not the off-path Socratic _build_question_dicts. Then generate each
+        # question's expected_path (as exam start does) so qg_bench can grade the
+        # real questions — a recall/formula bank question with no causal edge now
+        # shows up in the report (QG-02/QG-04) instead of being hidden by a nicer prompt.
+        simple = [{"id": c.get("id") or c.get("label", ""), "label": c.get("label", "")}
+                  for c in concepts]
+        banks = _concept_banks(concepts, difficulty)
+        variant = build_variants(simple, count, difficulty)[0]
+        assembled = assemble_questions(variant["distribution"], banks)
+        if not assembled:
+            raise RuntimeError("No questions could be assembled from the concept banks.")
+        questions = []
+        for a in assembled:
+            qtext = a.get("q")
+            label = a.get("topic") or a.get("concept_id") or ""
+            questions.append({
+                "question_id": str(_uuid.uuid4()),
+                "topic": label,
+                "question": qtext,
+                # The whole exam runs at one difficulty; grade each question against
+                # it, so a recall/formula question surfaces as mis-declared (QG-04).
+                "difficulty": difficulty,
+                "concept_ids": [label] if label else [],
+                "expected_path": _generate_expected_path(settings, qtext, [label] if label else []),
+            })
 
         embeddings = None
         try:
@@ -8011,11 +8031,11 @@ def _run_qg_test_bg(d, org_id, run_id, course_id, course_name, difficulty,
 def _register_admin_testing(app: FastAPI, deps) -> None:
     """platform_admin: the QG (question-generation) quality test bench.
 
-    Sources a real subject's concept graph, live-generates a question batch with
-    the SAME generator students get (``_build_question_dicts``), then grades it
-    with ``qg_bench.run_qg_checks`` against the graph + each question's
-    ``expected_path`` + real embeddings. Ephemeral: test questions are NEVER
-    persisted to the ``question`` table, only the run's report is kept for history.
+    Sources a real subject's concept graph, assembles a question batch via the
+    SAME per-concept bank path students get (``build_exam``'s assembly), generates
+    each question's ``expected_path``, then grades it with ``qg_bench.run_qg_checks``
+    against the graph + expected_path + real embeddings. Ephemeral: test questions
+    are NEVER persisted to the ``question`` table, only the run's report is kept.
     """
     from backend.app import qg_bench
 
