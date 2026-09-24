@@ -32,8 +32,8 @@ export default function DemoExam() {
           <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <span className="text-amber-600 text-xl font-bold">!</span>
           </div>
-          <h1 className="text-lg font-semibold text-gray-900 mb-2">Demo unavailable</h1>
-          <p className="text-sm text-gray-500">{error}</p>
+          <h1 className="text-lg font-semibold text-ink mb-2">Demo unavailable</h1>
+          <p className="text-sm text-muted">{error}</p>
         </div>
       </div>
     );
@@ -41,17 +41,17 @@ export default function DemoExam() {
   if (!meta) {
     return (
       <div className="min-h-[80vh] flex items-center justify-center">
-        <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+        <Loader2 className="w-8 h-8 text-gold animate-spin" />
       </div>
     );
   }
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6">
-      <div className="mb-3 flex flex-wrap items-center gap-2 bg-blue-50 border border-blue-200 text-blue-800 rounded-xl px-4 py-2.5 text-sm">
+      <div className="mb-3 flex flex-wrap items-center gap-2 bg-parchment-dark border border-border text-navy rounded-xl px-4 py-2.5 text-sm">
         <span className="font-semibold">Epistemy demo</span>
         <span>— no login required. This is a practice run; nothing is saved.</span>
-        <span className="ml-auto text-blue-600 text-xs">{meta.attempts_remaining} attempt{meta.attempts_remaining === 1 ? '' : 's'} left</span>
+        <span className="ml-auto text-gold text-xs">{meta.attempts_remaining} attempt{meta.attempts_remaining === 1 ? '' : 's'} left</span>
       </div>
       <TakeExam demoToken={token} assignmentId={meta.assignment_id} />
     </div>

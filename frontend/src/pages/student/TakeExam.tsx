@@ -246,10 +246,10 @@ function ConceptGraphSVG({
       >
         <defs>
           <marker id="edge-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L6,3 z" fill="#a78bfa" />
+            <path d="M0,0 L0,6 L6,3 z" fill="#D4C9B0" />
           </marker>
           <marker id="edge-arrow-active" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L6,3 z" fill="#7c3aed" />
+            <path d="M0,0 L0,6 L6,3 z" fill="#9B7530" />
           </marker>
         </defs>
 
@@ -278,7 +278,7 @@ function ConceptGraphSVG({
               y1={y1}
               x2={x2}
               y2={y2}
-              stroke={active ? '#7c3aed' : '#d1d5db'}
+              stroke={active ? '#9B7530' : '#D4C9B0'}
               strokeWidth={active ? 2 : 1.5}
               markerEnd={active ? 'url(#edge-arrow-active)' : 'url(#edge-arrow)'}
               style={{ transition: 'stroke 0.4s' }}
@@ -291,20 +291,20 @@ function ConceptGraphSVG({
           const isTraversed = traversed.has(n.id);
           const isCurrent = n.id === currentTopic;
 
-          let fill = '#f3f4f6'; // gray-100
-          let stroke = '#d1d5db'; // gray-300
-          let textFill = '#6b7280'; // gray-500
+          let fill = '#F5F0E8'; // gray-100
+          let stroke = '#D4C9B0'; // gray-300
+          let textFill = '#6B6355'; // gray-500
           let strokeWidth = 1.5;
 
           if (isTraversed) {
-            fill = '#dbeafe'; // blue-100
-            stroke = '#2563eb'; // blue-600
-            textFill = '#1e40af'; // blue-800
+            fill = '#EDE5D0'; // blue-100
+            stroke = '#9B7530'; // blue-600
+            textFill = '#1B2A4A'; // blue-800
             strokeWidth = 2;
           }
           if (isCurrent) {
-            fill = isTraversed ? '#bfdbfe' : '#fef3c7'; // blue-200 or amber-100
-            stroke = isTraversed ? '#2563eb' : '#f59e0b'; // blue-600 or amber-500
+            fill = isTraversed ? '#EAD9AE' : '#F5E6C0'; // blue-200 or amber-100
+            stroke = isTraversed ? '#9B7530' : '#C4933F'; // blue-600 or amber-500
             strokeWidth = 2.5;
           }
 
@@ -356,16 +356,16 @@ function ConceptGraphSVG({
       {/* Coverage progress bar */}
       <div className="px-1">
         <div className="flex justify-between text-xs mb-1">
-          <span className="text-gray-500 font-semibold uppercase tracking-wide text-[10px]">
+          <span className="text-muted font-semibold uppercase tracking-wide text-[10px]">
             Coverage
           </span>
-          <span className="text-gray-900 font-bold text-[10px]">
+          <span className="text-ink font-bold text-[10px]">
             {coveredCount}/{totalTopics} concepts
           </span>
         </div>
-        <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
+        <div className="w-full bg-parchment-dark rounded-full h-2 overflow-hidden">
           <div
-            className="h-full bg-gradient-to-r from-green-400 to-emerald-500 rounded-full transition-all duration-500"
+            className="h-full bg-gradient-to-r from-success to-success rounded-full transition-all duration-500"
             style={{ width: `${(coveredCount / Math.max(totalTopics, 1)) * 100}%` }}
           />
         </div>
@@ -1002,11 +1002,11 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <span className="text-red-600 text-xl font-bold">!</span>
           </div>
-          <h2 className="text-lg font-semibold text-gray-900 mb-2">Unable to Start {typeLabel}</h2>
-          <p className="text-sm text-gray-500 mb-4">{error}</p>
+          <h2 className="text-lg font-heading text-ink mb-2">Unable to Start {typeLabel}</h2>
+          <p className="text-sm text-muted mb-4">{error}</p>
           <button
             onClick={() => navigate('/student/dashboard')}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+            className="px-4 py-2 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light"
           >
             Return to Dashboard
           </button>
@@ -1021,9 +1021,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     return (
       <div className="min-h-[80vh] flex items-center justify-center">
         <div className="text-center">
-          <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-4" />
-          <h2 className="text-lg font-semibold text-gray-900 mb-1">Preparing your {typeLower}...</h2>
-          <p className="text-sm text-gray-500">Your questions will appear shortly</p>
+          <Loader2 className="w-8 h-8 text-gold animate-spin mx-auto mb-4" />
+          <h2 className="text-xl font-heading text-ink mb-1">Preparing your {typeLower}...</h2>
+          <p className="text-sm text-muted">Your questions will appear shortly</p>
         </div>
       </div>
     );
@@ -1040,40 +1040,40 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     return (
       <div className="min-h-[80vh] max-w-2xl mx-auto py-8 px-4">
         <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-100 rounded-full mb-3">
-            <BookOpen className="w-7 h-7 text-blue-600" />
+          <div className="inline-flex items-center justify-center w-14 h-14 bg-gold/15 rounded-full mb-3">
+            <BookOpen className="w-7 h-7 text-gold" />
           </div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600 mb-1">{typeLabel}</p>
-          <h1 className="text-2xl font-bold text-gray-900">Before you begin</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            The timer starts only when you press <span className="font-medium text-gray-700">Start {typeLabel}</span>.
+          <p className="text-xs font-semibold uppercase tracking-wide text-gold mb-1">{typeLabel}</p>
+          <h1 className="text-3xl font-heading text-ink">Before you begin</h1>
+          <p className="text-sm text-muted mt-1">
+            The timer starts only when you press <span className="font-medium text-ink-light">Start {typeLabel}</span>.
           </p>
         </div>
 
         {/* At a glance */}
         <div className="grid grid-cols-2 gap-3 mb-5">
-          <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center gap-3">
-            <CheckCircle className="w-5 h-5 text-blue-600 flex-shrink-0" />
+          <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
+            <CheckCircle className="w-5 h-5 text-gold flex-shrink-0" />
             <div>
-              <p className="text-lg font-bold text-gray-900">{qCount ?? '—'}</p>
-              <p className="text-xs text-gray-500">Question{qCount === 1 ? '' : 's'}</p>
+              <p className="text-lg font-bold text-ink">{qCount ?? '—'}</p>
+              <p className="text-xs text-muted">Question{qCount === 1 ? '' : 's'}</p>
             </div>
           </div>
-          <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center gap-3">
-            <Clock className="w-5 h-5 text-blue-600 flex-shrink-0" />
+          <div className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
+            <Clock className="w-5 h-5 text-gold flex-shrink-0" />
             <div>
-              <p className="text-lg font-bold text-gray-900">{mins ? `${mins} min` : 'Untimed'}</p>
-              <p className="text-xs text-gray-500">Time limit</p>
+              <p className="text-lg font-bold text-ink">{mins ? `${mins} min` : 'Untimed'}</p>
+              <p className="text-xs text-muted">Time limit</p>
             </div>
           </div>
         </div>
 
         {/* Timer is optional on practice tests */}
         {isPractice && (
-          <div className="bg-white rounded-xl border border-gray-200 p-4 mb-5 flex items-center justify-between gap-3">
+          <div className="bg-white rounded-xl border border-border p-4 mb-5 flex items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-medium text-gray-900">Use a timer</p>
-              <p className="text-xs text-gray-500">
+              <p className="text-sm font-medium text-ink">Use a timer</p>
+              <p className="text-xs text-muted">
                 {configuredMins
                   ? `Optional for practice — count down from ${configuredMins} min. Off by default.`
                   : 'No time limit is set for this practice test.'}
@@ -1085,7 +1085,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               aria-checked={practiceTimed}
               disabled={!configuredMins}
               onClick={() => setPracticeTimed((v) => !v)}
-              className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors disabled:opacity-40 ${practiceTimed ? 'bg-blue-600' : 'bg-gray-300'}`}
+              className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors disabled:opacity-40 ${practiceTimed ? 'bg-navy' : 'bg-border'}`}
             >
               <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${practiceTimed ? 'translate-x-6' : 'translate-x-1'}`} />
             </button>
@@ -1093,30 +1093,30 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         )}
 
         {/* How it works */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 mb-5">
-          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">How this works</h2>
-          <ul className="space-y-2 text-sm text-gray-700">
-            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" /> It's oral — each question is read aloud, and the examiner may ask follow-up probes before moving on.</li>
-            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" /> Answer by voice (microphone) or by typing — your choice, and you can switch anytime.</li>
-            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" /> Your progress auto-saves; if you refresh, you'll resume where you left off.</li>
-            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" /> Keep this {typeLower} open in a single browser tab.</li>
+        <div className="bg-white rounded-xl border border-border p-5 mb-5">
+          <h2 className="text-sm font-semibold text-muted uppercase tracking-wide mb-3">How this works</h2>
+          <ul className="space-y-2 text-sm text-ink-light">
+            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> It's oral — each question is read aloud, and the examiner may ask follow-up probes before moving on.</li>
+            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Answer by voice (microphone) or by typing — your choice, and you can switch anytime.</li>
+            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Your progress auto-saves; if you refresh, you'll resume where you left off.</li>
+            <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Keep this {typeLower} open in a single browser tab.</li>
           </ul>
         </div>
 
         {/* The case */}
         {caseMaterials.length > 0 && (
-          <div className="bg-white rounded-xl border border-gray-200 p-5 mb-5">
-            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">The case — review before you start</h2>
+          <div className="bg-white rounded-xl border border-border p-5 mb-5">
+            <h2 className="text-sm font-semibold text-muted uppercase tracking-wide mb-3">The case — review before you start</h2>
             <div className="space-y-2">
               {caseMaterials.map((m, i) => (
                 <button
                   key={m.version_id}
                   onClick={() => setCaseViewIdx(i)}
-                  className="w-full flex items-center gap-3 px-3 py-2 border border-gray-200 rounded-lg text-left hover:bg-gray-50 transition-colors"
+                  className="w-full flex items-center gap-3 px-3 py-2 border border-border rounded-lg text-left hover:bg-parchment/60 transition-colors"
                 >
-                  <BookOpen className="w-4 h-4 text-gray-500 flex-shrink-0" />
-                  <span className="text-sm text-gray-800 flex-1 min-w-0 truncate">{m.file_name}</span>
-                  <span className="text-xs text-blue-600 flex-shrink-0">View</span>
+                  <BookOpen className="w-4 h-4 text-muted flex-shrink-0" />
+                  <span className="text-sm text-ink flex-1 min-w-0 truncate">{m.file_name}</span>
+                  <span className="text-xs text-gold flex-shrink-0">View</span>
                 </button>
               ))}
             </div>
@@ -1124,19 +1124,19 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         )}
 
         {/* Audio check */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 mb-5">
-          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Audio check</h2>
+        <div className="bg-white rounded-xl border border-border p-5 mb-5">
+          <h2 className="text-sm font-semibold text-muted uppercase tracking-wide mb-3">Audio check</h2>
           <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={checkMic}
               disabled={micStatus === 'checking'}
-              className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+              className="inline-flex items-center gap-2 px-3 py-2 border border-border rounded-lg text-sm font-medium text-ink-light hover:bg-parchment/60 disabled:opacity-50 transition-colors"
             >
               {micStatus === 'checking' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
               Check microphone
             </button>
             {micStatus === 'ok' && (
-              <span className="text-sm text-green-600 inline-flex items-center gap-1"><CheckCircle className="w-4 h-4" /> Microphone ready</span>
+              <span className="text-sm text-success inline-flex items-center gap-1"><CheckCircle className="w-4 h-4" /> Microphone ready</span>
             )}
             {micStatus === 'denied' && (
               <span className="text-sm text-amber-600">Mic blocked — you can still answer by typing.</span>
@@ -1145,7 +1145,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               <span className="text-sm text-amber-600">Mic isn't available here — you can type your answers.</span>
             )}
           </div>
-          <p className="text-xs text-gray-400 mt-2 inline-flex items-center gap-1">
+          <p className="text-xs text-muted mt-2 inline-flex items-center gap-1">
             <Volume2 className="w-3.5 h-3.5 flex-shrink-0" /> Questions are read aloud when audio is available; you can always read them on screen too.
           </p>
         </div>
@@ -1157,13 +1157,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         <button
           onClick={beginExam}
           disabled={starting}
-          className="w-full flex items-center justify-center gap-2 py-3 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          className="w-full flex items-center justify-center gap-2 py-3 bg-navy text-white rounded-lg text-sm font-semibold hover:bg-navy-light disabled:opacity-50 transition-colors"
         >
           {starting ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</> : `Start ${typeLabel} →`}
         </button>
         <button
           onClick={() => navigate('/student/dashboard')}
-          className="w-full mt-2 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
+          className="w-full mt-2 py-2 text-sm text-muted hover:text-ink-light transition-colors"
         >
           Back to dashboard
         </button>
@@ -1186,14 +1186,14 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       {qData.map((q, i) => (
         <div
           key={i}
-          className="flex justify-between items-center gap-4 py-2 border-b border-gray-100 text-sm"
+          className="flex justify-between items-center gap-4 py-2 border-b border-border/60 text-sm"
         >
-          <span className="text-gray-700 truncate">
+          <span className="text-ink-light truncate">
             Q{i + 1}. {questions[i]?.topic || questions[i]?.text}
           </span>
           <span
             className={`font-bold flex-shrink-0 ${
-              q.attempted ? 'text-green-600' : 'text-gray-400'
+              q.attempted ? 'text-success' : 'text-muted'
             }`}
           >
             {q.attempted ? 'Answered' : 'Skipped'}
@@ -1208,11 +1208,11 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   if (phase === 'review') {
     return (
       <div className="max-w-2xl mx-auto">
-        <div className="bg-white border border-gray-200 rounded-2xl p-10 text-center">
+        <div className="bg-white border border-border rounded-2xl p-10 text-center">
           <div className="text-4xl mb-2">&#128221;</div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600 mb-1">{typeLabel}</p>
-          <h1 className="text-2xl font-bold text-gray-900 mb-1">Ready to Submit</h1>
-          <p className="text-gray-500 text-sm mb-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gold mb-1">{typeLabel}</p>
+          <h1 className="text-3xl font-heading text-ink mb-1">Ready to Submit</h1>
+          <p className="text-muted text-sm mb-5">
             {attemptedCount} of {N} questions answered &middot; {N - attemptedCount} skipped.
           </p>
           {showDraftScores && (
@@ -1222,7 +1222,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           )}
           {statusList}
 
-          <div className={`rounded-lg p-3 max-w-lg mx-auto mb-6 text-sm ${isPractice ? 'bg-blue-50 border border-blue-200 text-blue-800' : 'bg-amber-50 border border-amber-200 text-gray-700'}`}>
+          <div className={`rounded-lg p-3 max-w-lg mx-auto mb-6 text-sm ${isPractice ? 'bg-parchment-dark border border-border text-navy' : 'bg-amber-50 border border-amber-200 text-ink-light'}`}>
             {isPractice
               ? 'This is a practice test — ungraded, and you can retake it as many times as you like.'
               : 'Once you submit, your responses cannot be changed.'}
@@ -1232,7 +1232,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             {!timerExpired && (
               <button
                 onClick={backToExam}
-                className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
+                className="px-4 py-2 border border-border rounded-lg text-sm font-medium text-ink-light hover:bg-parchment/60"
               >
                 <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
                 Back to {typeLower}
@@ -1240,7 +1240,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             )}
             <button
               onClick={confirmSubmit}
-              className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+              className="px-5 py-2 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light"
             >
               Submit {typeLabel}
             </button>
@@ -1265,13 +1265,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   if (phase === 'done') {
     return (
       <div className="max-w-2xl mx-auto">
-        <div className="bg-white border border-gray-200 rounded-2xl p-10 text-center">
-          <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <CheckCircle className="w-7 h-7 text-green-600" />
+        <div className="bg-white border border-border rounded-2xl p-10 text-center">
+          <div className="w-14 h-14 bg-success-bg rounded-full flex items-center justify-center mx-auto mb-4">
+            <CheckCircle className="w-7 h-7 text-success" />
           </div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-green-600 mb-1">{typeLabel}</p>
-          <h1 className="text-2xl font-bold text-gray-900 mb-1">Submitted</h1>
-          <p className="text-gray-500 text-sm mb-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-success mb-1">{typeLabel}</p>
+          <h1 className="text-3xl font-heading text-ink mb-1">Submitted</h1>
+          <p className="text-muted text-sm mb-5">
             Your responses have been recorded. {attemptedCount} of {N} questions answered.
           </p>
           {/* Submitted graded work shows no number here either — same rule as Results. */}
@@ -1280,7 +1280,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               <EDSGauge score={edsScore} />
             </div>
           ) : (
-            <p className="text-sm text-gray-500 mb-6">
+            <p className="text-sm text-muted mb-6">
               Your score appears under Results once your professor releases it.
             </p>
           )}
@@ -1289,7 +1289,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           <div className="flex gap-3 justify-center flex-wrap mb-5">
             <button
               onClick={() => setShowTranscript((s) => !s)}
-              className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
+              className="px-4 py-2 border border-border rounded-lg text-sm font-medium text-ink-light hover:bg-parchment/60"
             >
               {showDraftScores
                 ? (showTranscript ? 'Hide Feedback & Transcript' : 'View Feedback & Transcript')
@@ -1297,41 +1297,41 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             </button>
             <button
               onClick={downloadTranscript}
-              className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
+              className="px-4 py-2 border border-border rounded-lg text-sm font-medium text-ink-light hover:bg-parchment/60"
             >
               Download Transcript
             </button>
           </div>
 
           {showTranscript && (
-            <div className="text-left max-w-xl mx-auto mb-6 max-h-[420px] overflow-y-auto border border-gray-200 rounded-xl p-4 bg-gray-50">
+            <div className="text-left max-w-xl mx-auto mb-6 max-h-[420px] overflow-y-auto border border-border rounded-xl p-4 bg-parchment/60">
               {transcript.map((t) => (
-                <div key={t.n} className="mb-4 pb-4 border-b border-gray-200 last:border-b-0 last:mb-0 last:pb-0">
-                  <div className="text-[10px] font-bold uppercase tracking-wide text-blue-600 mb-1">
+                <div key={t.n} className="mb-4 pb-4 border-b border-border last:border-b-0 last:mb-0 last:pb-0">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-gold mb-1">
                     Question {t.n} · {t.topic}
                   </div>
-                  <div className="text-sm font-semibold text-gray-900 mb-2 leading-relaxed">
+                  <div className="text-sm font-semibold text-ink mb-2 leading-relaxed">
                     {t.question}
                   </div>
                   {t.exchange.length === 0 ? (
-                    <div className="text-sm text-gray-400 italic">Skipped, no response.</div>
+                    <div className="text-sm text-muted italic">Skipped, no response.</div>
                   ) : (
                     t.exchange.map((e, ei) => (
                       <div key={ei} className="mb-1.5 text-sm leading-relaxed">
-                        <span className={`font-bold ${e.who === 'Student' ? 'text-blue-600' : 'text-gray-700'}`}>
+                        <span className={`font-bold ${e.who === 'Student' ? 'text-gold' : 'text-ink-light'}`}>
                           {e.who}:
                         </span>{' '}
-                        <span className="text-gray-800 whitespace-pre-wrap">{e.text}</span>
+                        <span className="text-ink whitespace-pre-wrap">{e.text}</span>
                       </div>
                     ))
                   )}
                   {t.feedback && (
                     <div className="mt-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
                       <span className="text-[10px] font-bold uppercase tracking-wide text-amber-700">Feedback</span>
-                      <p className="text-sm text-gray-800 leading-relaxed mt-0.5 whitespace-pre-wrap">{t.feedback}</p>
+                      <p className="text-sm text-ink leading-relaxed mt-0.5 whitespace-pre-wrap">{t.feedback}</p>
                     </div>
                   )}
-                  <div className="text-xs text-gray-400 mt-2">
+                  <div className="text-xs text-muted mt-2">
                     {t.attempted ? 'Answered' : 'Skipped'}{t.score != null && ` · EDS +${t.score}`}
                   </div>
                 </div>
@@ -1343,13 +1343,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             <div className="flex gap-3 justify-center mt-6">
               <button
                 onClick={async () => { try { await publishAssignment(assignmentId!); props.onExit?.(); } catch (err) { setError(err instanceof Error ? err.message : 'Failed to publish assignment'); } }}
-                className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                className="px-5 py-2.5 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light"
               >
                 Publish to Students
               </button>
               <button
                 onClick={async () => { try { await discardDraft(assignmentId!); } finally { props.onExit?.(); } }}
-                className="px-5 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
+                className="px-5 py-2.5 border border-border text-ink-light rounded-lg text-sm font-medium hover:bg-parchment/60"
               >
                 Discard preview
               </button>
@@ -1359,14 +1359,14 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               {isPractice && (
                 <button
                   onClick={retake}
-                  className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                  className="px-5 py-2 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light"
                 >
                   Retake practice test
                 </button>
               )}
               <button
                 onClick={() => navigate('/student/dashboard')}
-                className={`px-5 py-2 rounded-lg text-sm font-medium ${isPractice ? 'border border-gray-300 text-gray-700 hover:bg-gray-50' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                className={`px-5 py-2 rounded-lg text-sm font-medium ${isPractice ? 'border border-border text-ink-light hover:bg-parchment/60' : 'bg-navy text-white hover:bg-navy-light'}`}
               >
                 <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
                 Back to Dashboard
@@ -1389,9 +1389,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         </div>
       )}
       {/* Header bar */}
-      <div className="bg-blue-600 rounded-t-xl px-3 sm:px-5 py-3 flex items-center justify-between gap-2">
+      <div className="bg-navy rounded-t-xl px-3 sm:px-5 py-3 flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <p className="text-blue-200 text-[11px] font-semibold uppercase tracking-wide">
+          <p className="text-white/60 text-[11px] font-semibold uppercase tracking-wide">
             {typeLabel}
           </p>
           <p className="text-white font-semibold text-base sm:text-lg truncate">
@@ -1431,7 +1431,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           </button>
           <button
             onClick={submitExam}
-            className="px-4 py-1.5 bg-white text-blue-700 rounded-lg text-sm font-semibold hover:bg-blue-50 whitespace-nowrap"
+            className="px-4 py-1.5 bg-white text-navy rounded-lg text-sm font-semibold hover:bg-parchment-dark whitespace-nowrap"
           >
             Submit <span className="hidden sm:inline">{typeLabel}</span>
           </button>
@@ -1453,16 +1453,16 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       )}
 
       {/* Question navigation grid */}
-      <div className="bg-white border-x border-gray-200 px-3 sm:px-5 py-3">
-        <div className="flex justify-between text-xs text-gray-400 mb-2">
+      <div className="bg-white border-x border-border px-3 sm:px-5 py-3">
+        <div className="flex justify-between text-xs text-muted mb-2">
           <span>Question {current + 1} of {N}</span>
           <span>{attemptedCount} answered &middot; {N - attemptedCount} remaining</span>
         </div>
         <div className="flex gap-1.5 flex-wrap">
           {qData.map((q, i) => {
             const isCur = i === current;
-            let bg = 'bg-gray-100 text-gray-600 border-gray-200';
-            if (q.attempted) bg = 'bg-green-500 text-white border-green-500';
+            let bg = 'bg-parchment-dark text-ink-light border-border';
+            if (q.attempted) bg = 'bg-success text-white border-success';
             else if (isCur) bg = 'bg-amber-400 text-white border-amber-400';
 
             return (
@@ -1471,7 +1471,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 onClick={() => goTo(i)}
                 title={`Question ${i + 1}${q.attempted ? ' (answered)' : ''}`}
                 className={`w-8 h-8 rounded-lg border text-xs font-bold cursor-pointer transition-colors ${bg} ${
-                  isCur ? 'ring-2 ring-blue-600 ring-offset-1' : ''
+                  isCur ? 'ring-2 ring-gold ring-offset-1' : ''
                 }`}
               >
                 {i + 1}
@@ -1482,7 +1482,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       </div>
 
       {/* Two-column layout */}
-      <div className="flex-1 flex gap-3 sm:gap-5 bg-white border border-gray-200 border-t-0 rounded-b-xl p-3 sm:p-5">
+      <div className="flex-1 flex gap-3 sm:gap-5 bg-white border border-border border-t-0 rounded-b-xl p-3 sm:p-5">
         {/* Left: Chat thread */}
         <div className="flex-1 min-w-0 flex flex-col">
           {/* Scrollable conversation */}
@@ -1497,7 +1497,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               >
                 <span
                   className={`text-[10px] font-bold uppercase tracking-wide mb-1 ${
-                    t.role === 'student' ? 'text-blue-500' : 'text-blue-700'
+                    t.role === 'student' ? 'text-gold' : 'text-navy'
                   }`}
                 >
                   {t.role === 'student' ? 'You' : 'Evaluator'}
@@ -1505,8 +1505,8 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 <div
                   className={`max-w-[85%] px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap rounded-xl ${
                     t.role === 'student'
-                      ? 'bg-blue-600 text-white rounded-br-sm'
-                      : 'bg-gray-50 border border-gray-200 text-gray-800 rounded-bl-sm'
+                      ? 'bg-navy text-white rounded-br-sm'
+                      : 'bg-parchment/60 border border-border text-ink rounded-bl-sm'
                   }`}
                 >
                   {t.text}
@@ -1519,19 +1519,19 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                   {[0, 1, 2].map((i) => (
                     <div
                       key={i}
-                      className="w-2 h-2 rounded-full bg-blue-400 animate-bounce"
+                      className="w-2 h-2 rounded-full bg-gold-light animate-bounce"
                       style={{ animationDelay: `${i * 0.15}s` }}
                     />
                   ))}
                 </div>
-                <span className="text-xs text-gray-400">Evaluating...</span>
+                <span className="text-xs text-muted">Evaluating...</span>
               </div>
             )}
           </div>
 
           {/* Input area or done indicator */}
           {cur?.done ? (
-            <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-3 text-sm text-green-700 font-medium mb-3">
+            <div className="bg-success-bg border border-success/30 rounded-xl px-4 py-3 text-sm text-success font-medium mb-3">
               <CheckCircle className="w-4 h-4 inline -mt-0.5 mr-2" />
               Answer recorded. Use the navigation to continue.
             </div>
@@ -1545,7 +1545,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 placeholder="Answer the question above... (Cmd+Enter to submit)"
                 disabled={answerMutation.isPending}
                 rows={3}
-                className="w-full px-4 py-3 border border-gray-300 rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50"
+                className="w-full px-4 py-3 border border-border rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-gold focus:border-transparent disabled:opacity-50 disabled:bg-parchment/60"
               />
               <div className="flex gap-2 mt-2">
                 <button
@@ -1553,26 +1553,26 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                   title={listening ? 'Stop dictation' : 'Answer by voice'}
                   className={`relative flex items-center justify-center px-3 py-2.5 rounded-lg border text-sm font-medium transition-colors ${
                     listening
-                      ? `bg-green-50 border-green-400 text-green-600 ${speaking ? 'ring-2 ring-green-300 animate-pulse' : ''}`
-                      : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                      ? `bg-success-bg border-success text-success ${speaking ? 'ring-2 ring-success/40 animate-pulse' : ''}`
+                      : 'border-border text-ink-light hover:bg-parchment/60'
                   }`}
                 >
                   <Mic className="w-4 h-4" />
                   {listening && (
-                    <span className={`ml-1.5 inline-block w-2 h-2 rounded-full bg-green-500 ${speaking ? 'animate-ping' : 'opacity-60'}`} />
+                    <span className={`ml-1.5 inline-block w-2 h-2 rounded-full bg-success ${speaking ? 'animate-ping' : 'opacity-60'}`} />
                   )}
                 </button>
                 <button
                   onClick={() => { setTtsOn((v) => !v); if (ttsOn) audioRef.current?.pause(); }}
                   title={ttsOn ? 'Mute question audio' : 'Unmute question audio'}
-                  className="flex items-center justify-center px-3 py-2.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium transition-colors"
+                  className="flex items-center justify-center px-3 py-2.5 rounded-lg border border-border text-ink-light hover:bg-parchment/60 text-sm font-medium transition-colors"
                 >
                   {ttsOn ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
                 </button>
                 <button
                   onClick={handleAnswer}
                   disabled={!draft.trim() || answerMutation.isPending}
-                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {answerMutation.isPending ? (
                     <>
@@ -1595,7 +1595,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 </div>
               )}
               {!ttsAvailable && (
-                <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+                <div className="mt-2 flex items-center gap-2 text-xs text-muted">
                   <VolumeX className="w-3.5 h-3.5 flex-shrink-0" />
                   Audio narration is unavailable right now — questions are shown on screen.
                 </div>
@@ -1608,7 +1608,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             <button
               onClick={() => goTo(current - 1)}
               disabled={current === 0}
-              className="flex items-center gap-1 px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-1 px-3 py-2 border border-border rounded-lg text-sm font-medium text-ink-light hover:bg-parchment/60 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <ChevronLeft className="w-4 h-4" /> Previous
             </button>
@@ -1616,14 +1616,14 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             {current < N - 1 ? (
               <button
                 onClick={() => goTo(current + 1)}
-                className="flex items-center gap-1 px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
+                className="flex items-center gap-1 px-3 py-2 border border-border rounded-lg text-sm font-medium text-ink-light hover:bg-parchment/60"
               >
                 {cur?.attempted ? 'Next' : 'Skip'} <ChevronRight className="w-4 h-4" />
               </button>
             ) : (
               <button
                 onClick={submitExam}
-                className="flex items-center gap-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                className="flex items-center gap-1 px-4 py-2 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light"
               >
                 Submit {typeLabel} <ChevronRight className="w-4 h-4" />
               </button>
@@ -1633,12 +1633,12 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
 
         {/* Right sidebar: progress, plus the live EDS on ungraded work only */}
         <div className="w-80 flex-shrink-0 hidden lg:block">
-          <div className="border border-gray-200 rounded-xl overflow-hidden">
+          <div className="border border-border rounded-xl overflow-hidden">
             {/* Score display — hidden on assignments and exams: the mark is the
                 professor's to release, so no draft number appears mid-attempt. */}
             {showDraftScores && (
               <div className="p-5 text-center">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-3">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-muted mb-3">
                   Epistemic Depth Score
                 </p>
                 <EDSGauge score={edsScore} />
@@ -1648,32 +1648,32 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             )}
 
             {/* Progress summary */}
-            <div className={`px-4 py-3 ${showDraftScores ? 'border-t border-gray-100' : ''}`}>
+            <div className={`px-4 py-3 ${showDraftScores ? 'border-t border-border/60' : ''}`}>
               <div className="flex justify-between text-xs mb-1.5">
-                <span className="text-gray-500 font-semibold uppercase tracking-wide">
+                <span className="text-muted font-semibold uppercase tracking-wide">
                   Progress
                 </span>
-                <span className="text-gray-900 font-bold">
+                <span className="text-ink font-bold">
                   {attemptedCount}/{N}
                 </span>
               </div>
-              <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
+              <div className="w-full bg-parchment-dark rounded-full h-2 overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full transition-all duration-500"
+                  className="h-full bg-gradient-to-r from-gold to-gold-light rounded-full transition-all duration-500"
                   style={{ width: `${(attemptedCount / Math.max(N, 1)) * 100}%` }}
                 />
               </div>
             </div>
 
             {/* Current question info */}
-            <div className="border-t border-gray-100 px-4 py-3">
-              <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1">
+            <div className="border-t border-border/60 px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-muted mb-1">
                 Current Question
               </p>
-              <p className="text-sm text-gray-700 font-medium">
+              <p className="text-sm text-ink-light font-medium">
                 {questions[current]?.topic || `Question ${current + 1}`}
               </p>
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-xs text-muted mt-1">
                 {cur?.attempts || 0} / {MAX_TURNS} turns used
               </p>
             </div>
@@ -1682,8 +1682,8 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           {/* Concept Map — practice only; hidden during graded assignments/exams
               so it can't be used as a scaffold on the real assessment. */}
           {isPractice && (
-            <div className="border border-gray-200 rounded-xl mt-3 p-3">
-              <p className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-2 text-center">
+            <div className="border border-border rounded-xl mt-3 p-3">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-muted mb-2 text-center">
                 Concept Map
               </p>
               <ConceptGraphSVG
