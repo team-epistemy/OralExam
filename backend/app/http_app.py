@@ -1135,6 +1135,30 @@ def _demo_link_or_error(cur, token: str):
     return row, None
 
 
+def _knowledge_graph_payload(exp_nodes, exp_edges, detected_nodes, detected_edge_idx):
+    """Shape one question's expected_path into the live-graph contract the exam UI
+    animates: the concept `nodes` and causal `edges` the answer is measured against,
+    plus which were demonstrated so far. `detected_edge_idx` are indices into
+    `exp_edges` (the eval's edges_demonstrated); resolve them to {src,dst} pairs so
+    the frontend never has to know about indices."""
+    exp_nodes = exp_nodes or []; exp_edges = exp_edges or []
+    nodes = [n.get("label") for n in exp_nodes if isinstance(n, dict) and n.get("label")]
+    edges = [{"src": e.get("src"), "dst": e.get("dst")}
+             for e in exp_edges if isinstance(e, dict) and e.get("src") and e.get("dst")]
+    edges_detected = []
+    for i in (detected_edge_idx or set()):
+        if isinstance(i, int) and 0 <= i < len(exp_edges):
+            e = exp_edges[i]
+            if isinstance(e, dict) and e.get("src") and e.get("dst"):
+                edges_detected.append({"src": e["src"], "dst": e["dst"]})
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "nodes_detected": [n for n in (detected_nodes or set()) if n],
+        "edges_detected": edges_detected,
+    }
+
+
 def _demo_answer_turn(repo, settings, org_id, course_id, student_id, session_id,
                       question_set_id, question_index, answer_text):
     """Isolated copy of the answer turn for demo sessions (option 1b). Reuses pure
@@ -1279,7 +1303,11 @@ def _demo_answer_turn(repo, settings, org_id, course_id, student_id, session_id,
     repo.conn.commit()
     return {"answered": answered, "adequate": adequate, "feedback": feedback, "probe": probe,
             "eds_delta": int(eds_q * 10), "eds_question": eds_q,
-            "eds_components": {"node_score": agg_node, "edge_score": agg_edge, "r_gate": agg_R, "gen_score": agg_gen}}
+            "eds_components": {"node_score": agg_node, "edge_score": agg_edge, "r_gate": agg_R, "gen_score": agg_gen},
+            # Live knowledge graph for this question: the concept nodes + causal edges
+            # the answer is measured against, and which of them the student has
+            # demonstrated so far (cumulative). Drives the animated exam graph.
+            "graph": _knowledge_graph_payload(exp_nodes, exp_edges, all_n, all_e)}
 
 
 def _register_demo(app: FastAPI, deps) -> None:

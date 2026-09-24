@@ -53,8 +53,20 @@ export function demoStart(token: string): Promise<StartExamResponse & { status?:
   return demoJson('POST', `/api/demo/${token}/start`, {});
 }
 
+// One question's slice of the live knowledge graph, returned per demo answer:
+// the concept nodes + causal edges the answer is measured against, and which the
+// student has demonstrated so far (cumulative for this question).
+export interface KnowledgeEdge { src: string; dst: string; }
+export interface KnowledgeGraphTurn {
+  nodes: string[];
+  edges: KnowledgeEdge[];
+  nodes_detected: string[];
+  edges_detected: KnowledgeEdge[];
+}
+export type DemoAnswerResponse = AnswerResponse & { graph?: KnowledgeGraphTurn };
+
 export function demoAnswer(token: string, sessionId: string, questionIndex: number, answerText: string):
-  Promise<AnswerResponse> {
+  Promise<DemoAnswerResponse> {
   return demoJson('POST', `/api/demo/${token}/answer?session_id=${encodeURIComponent(sessionId)}`,
     { question_index: questionIndex, answer_text: answerText });
 }

@@ -7,6 +7,8 @@ import { typeNoun, typeNounLower } from '../../assignmentType';
 import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft } from '../../api/exam';
 import type { CaseMaterial } from '../../api/exam';
 import { demoMeta, demoCase, demoStart, demoAnswer, demoComplete, demoTts } from '../../api/demo';
+import type { DemoAnswerResponse } from '../../api/demo';
+import LiveKnowledgeGraph from '../../components/LiveKnowledgeGraph';
 import { get } from '../../api/client';
 import { API_BASE_URL } from '../../config';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
@@ -429,6 +431,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const [current, setCurrent] = useState(0);
   const [qData, setQData] = useState<QuestionState[]>([]);
   const [draft, setDraft] = useState('');
+  // Live knowledge graph (demo): accumulates the concept nodes + causal edges the
+  // answers are measured against, and which the student has demonstrated — the
+  // "watch it think" panel. Fed by each answer's `graph` payload.
+  const [graphNodes, setGraphNodes] = useState<string[]>([]);
+  const [graphEdges, setGraphEdges] = useState<{ src: string; dst: string }[]>([]);
+  const [litNodes, setLitNodes] = useState<string[]>([]);
+  const [litEdges, setLitEdges] = useState<string[]>([]);
   const [showTranscript, setShowTranscript] = useState(false);
   const [error, setError] = useState('');
 
@@ -730,6 +739,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       setSessionId(res.session_id);
       setQuestions(res.questions);
       setQData(initialQData);
+      setGraphNodes([]); setGraphEdges([]); setLitNodes([]); setLitEdges([]);
       setStartTime(now);
       setDurationMinutes(dur);
       setPhase('taking');
@@ -773,6 +783,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     setSessionId(null);
     setQuestions([]);
     setQData([]);
+    setGraphNodes([]); setGraphEdges([]); setLitNodes([]); setLitEdges([]);
     setCurrent(0);
     setDraft('');
     setStartTime(null);
@@ -904,6 +915,19 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             };
           }),
         );
+        // Merge this answer's graph slice into the live map (demo only): union the
+        // concept nodes/edges and mark the newly-demonstrated ones so they ignite.
+        const g = (data as DemoAnswerResponse).graph;
+        if (g) {
+          setGraphNodes((prev) => { const s = new Set(prev); (g.nodes || []).forEach((n) => s.add(n)); return Array.from(s); });
+          setGraphEdges((prev) => {
+            const seen = new Set(prev.map((e) => `${e.src}|${e.dst}`));
+            const add = (g.edges || []).filter((e) => !seen.has(`${e.src}|${e.dst}`));
+            return add.length ? [...prev, ...add] : prev;
+          });
+          setLitNodes((prev) => { const s = new Set(prev); (g.nodes_detected || []).forEach((n) => s.add(n)); return Array.from(s); });
+          setLitEdges((prev) => { const s = new Set(prev); (g.edges_detected || []).forEach((e) => s.add(`${e.src}|${e.dst}`)); return Array.from(s); });
+        }
         scrollBottom();
       };
 
@@ -1680,17 +1704,30 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           </div>
 
           {/* Concept Map — practice only; hidden during graded assignments/exams
-              so it can't be used as a scaffold on the real assessment. */}
+              so it can't be used as a scaffold on the real assessment. Once the
+              answer flow is feeding the live graph (demo), show the "watch it think"
+              panel: concepts ignite and causal links draw as they're demonstrated.
+              Otherwise fall back to the static topic-coverage map. */}
           {isPractice && (
             <div className="border border-border rounded-xl mt-3 p-3">
               <p className="text-[10px] font-bold uppercase tracking-wide text-muted mb-2 text-center">
-                Concept Map
+                {graphNodes.length > 0 ? 'Your understanding, live' : 'Concept Map'}
               </p>
-              <ConceptGraphSVG
-                questions={questions}
-                qData={qData}
-                currentIndex={current}
-              />
+              {graphNodes.length > 0 ? (
+                <LiveKnowledgeGraph
+                  nodes={graphNodes}
+                  edges={graphEdges}
+                  litNodes={litNodes}
+                  litEdges={litEdges}
+                  currentTopic={questions[current]?.topic || null}
+                />
+              ) : (
+                <ConceptGraphSVG
+                  questions={questions}
+                  qData={qData}
+                  currentIndex={current}
+                />
+              )}
             </div>
           )}
         </div>
