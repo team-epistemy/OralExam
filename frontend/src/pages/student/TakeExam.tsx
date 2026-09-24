@@ -1389,23 +1389,23 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         </div>
       )}
       {/* Header bar */}
-      <div className="bg-blue-600 rounded-t-xl px-5 py-3 flex items-center justify-between">
-        <div>
+      <div className="bg-blue-600 rounded-t-xl px-3 sm:px-5 py-3 flex items-center justify-between gap-2">
+        <div className="min-w-0">
           <p className="text-blue-200 text-[11px] font-semibold uppercase tracking-wide">
             {typeLabel}
           </p>
-          <p className="text-white font-semibold text-lg">
+          <p className="text-white font-semibold text-base sm:text-lg truncate">
             {questions[current]?.topic || 'Assessment'}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
           {caseMaterials.length > 0 && (
             <button
               onClick={() => setCaseViewIdx(0)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-white/15 text-white rounded-lg text-sm font-medium hover:bg-white/25"
               title="View the case document"
             >
-              <BookOpen className="w-4 h-4" /> View Case
+              <BookOpen className="w-4 h-4" /> <span className="hidden sm:inline">View Case</span>
             </button>
           )}
           {secondsRemaining !== null && (
@@ -1427,13 +1427,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             onClick={() => navigate('/student/dashboard')}
             className="px-3 py-1.5 bg-white/10 text-white rounded-lg text-sm hover:bg-white/20"
           >
-            <ChevronLeft className="w-4 h-4 inline -mt-0.5" /> Back
+            <ChevronLeft className="w-4 h-4 inline -mt-0.5" /> <span className="hidden sm:inline">Back</span>
           </button>
           <button
             onClick={submitExam}
-            className="px-4 py-1.5 bg-white text-blue-700 rounded-lg text-sm font-semibold hover:bg-blue-50"
+            className="px-4 py-1.5 bg-white text-blue-700 rounded-lg text-sm font-semibold hover:bg-blue-50 whitespace-nowrap"
           >
-            Submit {typeLabel}
+            Submit <span className="hidden sm:inline">{typeLabel}</span>
           </button>
         </div>
       </div>
@@ -1453,7 +1453,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       )}
 
       {/* Question navigation grid */}
-      <div className="bg-white border-x border-gray-200 px-5 py-3">
+      <div className="bg-white border-x border-gray-200 px-3 sm:px-5 py-3">
         <div className="flex justify-between text-xs text-gray-400 mb-2">
           <span>Question {current + 1} of {N}</span>
           <span>{attemptedCount} answered &middot; {N - attemptedCount} remaining</span>
@@ -1482,13 +1482,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
       </div>
 
       {/* Two-column layout */}
-      <div className="flex-1 flex gap-5 bg-white border border-gray-200 border-t-0 rounded-b-xl p-5">
+      <div className="flex-1 flex gap-3 sm:gap-5 bg-white border border-gray-200 border-t-0 rounded-b-xl p-3 sm:p-5">
         {/* Left: Chat thread */}
         <div className="flex-1 min-w-0 flex flex-col">
           {/* Scrollable conversation */}
           <div
             ref={scrollRef}
-            className="flex-1 max-h-[400px] overflow-y-auto pr-2 mb-4 space-y-4"
+            className="flex-1 max-h-[50vh] sm:max-h-[400px] overflow-y-auto pr-2 mb-4 space-y-4"
           >
             {cur?.turns.map((t, i) => (
               <div
