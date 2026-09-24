@@ -123,7 +123,21 @@ interface ConceptEdge {
 // appending an ellipsis when words are dropped. Labels render BELOW the node, so
 // they get real horizontal room instead of being crammed inside the circle.
 function wrapConceptLabel(label: string, maxChars = 12, maxLines = 2): string[] {
-  const words = (label || '').trim().split(/\s+/).filter(Boolean);
+  // De-slugify: kebab/snake concept ids ("seed-round-financing") become readable
+  // Title Case words that can actually WRAP ("Seed Round" / "Financing") instead of
+  // being hard-truncated as one unbreakable token ("seed-round-f…"). Existing caps
+  // are preserved (only the first letter of each word is upper-cased).
+  const pretty = (label || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  // Break any single word longer than a line into chunks so it wraps instead of clips.
+  const words: string[] = [];
+  for (const w of pretty.split(/\s+/).filter(Boolean)) {
+    if (w.length <= maxChars) words.push(w);
+    else for (let i = 0; i < w.length; i += maxChars) words.push(w.slice(i, i + maxChars));
+  }
   if (!words.length) return [''];
   const lines: string[] = [];
   let cur = '';
