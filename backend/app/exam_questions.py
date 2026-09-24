@@ -10,7 +10,7 @@ from __future__ import annotations
 # Difficulty → what the generated questions should emphasise. Mirrors the demo's
 # difficulty presets but framed as an instruction to the generator.
 DIFFICULTY_FOCUS = {
-    "recall": "definitional recall — precise definitions, formulas, and key facts",
+    "recall": "definitional recall — key definitions and core facts in the student's own words",
     "balanced": "a balance of definitional recall and causal reasoning",
     "deep": "deep causal reasoning — mechanisms, prerequisite chains, and multi-step 'why' questions",
 }
