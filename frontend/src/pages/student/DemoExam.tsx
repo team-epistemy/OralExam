@@ -47,7 +47,7 @@ export default function DemoExam() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
+    <div className="max-w-7xl mx-auto px-4 py-6">
       <div className="mb-3 flex flex-wrap items-center gap-2 bg-blue-50 border border-blue-200 text-blue-800 rounded-xl px-4 py-2.5 text-sm">
         <span className="font-semibold">Epistemy demo</span>
         <span>— no login required. This is a practice run; nothing is saved.</span>

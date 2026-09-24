@@ -119,6 +119,34 @@ interface ConceptEdge {
   to: string;
 }
 
+// Greedy word-wrap a concept label into at most `maxLines` lines of ~`maxChars`,
+// appending an ellipsis when words are dropped. Labels render BELOW the node, so
+// they get real horizontal room instead of being crammed inside the circle.
+function wrapConceptLabel(label: string, maxChars = 12, maxLines = 2): string[] {
+  const words = (label || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return [''];
+  const lines: string[] = [];
+  let cur = '';
+  let idx = 0;
+  while (idx < words.length && lines.length < maxLines) {
+    const w = words[idx];
+    const next = cur ? `${cur} ${w}` : w;
+    if (next.length <= maxChars || !cur) {
+      cur = next;
+      idx++;
+    } else {
+      lines.push(cur);
+      cur = '';
+    }
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+  if (idx < words.length && lines.length) {
+    const last = lines[lines.length - 1];
+    lines[lines.length - 1] = (last.length > maxChars - 1 ? last.slice(0, maxChars - 1) : last) + '…';
+  }
+  return lines.map((l) => (l.length > maxChars + 1 ? l.slice(0, maxChars) + '…' : l));
+}
+
 function ConceptGraphSVG({
   questions,
   qData,
@@ -141,13 +169,18 @@ function ConceptGraphSVG({
     topicQuestionMap.get(topic)!.push(i);
   });
 
-  // Position nodes in a 3-column grid
+  // 3-column grid; labels render BELOW each node (not inside the circle) so full
+  // concept names stay legible. Geometry is tuned so the SVG scales up ~1:1 in the
+  // widened sidebar and label text lands near ~13px on screen.
   const COLS = 3;
-  const NODE_R = 24;
-  const COL_GAP = 84;
-  const ROW_GAP = 72;
-  const PAD_X = 46;
-  const PAD_Y = 40;
+  const NODE_R = 18;
+  const COL_GAP = 96;
+  const ROW_GAP = 100;      // room for the node plus a 2-line label beneath it
+  const PAD_X = 48;
+  const PAD_Y = 24;         // top padding
+  const LABEL_GAP = 12;     // node bottom → first label baseline
+  const LABEL_LH = 13;      // label line height
+  const LABEL_FS = 12.5;    // label font size (viewBox units)
 
   const nodes: ConceptNode[] = topicOrder.map((topic, i) => {
     const col = i % COLS;
@@ -178,10 +211,12 @@ function ConceptGraphSVG({
   // Current topic
   const currentTopic = questions[currentIndex]?.topic || `Q${currentIndex + 1}`;
 
-  // SVG dimensions based on grid
+  // SVG dimensions based on grid — H reserves space for the 2-line label under
+  // the bottom row so it never clips.
   const totalRows = Math.ceil(topicOrder.length / COLS);
   const W = PAD_X * 2 + (COLS - 1) * COL_GAP;
-  const H = PAD_Y * 2 + Math.max(0, totalRows - 1) * ROW_GAP;
+  const H = PAD_Y + Math.max(0, totalRows - 1) * ROW_GAP
+    + NODE_R + LABEL_GAP + 2 * LABEL_LH + 14;
 
   const coveredCount = traversed.size;
   const totalTopics = topicOrder.length;
@@ -259,13 +294,22 @@ function ConceptGraphSVG({
             strokeWidth = 2.5;
           }
 
-          // Truncate label for display
-          const displayLabel =
-            n.label.length > 14 ? n.label.slice(0, 12) + '...' : n.label;
-          const words = displayLabel.split(' ');
+          // Label sits BELOW the node, wrapped to ≤2 lines so full concept names read.
+          const labelLines = wrapConceptLabel(n.label);
 
           return (
             <g key={n.id}>
+              {isCurrent && (
+                <circle
+                  cx={n.x}
+                  cy={n.y}
+                  r={NODE_R + 4}
+                  fill="none"
+                  stroke={stroke}
+                  strokeWidth={1}
+                  opacity={0.4}
+                />
+              )}
               <circle
                 cx={n.x}
                 cy={n.y}
@@ -277,27 +321,18 @@ function ConceptGraphSVG({
               />
               <text
                 x={n.x}
-                y={n.y}
+                y={n.y + NODE_R + LABEL_GAP}
                 textAnchor="middle"
-                dominantBaseline="middle"
-                fontSize={9}
-                fontWeight={600}
+                fontSize={LABEL_FS}
+                fontWeight={isCurrent ? 700 : 600}
                 fill={textFill}
                 style={{ transition: 'fill 0.4s', userSelect: 'none' }}
               >
-                {words.length === 1 ? (
-                  words[0]
-                ) : (
-                  words.map((word, wi) => (
-                    <tspan
-                      key={wi}
-                      x={n.x}
-                      dy={wi === 0 ? -(words.length - 1) * 5 : 11}
-                    >
-                      {word}
-                    </tspan>
-                  ))
-                )}
+                {labelLines.map((ln, li) => (
+                  <tspan key={li} x={n.x} dy={li === 0 ? 0 : LABEL_LH}>
+                    {ln}
+                  </tspan>
+                ))}
               </text>
             </g>
           );
@@ -1332,7 +1367,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // ── Taking phase (core exam interface) ─────────────────────────────────────
 
   return (
-    <div className="max-w-5xl mx-auto flex flex-col min-h-[80vh]">
+    <div className="max-w-7xl mx-auto flex flex-col min-h-[80vh]">
       {preview && (
         <div className="flex items-center gap-2 bg-purple-50 border border-purple-200 text-purple-800 rounded-xl px-4 py-2.5 mb-3 text-sm">
           <span className="font-semibold">Preview</span>
@@ -1583,7 +1618,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
         </div>
 
         {/* Right sidebar: progress, plus the live EDS on ungraded work only */}
-        <div className="w-64 flex-shrink-0 hidden lg:block">
+        <div className="w-80 flex-shrink-0 hidden lg:block">
           <div className="border border-gray-200 rounded-xl overflow-hidden">
             {/* Score display — hidden on assignments and exams: the mark is the
                 professor's to release, so no draft number appears mid-attempt. */}
