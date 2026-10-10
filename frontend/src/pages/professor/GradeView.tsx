@@ -38,6 +38,27 @@ interface SessionGrade {
   anonymized?: boolean;
 }
 
+// Written only by the communication (CEFR speaking) exam type; null on a
+// Socratic turn, which scores on the EDS components instead.
+interface Cefr {
+  turn_number: number;
+  part: 'part2' | 'part3';
+  scores: Record<string, number | null>;
+  turn_band: number;
+  turn_band_name: string;
+  target_band?: number | null;
+  target_band_name?: string | null;
+  next_target_band_name?: string | null;
+  direction?: 'up' | 'same' | 'down';
+  proven_band?: number | null;
+  repeat_request?: boolean;
+  degraded?: boolean;
+  criterion_averages?: Record<string, number>;
+  overall_score?: number;
+  overall_band?: string;
+  final?: boolean;
+}
+
 interface TurnEvaluation {
   turn_index: number;
   sub_turn_index?: number;
@@ -50,6 +71,7 @@ interface TurnEvaluation {
   eds_delta: number;
   feedback?: string;
   rationale?: string;
+  cefr?: Cefr | null;
   components?: {
     node_coverage?: number | null;
     edge_coverage?: number | null;
@@ -87,6 +109,114 @@ function edsBand(score: number | null): string {
   if (score >= 70) return 'Proficient';
   if (score >= 50) return 'Developing';
   return 'Starting';
+}
+
+// ── CEFR speaking panel ──────────────────────────────────────────────────────
+// The marker's view of a speaking exam: what each turn scored on the CEFR grid,
+// where the examiner aimed the next question, and the final band. Rendered only
+// for turns that carry a `cefr` block, so Socratic grading is untouched.
+
+const CRITERIA: Array<[string, string]> = [
+  ['range', 'Range'], ['accuracy', 'Accuracy'], ['fluency', 'Fluency'],
+  ['coherence', 'Coherence'], ['interaction', 'Interaction'],
+];
+
+function bandStyle(band: number | null | undefined): string {
+  if (band == null) return 'bg-gray-50 text-gray-400';
+  if (band >= 5) return 'bg-green-50 text-green-700';   // C1-C2
+  if (band >= 4) return 'bg-blue-50 text-blue-700';     // B2
+  if (band >= 3) return 'bg-yellow-50 text-yellow-700'; // B1
+  return 'bg-orange-50 text-orange-700';                // A1-A2
+}
+
+function ScoreCell({ label, value }: { label: string; value: number | null | undefined }) {
+  return (
+    <div className={`flex-1 min-w-[72px] rounded px-2 py-1 text-center ${bandStyle(value == null ? null : Math.round(value))}`}>
+      <p className="text-[10px] uppercase tracking-wide opacity-70">{label}</p>
+      <p className="text-sm font-semibold tabular-nums">
+        {value == null ? '—' : value.toFixed(1)}
+      </p>
+    </div>
+  );
+}
+
+function CefrTurnScores({ cefr }: { cefr: Cefr }) {
+  const arrow = cefr.direction === 'up' ? '↑' : cefr.direction === 'down' ? '↓' : '→';
+  return (
+    <div className="mt-2 space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2 text-[11px]">
+        <span className="font-medium text-gray-600">
+          Turn {cefr.turn_number} · {cefr.part === 'part2' ? 'Part 2 long turn' : 'Part 3 follow-up'}
+        </span>
+        <span className={`px-1.5 py-0.5 rounded font-semibold ${bandStyle(cefr.turn_band)}`}>
+          {cefr.turn_band_name}
+        </span>
+        {cefr.target_band_name && (
+          <span className="text-gray-400">aimed at {cefr.target_band_name}</span>
+        )}
+        {!cefr.final && cefr.next_target_band_name && (
+          <span className="text-gray-400">
+            {arrow} next probe {cefr.next_target_band_name}
+          </span>
+        )}
+        {cefr.repeat_request && (
+          <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">
+            asked for a repeat — ladder held
+          </span>
+        )}
+        {cefr.degraded && (
+          <span className="px-1.5 py-0.5 rounded bg-red-50 text-red-700 font-medium">
+            grader unavailable — scored at target, not a real judgement
+          </span>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {CRITERIA.map(([key, label]) => (
+          <ScoreCell key={key} label={label} value={cefr.scores?.[key]} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CefrSummary({ cefr }: { cefr: Cefr }) {
+  const averages = cefr.criterion_averages || {};
+  return (
+    <div className="rounded-lg bg-white border border-purple-200 p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+            CEFR speaking result
+          </h4>
+          <p className="text-[11px] text-gray-400">
+            Each criterion averaged across its turns; overall is the mean of the five.
+          </p>
+        </div>
+        <div className={`px-3 py-1.5 rounded-lg text-center ${bandStyle(cefr.turn_band && cefr.overall_band ? Math.round(cefr.overall_score ?? 0) : null)}`}>
+          <p className="text-xl font-bold leading-none">{cefr.overall_band || '—'}</p>
+          <p className="text-[10px] opacity-70 tabular-nums">
+            {cefr.overall_score != null ? `${cefr.overall_score.toFixed(2)} / 6` : ''}
+          </p>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {CRITERIA.map(([key, label]) => (
+          <ScoreCell key={key} label={label} value={averages[key]} />
+        ))}
+      </div>
+      <p className="text-[11px] text-gray-400">
+        Fluency is graded from a speech-to-text transcript, which drops pauses and
+        hesitations, so it reads generous. Pronunciation is not scored.
+      </p>
+    </div>
+  );
+}
+
+// The last turn carries the completed aggregate, so that row is the result.
+function finalCefr(evals: TurnEvaluation[]): Cefr | null {
+  const withCefr = evals.filter((e) => e.cefr);
+  if (withCefr.length === 0) return null;
+  return withCefr[withCefr.length - 1].cefr || null;
 }
 
 function groupByQuestion(evals: TurnEvaluation[]) {
@@ -330,6 +460,8 @@ function SessionDetail({
     return <p className="text-sm text-gray-500">Loading session details...</p>;
   }
 
+  const cefrResult = finalCefr(sessionGrade.evaluations || []);
+
   return (
     <div className="space-y-4">
       {sessionGrade.anonymized && (
@@ -337,6 +469,7 @@ function SessionDetail({
           Practice test — anonymized. Student identity and verbatim answers are hidden; only scores and reasoning are shown.
         </div>
       )}
+      {cefrResult && <CefrSummary cefr={cefrResult} />}
       {/* Per-question responses, scores, and reasoning */}
       {sessionGrade.evaluations && sessionGrade.evaluations.length > 0 ? (
         <div>
@@ -346,20 +479,37 @@ function SessionDetail({
               <div key={group.turn_index} className="bg-white rounded-lg border border-gray-100 p-4">
                 <div className="flex items-start justify-between gap-3 mb-2">
                   <p className="text-sm font-medium text-gray-900">Q{group.turn_index + 1}. {group.question_text || 'Question'}</p>
-                  <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${edsBgColor(group.eds_score * 100)} ${edsColor(group.eds_score * 100)}`}>
-                    {Math.round(group.eds_score * 100)} · {group.eds_bucket}
-                  </span>
+                  {(() => {
+                    // A speaking exam's score is a CEFR band, not an EDS bucket —
+                    // show the band so the header matches the panel below it.
+                    const gc = finalCefr(group.attempts);
+                    if (gc) {
+                      return (
+                        <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${bandStyle(Math.round(gc.overall_score ?? 0))}`}>
+                          {gc.overall_band} · {(gc.overall_score ?? 0).toFixed(2)}/6
+                        </span>
+                      );
+                    }
+                    return (
+                      <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${edsBgColor(group.eds_score * 100)} ${edsColor(group.eds_score * 100)}`}>
+                        {Math.round(group.eds_score * 100)} · {group.eds_bucket}
+                      </span>
+                    );
+                  })()}
                 </div>
                 <div className="space-y-2">
                   {group.attempts.map((ev, i) => (
                     <div key={i} className="border-l-2 border-gray-100 pl-3">
-                      {group.attempts.length > 1 && (
+                      {/* CefrTurnScores labels its own turn ("Turn 2 · Part 3
+                          follow-up"), so the generic probe label would duplicate it. */}
+                      {group.attempts.length > 1 && !ev.cefr && (
                         <p className="text-[11px] uppercase tracking-wide text-gray-400">{i === 0 ? 'Initial answer' : `Probe response ${i}`}</p>
                       )}
                       <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">{sessionGrade.anonymized ? 'hidden (anonymized)' : 'no answer'}</em>}</p>
                       {(ev.rationale || ev.feedback) && (
                         <p className="mt-1 text-xs text-gray-500"><span className="font-medium text-gray-600">Why this score:</span>{' '}{ev.rationale || ev.feedback}</p>
                       )}
+                      {ev.cefr && <CefrTurnScores cefr={ev.cefr} />}
                       {ev.components && (
                         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-400">
                           {ev.components.recitation_gate != null && <span>authenticity R={ev.components.recitation_gate.toFixed(2)}</span>}
@@ -531,6 +681,8 @@ function ReleasePreviewCard({ title, session }: { title: string; session: Sessio
 
   const scorePct = grade?.final_score != null ? Math.round(grade.final_score * 100) : session.overall_eds;
   const groups = grade?.evaluations ? groupByQuestion(grade.evaluations) : [];
+  // A speaking exam's grade is a CEFR band; the /100 is that band over six.
+  const cefrResult = finalCefr(grade?.evaluations || []);
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -548,7 +700,13 @@ function ReleasePreviewCard({ title, session }: { title: string; session: Sessio
           <p className="text-[11px] uppercase tracking-wide text-gray-400">Grade</p>
           <p className={`text-2xl font-bold ${edsColor(scorePct ?? null)}`}>
             {scorePct != null ? scorePct : '--'}<span className="text-sm text-gray-400">/100</span>
-            <span className={`ml-2 text-xs px-2 py-0.5 rounded align-middle ${edsBgColor(scorePct ?? null)} ${edsColor(scorePct ?? null)}`}>{edsBand(scorePct ?? null)}</span>
+            {cefrResult ? (
+              <span className={`ml-2 text-xs px-2 py-0.5 rounded align-middle font-semibold ${bandStyle(Math.round(cefrResult.overall_score ?? 0))}`}>
+                CEFR {cefrResult.overall_band}
+              </span>
+            ) : (
+              <span className={`ml-2 text-xs px-2 py-0.5 rounded align-middle ${edsBgColor(scorePct ?? null)} ${edsColor(scorePct ?? null)}`}>{edsBand(scorePct ?? null)}</span>
+            )}
           </p>
         </div>
         {/* Overall comments */}

@@ -33,6 +33,8 @@ from backend.tools.materials_tools import MaterialsTools
 from backend.tools.search_tools import SearchTools
 from backend.search.corpus_search import CorpusSearcher
 from backend.bedrock_helper import call_bedrock
+from backend import communication
+from backend.communication import content as comm_content
 from backend.graph.layout import build_node_ids, compute_layout
 from backend.graph.layout import neighbors as graph_neighbors
 from backend.questions.exam_builder import build_variants, assemble_questions
@@ -4156,6 +4158,20 @@ class CreateAssignmentRequest(BaseModel):
     config: Optional[dict] = None
 
 
+class CreateCommunicationAssignmentRequest(BaseModel):
+    """POST body for creating a CEFR speaking exam.
+
+    The Part 2 long turn is either a card from the bank (`card_id`) or the
+    professor's own prompt (`question_text`, which wins when both are sent).
+    Neither is required — omitting both uses the default card. The five-turn
+    structure and the ladder are fixed either way.
+    """
+    title: str = Field(..., min_length=1, max_length=500)
+    duration_minutes: Optional[int] = Field(None, ge=1, le=240)
+    card_id: Optional[str] = Field(None, max_length=100)
+    question_text: Optional[str] = Field(None, max_length=2000)
+
+
 def _purge_draft_assignment(conn, assignment_id: str, question_set_id: str) -> None:
     """Tear down a draft assignment and all its (preview) children in FK-safe
     order. Shared by the discard endpoint and the abandoned-draft cleanup. The
@@ -4331,6 +4347,147 @@ def _register_delivery(app: FastAPI, deps) -> None:
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
+
+    # ── POST /api/courses/{course_id}/communication-assignments ────────────
+    @app.post(R.COMMUNICATION_ASSIGNMENTS)
+    def create_communication_assignment(
+        course_id: str,
+        req: CreateCommunicationAssignmentRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Create a CEFR speaking exam (exam_kind="communication") in one call.
+
+        Mints the whole exam: the Part 2 question (a bank card or the professor's
+        own), a question set holding it, and an active assignment flagged
+        `exam_kind`. Nothing is generated and no expected_path is needed — the
+        communication handler grades on the CEFR grid, not against a graph path.
+
+        The card's theme is stored on the config because Part 3 follow-ups must
+        stay on it, and `handle_turn` has no other way to know what this exam is
+        about once a professor can choose the question.
+
+        Deliberately separate from create_assignment rather than a flag on it:
+        the existing endpoint stays byte-for-byte unchanged.
+        """
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+
+                # RLS scopes the read to this org, so a miss means the course is
+                # not the caller's — refuse rather than mint rows against it.
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM course WHERE course_id = %s::uuid",
+                        (course_id,),
+                    )
+                    if not cur.fetchone():
+                        raise AuthorizationError("course not found")
+
+                try:
+                    card = comm_content.resolve_card(req.card_id,
+                                                     req.question_text)
+                except ValueError as err:
+                    raise AuthorizationError(str(err))
+                if not card.question:
+                    raise AuthorizationError("question_text must not be blank")
+
+                question_id = str(_uuid.uuid4())
+                qs_id = str(_uuid.uuid4())
+                assignment_id = str(_uuid.uuid4())
+
+                # One question for the whole exam: the five client-side turns are
+                # Part 2 plus its four Part 3 follow-ups, all on this one stem.
+                db_config = {
+                    "exam_kind": "communication",
+                    "adaptive": True,
+                    "max_questions": 1,
+                    "time_limit_minutes": req.duration_minutes,
+                    "difficulty": "balanced",
+                    "shuffle_questions": False,
+                    "include_case": False,
+                    "cefr_card_id": card.card_id,
+                    "cefr_theme": card.theme,
+                    "cefr_high_band_frame": card.high_band_frame,
+                }
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO question
+                           (question_id, course_id, org_id, text, question_type,
+                            status, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, 'oral',
+                                   'approved', %s)""",
+                        (question_id, course_id, caller.org_id,
+                         card.question, caller.user_id),
+                    )
+                    cur.execute(
+                        """INSERT INTO question_set
+                           (question_set_id, course_id, org_id, title, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s)""",
+                        (qs_id, course_id, caller.org_id, req.title,
+                         caller.user_id),
+                    )
+                    cur.execute(
+                        """INSERT INTO question_set_membership
+                           (question_set_id, question_id, org_id, position)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, 0)""",
+                        (qs_id, question_id, caller.org_id),
+                    )
+                    cur.execute(
+                        """INSERT INTO assignment
+                           (assignment_id, course_id, org_id, title,
+                            question_set_id, config, status, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s::uuid,
+                                   %s::jsonb, 'active', %s)
+                           RETURNING assignment_id, created_at""",
+                        (assignment_id, course_id, caller.org_id, req.title,
+                         qs_id, _json.dumps(db_config), caller.user_id),
+                    )
+                    row = cur.fetchone()
+                repo.conn.commit()
+
+                return {
+                    "assignment_id": str(row[0]),
+                    "course_id": course_id,
+                    "title": req.title,
+                    "question_set_id": qs_id,
+                    "question_ids": [question_id],
+                    "question_text": card.question,
+                    "card_id": card.card_id,
+                    "theme": card.theme,
+                    "config": db_config,
+                    "status": "active",
+                    "created_by": caller.user_id,
+                    "created_at": row[1].isoformat() if row[1] else None,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/communication/cards ───────────────────────────────────────
+    @app.get(R.COMMUNICATION_CARDS)
+    def list_communication_cards():
+        """The Part 2 card bank, so the professor UI never hardcodes the prompts.
+
+        Static content and not org-scoped, so no tenant lookup is needed — the
+        router's auth already established the caller is signed in.
+        """
+        return {
+            "default_card_id": comm_content.DEFAULT_CARD_ID,
+            "cards": [
+                {"card_id": c.card_id, "theme": c.theme, "question": c.question,
+                 "high_band_frame": c.high_band_frame}
+                for c in comm_content.CARDS
+            ],
+        }
 
     # ── GET /api/courses/{course_id}/assignments ──────────────────────────
     @app.get(R.ASSIGNMENTS_LIST)
@@ -5022,7 +5179,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
 
                 with repo.conn.cursor() as cur:
                     cur.execute(
-                        """SELECT a.question_set_id FROM assignment a
+                        """SELECT a.question_set_id, a.config FROM assignment a
                            WHERE a.assignment_id = %s::uuid""",
                         (assignment_id,),
                     )
@@ -5030,6 +5187,16 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 if not qs_row:
                     raise AuthorizationError("assignment not found")
                 question_set_id = str(qs_row[0])
+                assignment_config = (qs_row[1] if isinstance(qs_row[1], dict)
+                                     else _json.loads(qs_row[1] or "{}"))
+
+                # The one place the communication (CEFR speaking) exam type hooks
+                # into the existing flow. Assignments with no exam_kind never
+                # enter this branch, so the Socratic/EDS path below is unchanged.
+                if assignment_config.get("exam_kind") == "communication":
+                    return communication.handle_turn(
+                        repo, settings, session_id, srow, req,
+                        assignment_config)
 
                 with repo.conn.cursor() as cur:
                     cur.execute(
@@ -5695,6 +5862,11 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                     "feedback": raw.get("feedback", ""),
                     "probe": raw.get("probe", ""),
                     "eds_delta": raw.get("eds_delta", 0),
+                    # Communication (CEFR speaking) turns only: criterion scores,
+                    # turn/target bands and the ladder direction. None for a
+                    # Socratic turn. A proper marker view is still to come; until
+                    # then this is how the band data is inspected.
+                    "cefr": raw.get("cefr"),
                     "evaluated_at": row[5].isoformat() if row[5] else None,
                 }
             finally:
@@ -5790,6 +5962,9 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                         "adequate": raw.get("adequate", False),
                         "feedback": fb,
                         "eds_delta": raw.get("eds_delta", 0),
+                        # Set only on communication (CEFR speaking) turns; None on
+                        # Socratic turns, which score on the EDS components below.
+                        "cefr": raw.get("cefr"),
                         "components": {
                             "node_coverage": comp.get("node_score"),
                             "edge_coverage": comp.get("edge_score"),

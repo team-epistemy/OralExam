@@ -40,6 +40,46 @@ export async function listAssignments(courseId: string): Promise<Assignment[]> {
   return get(`/api/courses/${courseId}/assignments`);
 }
 
+export interface CommunicationAssignment extends Assignment {
+  assignment_id: string;
+  question_text: string;
+  card_id: string;
+  theme: string;
+  config: Record<string, unknown>;
+}
+
+export interface SpeakingCard {
+  card_id: string;
+  theme: string;
+  question: string;
+  high_band_frame: string;
+}
+
+// The Part 2 card bank lives server-side so the prompts and their themes have
+// one source of truth — the theme is what constrains the Part 3 follow-ups.
+export async function listCommunicationCards(): Promise<{
+  default_card_id: string;
+  cards: SpeakingCard[];
+}> {
+  return get('/api/communication/cards');
+}
+
+// Creates a CEFR speaking exam. Pass a cardId to use a bank prompt, or
+// questionText to use the professor's own (which wins if both are given). The
+// five-turn structure and the adaptive ladder are fixed either way.
+export async function createCommunicationAssignment(
+  courseId: string,
+  title: string,
+  opts: { durationMinutes?: number; cardId?: string; questionText?: string } = {},
+): Promise<CommunicationAssignment> {
+  return post(`/api/courses/${courseId}/communication-assignments`, {
+    title,
+    duration_minutes: opts.durationMinutes,
+    card_id: opts.cardId,
+    question_text: opts.questionText,
+  });
+}
+
 export async function getAssignment(assignmentId: string): Promise<Assignment> {
   return get(`/api/assignments/${assignmentId}`);
 }
