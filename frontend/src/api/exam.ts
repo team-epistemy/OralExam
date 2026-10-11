@@ -44,7 +44,14 @@ export interface CefrTurn {
   overall_score: number;
   overall_band: CefrBandName;
   final: boolean;
+  // Evidence the turn was graded with. Null when the student used text mode,
+  // which is itself worth showing — it means Fluency was graded blind.
+  speech?: SpeechEvidenceStored | null;
+  words?: TimedWordPayload[] | null;
 }
+
+// As stored on the turn: the same fields the client sent, all optional.
+export type SpeechEvidenceStored = SpeechEvidence;
 
 export interface AnswerResponse {
   feedback: string;
@@ -140,16 +147,22 @@ export interface SpeechEvidence {
   pause_ratio?: number | null;
 }
 
+// One word and the silent gap (seconds) immediately before it. Sent so the
+// professor sees where the hesitation fell, not just how much there was.
+export interface TimedWordPayload { w: string; g: number }
+
 export async function submitAnswer(
   sessionId: string,
   questionIndex: number,
   answerText: string,
   speech?: SpeechEvidence,
+  words?: TimedWordPayload[],
 ): Promise<AnswerResponse> {
   return post<AnswerResponse>(`/api/sessions/${sessionId}/answer`, {
     question_index: questionIndex,
     answer_text: answerText,
     ...(speech ? { speech } : {}),
+    ...(words && words.length ? { words } : {}),
   });
 }
 

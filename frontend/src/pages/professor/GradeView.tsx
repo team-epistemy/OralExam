@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2 } from 'lucide-react';
 import { get, post } from '../../api/client';
+import { getCefrCalibration, saveCefrCalibration } from '../../api/exam';
 
 interface SessionSummary {
   session_id: string;
@@ -53,6 +54,10 @@ interface Cefr {
   asked_type_label?: string | null;
   next_type_label?: string | null;
   direction?: 'up' | 'same' | 'down';
+  // Evidence the turn was graded with. speech is null when the student answered
+  // in text mode — worth showing, because it means Fluency was graded blind.
+  speech?: Record<string, number> | null;
+  words?: Array<{ w: string; g: number }> | null;
   proven_band?: number | null;
   repeat_request?: boolean;
   degraded?: boolean;
@@ -144,6 +149,61 @@ function ScoreCell({ label, value }: { label: string; value: number | null | und
   );
 }
 
+// The acoustics the turn was graded with. The student sees these on their own
+// result screen; without them here the professor is reading a band with the
+// evidence behind it hidden.
+function CefrAcoustics({ cefr }: { cefr: Cefr }) {
+  const s = cefr.speech;
+  if (!s) {
+    return (
+      <p className="mt-1 text-[11px] text-amber-700">
+        No audio measured for this turn (text mode) — Fluency was graded from the
+        transcript alone, which drops pauses and hesitations.
+      </p>
+    );
+  }
+  const n = (k: string, digits = 0) =>
+    s[k] == null ? null : s[k].toFixed(digits);
+  const chips: Array<[string, string | null]> = [
+    ['pronunciation', n('pron_overall')],
+    ['prosody', n('prosody')],
+    ['Azure fluency', n('pron_fluency')],
+    ['pauses', n('pause_count')],
+    ['long pauses', n('long_pause_count')],
+    ['mean pause', s.mean_pause_sec == null ? null : `${n('mean_pause_sec', 2)}s`],
+    ['silence', s.pause_ratio == null ? null : `${(s.pause_ratio * 100).toFixed(0)}%`],
+    ['rate', s.speech_rate_wpm == null ? null : `${n('speech_rate_wpm')} wpm`],
+  ];
+  return (
+    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
+      {chips.filter(([, v]) => v != null).map(([label, v]) => (
+        <span key={label}>{label} <span className="font-medium text-gray-700">{v}</span></span>
+      ))}
+    </div>
+  );
+}
+
+// The answer with the measured pauses marked, as the student's own screen shows
+// it. A summary count says a turn had eleven pauses; this says whether they fell
+// at clause boundaries or mid-phrase, which is what Fluency actually turns on.
+function AnswerWithPauses({ words }: { words: Array<{ w: string; g: number }> }) {
+  return (
+    <span>
+      {words.map((tw, i) => (
+        <span key={i}>
+          {tw.g >= 0.3 && (
+            <span className={tw.g >= 1 ? 'text-red-500' : 'text-amber-500'}
+                  title={`${tw.g.toFixed(2)}s pause`}>
+              {tw.g >= 1 ? ' ⏸⏸ ' : ' ⏸ '}
+            </span>
+          )}
+          {i > 0 && tw.g < 0.3 ? ' ' : ''}{tw.w}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function CefrTurnScores({ cefr }: { cefr: Cefr }) {
   const arrow = cefr.direction === 'up' ? '↑' : cefr.direction === 'down' ? '↓' : '→';
   return (
@@ -189,6 +249,90 @@ function CefrTurnScores({ cefr }: { cefr: Cefr }) {
   );
 }
 
+const CEFR_BAND_NAMES = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'] as const;
+
+// Per-dimension band override. Saved against the professor as the rater, so two
+// markers on the same session keep their own judgements and neither overwrites
+// the machine band — the point is to compare them, not replace them. This does
+// not move the released grade; that stays the overall override below.
+function CefrOverrideRow({
+  sessionId, turnNumber, dimension, label, machineBand, value, onSave,
+}: {
+  sessionId: string; turnNumber: number; dimension: string; label: string;
+  machineBand: string | null; value?: string;
+  onSave: (dimension: string, band: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const save = async (band: string) => {
+    if (!band) return;
+    setBusy(true);
+    try {
+      await saveCefrCalibration({
+        session_id: sessionId, turn_number: turnNumber, dimension,
+        human_band: band, machine_band: machineBand,
+      });
+      onSave(dimension, band);
+    } catch (err: any) {
+      alert(err?.message || 'Could not save the override.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const disagrees = value && machineBand && value !== machineBand;
+  return (
+    <div className="flex items-center gap-2 text-[11px]">
+      <span className="w-20 text-gray-500">{label}</span>
+      <span className={`w-8 text-center rounded ${bandStyle(
+        machineBand ? CEFR_BAND_NAMES.indexOf(machineBand as any) + 1 : null)}`}>
+        {machineBand || '—'}
+      </span>
+      <select
+        value={value || ''}
+        disabled={busy}
+        onChange={(e) => save(e.target.value)}
+        className="border border-gray-300 rounded px-1 py-0.5 text-[11px] disabled:opacity-50"
+      >
+        <option value="">your band…</option>
+        {CEFR_BAND_NAMES.map((b) => <option key={b} value={b}>{b}</option>)}
+      </select>
+      {disagrees && <span className="text-amber-600">differs from the model</span>}
+    </div>
+  );
+}
+
+function CefrCalibrationPanel({
+  sessionId, cefr, overrides, onSave,
+}: {
+  sessionId: string; cefr: Cefr;
+  overrides: Record<string, string>;
+  onSave: (turnNumber: number, dimension: string, band: string) => void;
+}) {
+  const dims: Array<[string, string, string | null]> = [
+    ['overall', 'Turn band', cefr.turn_band_name || null],
+    ...CRITERIA.map(([key, label]) => {
+      const v = cefr.scores?.[key];
+      return [key, label,
+              v == null ? null : CEFR_BAND_NAMES[Math.max(0, Math.min(5, Math.round(v) - 1))]] as
+             [string, string, string | null];
+    }).filter(([, , band]) => band !== null),
+  ];
+  return (
+    <div className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 space-y-1">
+      <p className="text-[10px] uppercase tracking-wide text-gray-400">
+        Your band vs the model's — recorded for calibration, does not change the grade
+      </p>
+      {dims.map(([key, label, machine]) => (
+        <CefrOverrideRow
+          key={key} sessionId={sessionId} turnNumber={cefr.turn_number}
+          dimension={key} label={label} machineBand={machine}
+          value={overrides[`${cefr.turn_number}:${key}`]}
+          onSave={(d, b) => onSave(cefr.turn_number, d, b)}
+        />
+      ))}
+    </div>
+  );
+}
+
 function CefrSummary({ cefr }: { cefr: Cefr }) {
   const averages = cefr.criterion_averages || {};
   return (
@@ -215,8 +359,12 @@ function CefrSummary({ cefr }: { cefr: Cefr }) {
         ))}
       </div>
       <p className="text-[11px] text-gray-400">
-        Fluency is graded from a speech-to-text transcript, which drops pauses and
-        hesitations, so it reads generous. Pronunciation is not scored.
+        {/* Only true for a turn with no measured audio — with the acoustics the
+            grader sees real pausing and tempo, so the old blanket caveat would
+            now be misleading. */}
+        {cefr.speech
+          ? 'Fluency is graded from the measured audio — pausing, tempo and silence. Pronunciation is shown but not scored.'
+          : 'No audio was measured, so Fluency came from the transcript alone, which drops pauses and hesitations and reads generous. Pronunciation is not scored.'}
       </p>
     </div>
   );
@@ -466,6 +614,23 @@ function SessionDetail({
   assignmentId: string;
   queryClient: ReturnType<typeof useQueryClient>;
 }) {
+  // This professor's own band overrides for the session, keyed "turn:dimension".
+  // Scoped per rater server-side, so two markers never see each other's.
+  const { data: savedOverrides } = useQuery({
+    queryKey: ['cefr-calibration', sessionId],
+    queryFn: () => getCefrCalibration(sessionId),
+    enabled: !!sessionId,
+  });
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (savedOverrides) {
+      setOverrides(Object.fromEntries(
+        savedOverrides.map((o) => [`${o.turn_number}:${o.dimension}`, o.human_band])));
+    }
+  }, [savedOverrides]);
+  const noteOverride = (turnNumber: number, dimension: string, band: string) =>
+    setOverrides((o) => ({ ...o, [`${turnNumber}:${dimension}`]: band }));
+
   if (!sessionGrade) {
     return <p className="text-sm text-gray-500">Loading session details...</p>;
   }
@@ -521,11 +686,26 @@ function SessionDetail({
                       {i > 0 && group.attempts[i - 1]?.cefr?.follow_up && (
                         <p className="text-sm text-blue-700"><span className="text-gray-400">Follow-up:</span>{' '}{group.attempts[i - 1].cefr!.follow_up}</p>
                       )}
-                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">{sessionGrade.anonymized ? 'hidden (anonymized)' : 'no answer'}</em>}</p>
+                      <p className="text-sm text-gray-700">
+                        <span className="text-gray-400">Answer:</span>{' '}
+                        {/* With measured word timings, show the answer with its
+                            pauses marked — the same view the student gets. */}
+                        {ev.cefr?.words?.length && !sessionGrade.anonymized
+                          ? <AnswerWithPauses words={ev.cefr.words} />
+                          : (ev.student_answer || <em className="text-gray-400">{sessionGrade.anonymized ? 'hidden (anonymized)' : 'no answer'}</em>)}
+                      </p>
                       {(ev.rationale || ev.feedback) && (
                         <p className="mt-1 text-xs text-gray-500"><span className="font-medium text-gray-600">Why this score:</span>{' '}{ev.rationale || ev.feedback}</p>
                       )}
-                      {ev.cefr && <CefrTurnScores cefr={ev.cefr} />}
+                      {ev.cefr && (
+                        <>
+                          <CefrTurnScores cefr={ev.cefr} />
+                          <CefrAcoustics cefr={ev.cefr} />
+                          <CefrCalibrationPanel
+                            sessionId={sessionId} cefr={ev.cefr}
+                            overrides={overrides} onSave={noteOverride} />
+                        </>
+                      )}
                       {ev.components && (
                         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-400">
                           {ev.components.recitation_gate != null && <span>authenticity R={ev.components.recitation_gate.toFixed(2)}</span>}

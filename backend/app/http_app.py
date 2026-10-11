@@ -4274,6 +4274,10 @@ class SubmitAnswerRequest(BaseModel):
     # than on a transcript that has discarded both. Optional and ignored by the
     # Socratic flow, so a client that never sends it is unaffected.
     speech: Optional[dict] = None
+    # Per-word pause timings ([{"w": word, "g": gap_before_seconds}]), so the
+    # professor's marker view can show where the hesitation fell rather than only
+    # how much of it there was. Bounded server-side.
+    words: Optional[list] = None
 
 
 def _register_delivery(app: FastAPI, deps) -> None:

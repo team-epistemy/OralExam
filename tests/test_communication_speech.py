@@ -162,6 +162,65 @@ def test_an_answer_without_speech_grades_blind_and_records_that(monkeypatch):
     assert cefr["speech"] is None
 
 
+# ── Per-word pause timings ───────────────────────────────────────────────────
+
+def test_word_timings_are_kept_as_word_and_gap():
+    assert T._clean_words([{"w": "basketball", "g": 0.42}]) == [
+        {"w": "basketball", "g": 0.42}]
+
+
+def test_a_missing_gap_becomes_zero_not_a_dropped_word():
+    assert T._clean_words([{"w": "and"}]) == [{"w": "and", "g": 0.0}]
+
+
+def test_non_list_payloads_are_rejected():
+    for junk in (None, {}, "word word", 7):
+        assert T._clean_words(junk) is None
+
+
+def test_entries_without_a_usable_word_are_dropped():
+    assert T._clean_words([{"g": 1.0}, {"w": ""}, {"w": 5}, "nope",
+                           {"w": "ok", "g": 0.1}]) == [{"w": "ok", "g": 0.1}]
+
+
+def test_unusable_gaps_fall_back_to_zero():
+    out = T._clean_words([{"w": "a", "g": "x"}, {"w": "b", "g": float("nan")},
+                          {"w": "c", "g": -3}])
+    assert [e["g"] for e in out] == [0.0, 0.0, 0.0]
+
+
+def test_the_word_list_is_bounded():
+    many = [{"w": "w", "g": 0.1}] * (T._MAX_TIMED_WORDS + 250)
+    assert len(T._clean_words(many)) == T._MAX_TIMED_WORDS
+
+
+def test_an_empty_list_becomes_none_rather_than_an_empty_list():
+    assert T._clean_words([]) is None
+
+
+def test_word_timings_are_stored_on_the_turn(monkeypatch):
+    req = _Req("I play basketball")
+    req.speech = dict(_FULL)
+    req.words = [{"w": "I", "g": 0}, {"w": "play", "g": 0.2},
+                 {"w": "basketball", "g": 1.4}]
+    _, cefr = _run(monkeypatch, req)
+    assert [w["w"] for w in cefr["words"]] == ["I", "play", "basketball"]
+    assert cefr["words"][2]["g"] == 1.4
+
+
+def test_a_turn_without_word_timings_stores_none(monkeypatch):
+    _, cefr = _run(monkeypatch, _Req("text mode answer"))
+    assert cefr["words"] is None
+
+
+def test_word_timings_do_not_enter_the_grading_prompt(monkeypatch):
+    """The grader gets the summary metrics; the timings are for the marker view."""
+    req = _Req("I play basketball")
+    req.words = [{"w": "basketball", "g": 1.4}]
+    grade_prompt, _ = _run(monkeypatch, req)
+    assert "basketball" not in grade_prompt.lower()
+
+
 def test_a_forged_payload_cannot_inject_text_into_the_prompt(monkeypatch):
     req = _Req("short answer")
     req.speech = {"pause_count": 0,

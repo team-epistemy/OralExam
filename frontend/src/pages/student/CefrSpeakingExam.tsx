@@ -270,7 +270,8 @@ export default function CefrSpeakingExam() {
     pendingAudioUrl.current = null;
     setCaptured(null);
     try {
-      const resp = await submitAnswer(sessionId, 0, answer, toSpeechEvidence(pron));
+      const resp = await submitAnswer(sessionId, 0, answer, toSpeechEvidence(pron),
+                                      pron?.words?.map((w) => ({ w: w.word, g: w.gapBefore })));
       if (resp.cefr) setHistory((h) => [...h, resp.cefr!]);
       setAnswers((a) => [...a, {
         turnNumber: resp.cefr?.turn_number ?? a.length + 1,

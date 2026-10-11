@@ -72,6 +72,7 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
     # transcript beside them and no more. Fine for a prototype; a graded exam
     # would have to assess server-side from the audio.
     speech = _clean_speech(getattr(req, "speech", None))
+    timed_words = _clean_words(getattr(req, "words", None))
 
     graded = _grade(settings, question_text, prior, req.answer_text,
                     turn_number, target_band, is_part3, theme, speech)
@@ -145,6 +146,9 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
         # can be audited against the evidence behind it — and so it is visible
         # when a turn was graded blind because the student used text mode.
         "speech": speech,
+        # Per-word pause timings, so the professor sees the same pause-annotated
+        # transcript the student does instead of a flattened sentence.
+        "words": timed_words,
         # True when the grader call failed and this turn was scored at its target
         # band instead. Surfaced so a professor never reads a fallback score as a
         # real judgement.
@@ -181,6 +185,38 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
         # path never sets this, so that flow is unaffected.
         "cefr": cefr,
     }
+
+
+# A turn is one or two minutes of speech, so a few hundred words is the ceiling.
+# Bounded because the list is client-supplied and lands in a JSONB column.
+_MAX_TIMED_WORDS = 400
+
+
+def _clean_words(raw) -> Optional[list]:
+    """Keep the per-word pause timings as [{"w": word, "g": gap_before_seconds}].
+
+    The summary metrics say a turn had eleven pauses; these say *where* they fell,
+    which is what lets a marker see hesitation sitting mid-clause rather than at a
+    clause boundary. Stored because the student's own screen shows exactly that
+    and the professor could not reconstruct it from the summary alone.
+    """
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for item in raw[:_MAX_TIMED_WORDS]:
+        if not isinstance(item, dict):
+            continue
+        word = item.get("w")
+        if not isinstance(word, str) or not word:
+            continue
+        try:
+            gap = float(item.get("g") or 0.0)
+        except (TypeError, ValueError):
+            gap = 0.0
+        if gap != gap or gap in (float("inf"), float("-inf")) or gap < 0:
+            gap = 0.0
+        out.append({"w": word[:80], "g": round(gap, 2)})
+    return out or None
 
 
 def _clean_speech(raw) -> Optional[dict]:
