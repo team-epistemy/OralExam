@@ -212,6 +212,73 @@ INTERACTION (Part 3 turns only)
 6 (C2): Interacts with ease and skill, picking up and using non-verbal and
         intonational cues effortlessly."""
 
+# ── Acoustic evidence (Azure speech assessment) ──────────────────────────────
+# When the student answered by voice through the Azure assessor, the browser has
+# measurements the transcript cannot carry: where they paused, for how long, and
+# how fast they spoke. Fluency's descriptors turn on exactly those, so without
+# this block Fluency is graded off a transcript that has already discarded the
+# evidence for it — the known limit in the v0.1 spec.
+
+# The keys the client sends. Kept flat and explicit so the prompt never depends
+# on the frontend's nested assessment shape.
+SPEECH_FIELDS = (
+    ("pron_overall", "Pronunciation score (overall, 0-100)"),
+    ("pron_accuracy", "Pronunciation accuracy — SOUNDS, not grammar (0-100)"),
+    ("pron_fluency", "Azure's own fluency score (0-100)"),
+    ("pron_completeness", "Completeness of the read/spoken content (0-100)"),
+    ("prosody", "Prosody — intonation and stress (0-100)"),
+    ("word_count", "Words spoken"),
+    ("duration_sec", "Seconds of recording"),
+    ("speech_rate_wpm", "Speech rate (words per minute, including pauses)"),
+    ("articulation_rate_wpm", "Articulation rate (words per minute while speaking)"),
+    ("pause_count", "Number of pauses"),
+    ("long_pause_count", "Number of long pauses"),
+    ("mean_pause_sec", "Mean pause length (seconds)"),
+    ("pause_ratio", "Share of the turn spent not speaking (0-1)"),
+)
+
+SPEECH_EVIDENCE_GUIDANCE = """\
+HOW TO USE THE ACOUSTIC EVIDENCE
+These measurements come from the student's actual audio, so on this turn you are
+not limited to what a transcript preserves. Use them mainly for FLUENCY, whose
+descriptors turn on pausing, hesitation and tempo — all three are invisible in a
+transcript.
+
+Weigh them as evidence, not as a lookup table. There is no threshold that maps a
+pause ratio or a words-per-minute figure to a band; judge them against the
+Fluency descriptors the way you would judge your impression of a recording, and
+remember a thoughtful speaker pauses too.
+
+Two cautions:
+- "Pronunciation accuracy" is about SOUNDS. It is NOT the ACCURACY criterion,
+  which is about grammatical control. Do not let one colour the other.
+- Do NOT score pronunciation. It is not a criterion in this exam."""
+
+
+def speech_evidence_block(speech: Optional[dict]) -> str:
+    """Render the client's acoustic measurements for the grading prompt.
+
+    Returns "" when the student answered in text mode or the assessor produced
+    nothing, so the grader falls back to transcript-only language untouched.
+    Values the client omitted or sent as null are skipped rather than shown as
+    zero, which would read as "no pauses at all" instead of "not measured".
+    """
+    if not speech:
+        return ""
+    lines = []
+    for key, label in SPEECH_FIELDS:
+        value = speech.get(key)
+        if value is None:
+            continue
+        if isinstance(value, float):
+            value = round(value, 2)
+        lines.append(f"- {label}: {value}")
+    if not lines:
+        return ""
+    return ("ACOUSTIC EVIDENCE FROM THE AUDIO\n" + "\n".join(lines)
+            + "\n\n" + SPEECH_EVIDENCE_GUIDANCE)
+
+
 # ── Examiner conduct (PRD) ───────────────────────────────────────────────────
 # The grader doubles as the examiner, so the conduct rules live in the same
 # prompt as the rubric.

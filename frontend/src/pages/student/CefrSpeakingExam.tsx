@@ -4,7 +4,7 @@ import { Mic, Square, PlayCircle, Send, Volume2, VolumeX, Loader2, RotateCcw } f
 import { API_BASE_URL } from '../../config';
 import { post } from '../../api/client';
 import { startExamSession, submitAnswer, completeSession, getCefrCalibration, saveCefrCalibration } from '../../api/exam';
-import type { CefrTurn, CefrBandName } from '../../api/exam';
+import type { CefrTurn, CefrBandName, SpeechEvidence } from '../../api/exam';
 import { createAssessor } from '../../speech/azureAssessor';
 import type { Assessor, AssessResult } from '../../speech/azureAssessor';
 
@@ -48,6 +48,24 @@ const METRIC_DEFS: Array<[string, string]> = [
   ['Interaction', 'How you handle the back-and-forth (assessed on the follow-ups).'],
 ];
 const TOTAL_TURNS = 5;
+
+// Flatten the assessor's result into the shape the grader reads. Sent with the
+// answer so Fluency is judged on measured pausing and tempo rather than on a
+// transcript, which has already discarded both. Returns undefined in text mode,
+// and the backend then falls back to transcript-only grading.
+function toSpeechEvidence(pron: AssessResult | null): SpeechEvidence | undefined {
+  if (!pron) return undefined;
+  const { scores: s, metrics: m } = pron;
+  return {
+    pron_overall: s.pron, pron_accuracy: s.accuracy, pron_fluency: s.fluency,
+    pron_completeness: s.completeness, prosody: s.prosody,
+    word_count: m.wordCount, duration_sec: m.durationSec,
+    speech_rate_wpm: m.speechRateWpm,
+    articulation_rate_wpm: m.articulationRateWpm,
+    pause_count: m.pauseCount, long_pause_count: m.longPauseCount,
+    mean_pause_sec: m.meanPauseSec, pause_ratio: m.pauseRatio,
+  };
+}
 
 // MediaRecorder WebM has no duration header, so <audio>.duration is Infinity and
 // playback looks truncated; force the browser to compute it once on load.
@@ -252,7 +270,7 @@ export default function CefrSpeakingExam() {
     pendingAudioUrl.current = null;
     setCaptured(null);
     try {
-      const resp = await submitAnswer(sessionId, 0, answer);
+      const resp = await submitAnswer(sessionId, 0, answer, toSpeechEvidence(pron));
       if (resp.cefr) setHistory((h) => [...h, resp.cefr!]);
       setAnswers((a) => [...a, {
         turnNumber: resp.cefr?.turn_number ?? a.length + 1,

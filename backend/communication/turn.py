@@ -67,8 +67,14 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
     is_part3 = turn_number >= C.PART3_FIRST_TURN
     is_final = turn_number >= C.TOTAL_TURNS
 
+    # Client-reported: the Azure assessment runs in the browser under a
+    # short-lived token, so these measurements are as trustworthy as the
+    # transcript beside them and no more. Fine for a prototype; a graded exam
+    # would have to assess server-side from the audio.
+    speech = _clean_speech(getattr(req, "speech", None))
+
     graded = _grade(settings, question_text, prior, req.answer_text,
-                    turn_number, target_band, is_part3, theme)
+                    turn_number, target_band, is_part3, theme, speech)
 
     scores = L.normalise_scores(graded, is_part3)
     band = L.turn_band(scores)
@@ -135,6 +141,10 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
         "proven_band": step["proven_band"],
         "direction": step["direction"],
         "repeat_request": repeat_request,
+        # The acoustic measurements this turn was graded with, stored so a band
+        # can be audited against the evidence behind it — and so it is visible
+        # when a turn was graded blind because the student used text mode.
+        "speech": speech,
         # True when the grader call failed and this turn was scored at its target
         # band instead. Surfaced so a professor never reads a fallback score as a
         # real judgement.
@@ -171,6 +181,30 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
         # path never sets this, so that flow is unaffected.
         "cefr": cefr,
     }
+
+
+def _clean_speech(raw) -> Optional[dict]:
+    """Keep only the known acoustic fields, as finite numbers.
+
+    The payload is client-supplied, so it is filtered rather than trusted: an
+    unexpected key never reaches the prompt, and a string or NaN never reaches
+    the rounding in `speech_evidence_block`.
+    """
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for key, _label in C.SPEECH_FIELDS:
+        value = raw.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        if num != num or num in (float("inf"), float("-inf")):
+            continue
+        out[key] = num
+    return out or None
 
 
 # ── Persistence ──────────────────────────────────────────────────────────────
@@ -321,9 +355,11 @@ def _write_evaluation(repo, turn_id: str, org_id: str, course_id: str,
 
 def _grade(settings, question_text: str, prior: List[dict], answer_text: str,
            turn_number: int, target_band: Optional[int],
-           is_part3: bool, theme: str = "") -> dict:
+           is_part3: bool, theme: str = "",
+           speech: Optional[dict] = None) -> dict:
     """Score this turn on the CEFR grid. Writes no question."""
-    system = _build_grade_prompt(question_text, turn_number, is_part3, theme)
+    system = _build_grade_prompt(question_text, turn_number, is_part3, theme,
+                                 speech)
     user = _build_transcript(question_text, prior, answer_text)
     try:
         return call_bedrock(settings, system, user,
@@ -345,8 +381,14 @@ def _grade(settings, question_text: str, prior: List[dict], answer_text: str,
 
 
 def _build_grade_prompt(question_text: str, turn_number: int, is_part3: bool,
-                        theme: str = "") -> str:
-    """The grader's system prompt: the rubric and nothing about asking questions."""
+                        theme: str = "", speech: Optional[dict] = None) -> str:
+    """The grader's system prompt: the rubric and nothing about asking questions.
+
+    `speech` is the client's acoustic measurements for this turn, when the student
+    answered by voice through the Azure assessor. Supplying them is what lets
+    Fluency be graded on real pausing and tempo instead of a transcript that has
+    already thrown both away.
+    """
     subject = f' on the theme "{theme}"' if theme else ""
     criteria = list(C.CORE_CRITERIA) + ([C.INTERACTION] if is_part3 else [])
     lines = [
@@ -368,10 +410,19 @@ def _build_grade_prompt(question_text: str, turn_number: int, is_part3: bool,
     if not is_part3:
         lines.append("Do NOT score interaction on this turn — it is a long turn "
                      "with no exchange to judge.")
+    evidence = C.speech_evidence_block(speech)
+    if evidence:
+        # The audio was measured, so the old "you are reading a transcript"
+        # caveat would now understate what the grader can see.
+        lines += ["Judge only this latest answer.", "", evidence, ""]
+    else:
+        lines += [
+            "Judge only this latest answer, from the transcript as given. You are "
+            "reading a speech-to-text transcript, so do not infer pronunciation. "
+            "It also strips pauses and hesitations, so treat Fluency with caution.",
+            "",
+        ]
     lines += [
-        "Judge only this latest answer, from the transcript as given. You are "
-        "reading a speech-to-text transcript, so do not infer pronunciation.",
-        "",
         "If the student is not answering but asking you to repeat, rephrase or "
         "clarify, set repeat_request to true and still score what little they "
         "produced.",

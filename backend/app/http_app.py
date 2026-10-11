@@ -4269,6 +4269,11 @@ class SubmitAnswerRequest(BaseModel):
     """POST body for submitting an answer."""
     question_index: int = Field(..., ge=0)
     answer_text: str = Field(..., min_length=1, max_length=MAX_ANSWER_LENGTH)
+    # Acoustic measurements from the browser's Azure speech assessment, used by
+    # the CEFR speaking exam to grade Fluency on real pausing and tempo rather
+    # than on a transcript that has discarded both. Optional and ignored by the
+    # Socratic flow, so a client that never sends it is unaffected.
+    speech: Optional[dict] = None
 
 
 def _register_delivery(app: FastAPI, deps) -> None:

@@ -121,14 +121,35 @@ export async function getAssignmentPreview(assignmentId: string): Promise<Assign
   return get<AssignmentPreview>(`/api/assignments/${assignmentId}/preview`);
 }
 
+// Acoustic measurements the CEFR speaking exam sends alongside the transcript,
+// so Fluency can be graded on real pausing and tempo. Flat and snake_cased to
+// match the backend's SPEECH_FIELDS; omitted entirely in text mode.
+export interface SpeechEvidence {
+  pron_overall?: number | null;
+  pron_accuracy?: number | null;
+  pron_fluency?: number | null;
+  pron_completeness?: number | null;
+  prosody?: number | null;
+  word_count?: number | null;
+  duration_sec?: number | null;
+  speech_rate_wpm?: number | null;
+  articulation_rate_wpm?: number | null;
+  pause_count?: number | null;
+  long_pause_count?: number | null;
+  mean_pause_sec?: number | null;
+  pause_ratio?: number | null;
+}
+
 export async function submitAnswer(
   sessionId: string,
   questionIndex: number,
   answerText: string,
+  speech?: SpeechEvidence,
 ): Promise<AnswerResponse> {
   return post<AnswerResponse>(`/api/sessions/${sessionId}/answer`, {
     question_index: questionIndex,
     answer_text: answerText,
+    ...(speech ? { speech } : {}),
   });
 }
 
