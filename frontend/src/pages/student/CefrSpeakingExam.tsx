@@ -350,6 +350,18 @@ export default function CefrSpeakingExam() {
               <div><div className="text-[11px] uppercase tracking-wide text-gray-400 mb-0.5">Response with pauses</div>
                 <ResponseWithPauses pron={a.pron} /></div>
 
+              {a.pron && (a.pron.scores.accuracy != null || a.pron.metrics.speechRateWpm != null) && (
+                <div className="text-[11px] text-gray-500">
+                  <span className="uppercase tracking-wide text-gray-400">Pronunciation (Azure, reference): </span>
+                  {a.pron.scores.accuracy != null && <>accuracy {Math.round(a.pron.scores.accuracy)} · </>}
+                  {a.pron.scores.fluency != null && <>fluency {Math.round(a.pron.scores.fluency)} · </>}
+                  {a.pron.scores.prosody != null && <>prosody {Math.round(a.pron.scores.prosody)} · </>}
+                  {a.pron.metrics.speechRateWpm != null && <>{a.pron.metrics.speechRateWpm} wpm · </>}
+                  {a.pron.metrics.pauseCount != null && <>{a.pron.metrics.pauseCount} pauses</>}
+                  <span className="text-gray-400"> — not part of the CEFR level</span>
+                </div>
+              )}
+
               <div><div className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Scores &amp; calibration</div>
                 <div className="space-y-1">
                   {(['overall', ...CRITERIA] as string[]).map((dim) => {
