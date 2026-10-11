@@ -91,7 +91,8 @@ export default function CefrSpeakingExam() {
   const [captured, setCaptured] = useState<AssessResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [liveInterim, setLiveInterim] = useState('');
+  const [liveInterim, setLiveInterim] = useState(''); // current phrase, partial
+  const [liveFinal, setLiveFinal] = useState('');     // finalized phrases so far
   const [azureMode, setAzureMode] = useState(false);
   const [ttsOn, setTtsOn] = useState(true);
   const [ttsAvailable, setTtsAvailable] = useState(true);
@@ -175,13 +176,16 @@ export default function CefrSpeakingExam() {
 
   // ── Record start/stop ──────────────────────────────────────────────────────
   const startRecording = async () => {
-    stopSpeech(); setMicNotice(null); setLiveInterim(''); setCaptured(null);
+    stopSpeech(); setMicNotice(null); setLiveInterim(''); setLiveFinal(''); setCaptured(null);
     if (pendingAudioUrl.current) { URL.revokeObjectURL(pendingAudioUrl.current); pendingAudioUrl.current = null; }
     if (azureMode) {
       try {
         const assessor = createAssessor({
           getToken: async () => { const r = await post<{ token: string; region: string }>('/api/speech/token'); return { token: r.token, region: r.region }; },
           onInterim: (t) => setLiveInterim(t),
+          // Append each finalized phrase so the transcript builds up in real time
+          // (the pronunciation/word-timing data still comes from the same event).
+          onPhrase: (t) => { setLiveFinal((f) => (f ? f + ' ' : '') + t); setLiveInterim(''); },
           onError: (e) => setMicNotice(`Speech error: ${e.message}`),
         });
         await assessor.start();
@@ -417,7 +421,11 @@ export default function CefrSpeakingExam() {
           <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 min-h-[5rem]">
             <div className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Your response</div>
             {recording ? (
-              <p className="text-sm text-gray-500 italic">{liveInterim || 'Listening…'}</p>
+              <p className="text-sm text-gray-700">
+                {liveFinal}
+                {liveInterim && <span className="text-gray-400 italic">{liveFinal ? ' ' : ''}{liveInterim}</span>}
+                {!liveFinal && !liveInterim && <span className="text-gray-400 italic">Listening…</span>}
+              </p>
             ) : captured?.transcript ? (
               <p className="text-sm text-gray-800">{captured.transcript}</p>
             ) : (

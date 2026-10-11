@@ -125,10 +125,11 @@ export interface Assessor {
 export function createAssessor(opts: {
   getToken: () => Promise<{ token: string; region: string }>;
   locale?: string;
-  onInterim?: (text: string) => void;
+  onInterim?: (text: string) => void;   // current phrase, partial (streams live)
+  onPhrase?: (text: string) => void;    // a finalized phrase (append to build the transcript)
   onError?: (e: Error) => void;
 }): Assessor {
-  const { getToken, locale = 'en-US', onInterim = () => {}, onError = () => {} } = opts;
+  const { getToken, locale = 'en-US', onInterim = () => {}, onPhrase = () => {}, onError = () => {} } = opts;
   let recognizer: SDK.SpeechRecognizer | null = null;
   let phrases: (Phrase | null)[] = [];
   let stopped: Promise<void> | null = null;
@@ -154,11 +155,17 @@ export function createAssessor(opts: {
         resolve();
       };
     });
+    // `recognizing` streams the current phrase's partial text in real time.
     recognizer.recognizing = (_s, e) => onInterim(e.result.text);
+    // `recognized` carries the finalized phrase AND the full pronunciation JSON
+    // (accuracy/fluency/prosody/word timings). We surface the finalized text for
+    // live display (onPhrase) and keep the JSON for scoring — the two are
+    // independent, so live streaming never affects the acoustic features.
     recognizer.recognized = (_s, e) => {
       if (e.result.reason !== SDK.ResultReason.RecognizedSpeech) return;
       const raw = e.result.properties.getProperty(SDK.PropertyId.SpeechServiceResponse_JsonResult);
       try { phrases.push(parsePhrase(JSON.parse(raw))); } catch { /* skip malformed */ }
+      if (e.result.text) onPhrase(e.result.text);
     };
     await new Promise<void>((resolve, reject) =>
       recognizer!.startContinuousRecognitionAsync(() => resolve(), (e) => reject(new Error(e))));
