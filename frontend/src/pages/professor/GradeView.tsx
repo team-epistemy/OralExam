@@ -49,6 +49,9 @@ interface Cefr {
   target_band?: number | null;
   target_band_name?: string | null;
   next_target_band_name?: string | null;
+  // The PISA question type this turn answered, and the one the next question uses.
+  asked_type_label?: string | null;
+  next_type_label?: string | null;
   direction?: 'up' | 'same' | 'down';
   proven_band?: number | null;
   repeat_request?: boolean;
@@ -152,12 +155,18 @@ function CefrTurnScores({ cefr }: { cefr: Cefr }) {
         <span className={`px-1.5 py-0.5 rounded font-semibold ${bandStyle(cefr.turn_band)}`}>
           {cefr.turn_band_name}
         </span>
+        {cefr.asked_type_label && (
+          <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">
+            {cefr.asked_type_label}
+          </span>
+        )}
         {cefr.target_band_name && (
           <span className="text-gray-400">aimed at {cefr.target_band_name}</span>
         )}
         {!cefr.final && cefr.next_target_band_name && (
           <span className="text-gray-400">
-            {arrow} next probe {cefr.next_target_band_name}
+            {arrow} next: {cefr.next_target_band_name}
+            {cefr.next_type_label ? ` · ${cefr.next_type_label}` : ''}
           </span>
         )}
         {cefr.repeat_request && (

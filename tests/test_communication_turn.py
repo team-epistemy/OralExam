@@ -95,25 +95,41 @@ _SROW = ("ssss", "aaaa", "stud_1", "cccc", "active", 0,
          "oooo")   # session, assignment, student, course, status, turn, org
 
 
-def _run_exam(monkeypatch, bands, n_turns=C.TOTAL_TURNS):
-    """Grade n_turns with a stubbed grader that returns `bands[i]` every criterion.
+def _is_grader(system: str) -> bool:
+    """Grading and examining are separate calls with distinguishable prompts."""
+    return "CEFR GRID" in system
 
-    Returns (repo, [response per turn]).
+
+def _stub_llm(monkeypatch, bands, repeat_on=(), capture=None):
+    """Stub both LLM calls: the grader returns `bands[i]`, the examiner a question.
+
+    `capture` collects (role, system) per call so tests can assert on the prompts.
     """
-    calls = {"n": 0}
+    turn = {"n": 0}
 
     def fake_call(settings, system, user, **kw):
-        i = calls["n"]
-        calls["n"] += 1
-        band = bands[i]
-        out = {c: band for c in C.CORE_CRITERIA}
-        out[C.INTERACTION] = band
-        out["note"] = f"turn {i + 1}"
-        out["follow_up"] = f"follow-up after turn {i + 1}"
-        out["_system"] = system
-        return out
+        if _is_grader(system):
+            i = turn["n"]
+            turn["n"] += 1
+            if capture is not None:
+                capture.append(("grade", system))
+            band = bands[min(i, len(bands) - 1)]
+            out = {c: band for c in C.CORE_CRITERIA}
+            out[C.INTERACTION] = band
+            out["note"] = f"turn {i + 1}"
+            out["repeat_request"] = (i + 1) in repeat_on
+            return out
+        if capture is not None:
+            capture.append(("examine", system))
+        return {"follow_up": f"follow-up written after turn {turn['n']}"}
 
     monkeypatch.setattr(T, "call_bedrock", fake_call)
+
+
+def _run_exam(monkeypatch, bands, n_turns=C.TOTAL_TURNS, repeat_on=(),
+              capture=None):
+    """Run n_turns against the stubbed LLM. Returns (repo, [response per turn])."""
+    _stub_llm(monkeypatch, bands, repeat_on, capture)
     repo = _Repo()
     responses = []
     for i in range(n_turns):
@@ -162,22 +178,33 @@ def test_the_ladder_drives_the_targets_across_the_exam(monkeypatch):
     assert [c["target_band"] for c in cefr] == [None, 4, 3, 4, 3]
 
 
-def test_the_target_band_reaches_the_grading_prompt(monkeypatch):
-    """The follow-up must be aimed, so the prompt has to name the target band."""
-    seen = []
+def test_the_examiner_is_told_the_target_band_and_question_type(monkeypatch):
+    """The examiner must be told which question to ask, not left to infer it."""
+    capture = []
+    _run_exam(monkeypatch, [3], n_turns=1, capture=capture)
+    examiner = [s for role, s in capture if role == "examine"][0]
+    # Part 2 graded B1, so the ladder probes B2 and picks a B2 type.
+    assert "Target level: B2" in examiner
+    assert "Question type:" in examiner
+    assert "Question form" in examiner
 
-    def fake_call(settings, system, user, **kw):
-        seen.append(system)
-        out = {c: 3 for c in C.CORE_CRITERIA}
-        out[C.INTERACTION] = 3
-        out["follow_up"] = "next?"
-        return out
 
-    monkeypatch.setattr(T, "call_bedrock", fake_call)
-    repo = _Repo()
-    for i in range(2):
-        T.handle_turn(repo, object(), "ssss", _SROW, _Req(f"a{i}"))
-    assert "Aim it at CEFR B2" in seen[1]
+def test_the_grader_is_not_asked_to_write_a_question(monkeypatch):
+    """Splitting the calls is the point: the grader only grades."""
+    capture = []
+    _run_exam(monkeypatch, [3], n_turns=1, capture=capture)
+    grader = [s for role, s in capture if role == "grade"][0]
+    assert "follow_up" not in grader
+    assert "Target level" not in grader
+
+
+def test_the_final_turn_skips_the_examiner_call_entirely(monkeypatch):
+    capture = []
+    _run_exam(monkeypatch, [3] * 5, capture=capture)
+    roles = [role for role, _ in capture]
+    # Four follow-ups for five turns: the last turn has nothing left to ask.
+    assert roles.count("grade") == 5
+    assert roles.count("examine") == 4
 
 
 def test_the_final_turn_asks_for_no_follow_up(monkeypatch):
@@ -233,22 +260,8 @@ def test_response_matches_the_shape_the_exam_page_reads(monkeypatch):
 # ── Repeat requests and degradation ──────────────────────────────────────────
 
 def test_a_repeat_request_holds_the_ladder_and_is_left_out_of_the_score(monkeypatch):
-    calls = {"n": 0}
-
-    def fake_call(settings, system, user, **kw):
-        i = calls["n"]
-        calls["n"] += 1
-        band = 1 if i == 1 else 4           # turn 2 is "can you repeat that?"
-        out = {c: band for c in C.CORE_CRITERIA}
-        out[C.INTERACTION] = band
-        out["repeat_request"] = (i == 1)
-        out["follow_up"] = "rephrased question"
-        return out
-
-    monkeypatch.setattr(T, "call_bedrock", fake_call)
-    repo = _Repo()
-    responses = [T.handle_turn(repo, object(), "ssss", _SROW, _Req(f"a{i}"))
-                 for i in range(C.TOTAL_TURNS)]
+    # Turn 2 is "can you repeat that?"; every other turn is a solid B2.
+    repo, responses = _run_exam(monkeypatch, [4, 1, 4, 4, 4], repeat_on=(2,))
 
     cefr = _cefr(repo)
     assert cefr[1]["repeat_request"] is True
@@ -260,9 +273,28 @@ def test_a_repeat_request_holds_the_ladder_and_is_left_out_of_the_score(monkeypa
     assert cefr[-1]["overall_band"] == "B2"
 
 
+def test_a_repeat_request_re_asks_the_same_question_type(monkeypatch):
+    """Nothing was demonstrated, so the bank must not advance past that type."""
+    repo, _ = _run_exam(monkeypatch, [4, 1, 4, 4, 4], repeat_on=(2,))
+    cefr = _cefr(repo)
+    asked_on_turn_2 = cefr[0]["next_type_id"]
+    assert cefr[1]["asked_type_id"] == asked_on_turn_2
+    assert cefr[1]["next_type_id"] == asked_on_turn_2
+
+
+def test_the_examiner_is_told_to_re_ask_on_a_repeat_request(monkeypatch):
+    capture = []
+    _run_exam(monkeypatch, [4, 1], n_turns=2, repeat_on=(2,), capture=capture)
+    examiner = [s for role, s in capture if role == "examine"][-1]
+    assert "asked you to repeat or rephrase" in examiner
+    assert "do not change the question type" in examiner
+
+
 def test_a_failed_grade_still_finishes_the_turn(monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("bedrock down")
+    def boom(settings, system, user, **kw):
+        if _is_grader(system):
+            raise RuntimeError("bedrock down")
+        return {"follow_up": "and what else?"}
 
     monkeypatch.setattr(T, "call_bedrock", boom)
     repo = _Repo()
@@ -281,9 +313,11 @@ def test_a_normal_turn_is_not_flagged_as_degraded(monkeypatch):
     assert all(c["degraded"] is False for c in _cefr(repo))
 
 
-def test_a_grader_that_omits_the_follow_up_still_yields_a_question(monkeypatch):
-    def thin(*a, **k):
-        return {c: 3 for c in C.CORE_CRITERIA}   # no follow_up, no interaction
+def test_an_examiner_that_returns_nothing_still_yields_a_question(monkeypatch):
+    def thin(settings, system, user, **kw):
+        if _is_grader(system):
+            return {c: 3 for c in C.CORE_CRITERIA}
+        return {}                                # examiner produced no question
 
     monkeypatch.setattr(T, "call_bedrock", thin)
     repo = _Repo()
@@ -292,6 +326,20 @@ def test_a_grader_that_omits_the_follow_up_still_yields_a_question(monkeypatch):
 
 
 # ── Storage contract ─────────────────────────────────────────────────────────
+
+def test_a_failed_examiner_call_still_yields_a_question(monkeypatch):
+    def boom(settings, system, user, **kw):
+        if _is_grader(system):
+            return {c: 3 for c in C.CORE_CRITERIA}
+        raise RuntimeError("examiner down")
+
+    monkeypatch.setattr(T, "call_bedrock", boom)
+    repo = _Repo()
+    resp = T.handle_turn(repo, object(), "ssss", _SROW, _Req("an answer"))
+    assert resp["probe"]
+    # The grade itself is real, so the turn is not flagged degraded.
+    assert _cefr(repo)[0]["degraded"] is False
+
 
 def test_the_evaluation_row_carries_the_criterion_detail_and_exam_kind(monkeypatch):
     repo, _ = _run_exam(monkeypatch, [3] * 5)

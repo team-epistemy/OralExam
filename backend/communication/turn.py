@@ -26,8 +26,12 @@ logger = logging.getLogger(__name__)
 # Bounded like the Socratic evaluator: CloudFront cuts the student off at 60s,
 # so one attempt with a 20s ceiling, then degrade to a fallback score.
 _LLM_TIMEOUT_S = 20
-# Five criterion scores, a one-line note and a one-sentence follow-up.
-_LLM_MAX_TOKENS = 700
+# Five criterion scores plus a one-line note.
+_LLM_MAX_TOKENS = 500
+# One question. Written by a fast model: picking the band and the question type
+# is already done in Python, so this call only has to phrase it.
+_FOLLOW_UP_MAX_TOKENS = 200
+_FOLLOW_UP_MODEL = "claude-haiku-4-5-20251001"
 
 
 def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict:
@@ -58,12 +62,13 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
 
     prior = _prior_turns(repo, session_id)
     target_band, proven_band = _ladder_state(prior)
+    asked_type_id = prior[-1]["next_type_id"] if prior else None
+    used_type_ids = [p["next_type_id"] for p in prior if p.get("next_type_id")]
     is_part3 = turn_number >= C.PART3_FIRST_TURN
     is_final = turn_number >= C.TOTAL_TURNS
 
     graded = _grade(settings, question_text, prior, req.answer_text,
-                    turn_number, target_band, is_part3, is_final,
-                    theme, high_band_frame)
+                    turn_number, target_band, is_part3, theme)
 
     scores = L.normalise_scores(graded, is_part3)
     band = L.turn_band(scores)
@@ -72,7 +77,7 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
     if repeat_request:
         # The student asked for a repeat rather than answering. It still burns a
         # turn (the exam page counts turns client-side), but nothing was
-        # demonstrated: hold the ladder where it is and rephrase.
+        # demonstrated: hold the ladder where it is and re-ask the same type.
         step = {"target_band": target_band if target_band is not None else band,
                 "proven_band": proven_band, "direction": "same"}
     else:
@@ -86,7 +91,30 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
     result = L.final_result(scored_turns)
     eds_question = round(result["overall_score"] / float(C.MAX_BAND), 4)
 
-    follow_up = "" if is_final else _follow_up_text(graded, step["direction"])
+    # The next question is chosen from THIS turn's grade, which only exists once
+    # the call above has returned — hence a second, much smaller call to write it.
+    # Folding both into one call is what put the ladder a turn behind: the
+    # follow-up had to be written before the answer it was supposed to react to
+    # had been scored.
+    follow_up, next_type_id = "", None
+    if not is_final:
+        # On a repeat request nothing was demonstrated, so re-ask the same type
+        # rather than advancing through the bank.
+        if repeat_request and asked_type_id:
+            instruction, next_type_id = C.follow_up_instruction(
+                step["target_band"], "same",
+                [t for t in used_type_ids if t != asked_type_id],
+                high_band_frame)
+        else:
+            instruction, next_type_id = C.follow_up_instruction(
+                step["target_band"], step["direction"], used_type_ids,
+                high_band_frame)
+        follow_up = _write_follow_up(settings, question_text, prior,
+                                     req.answer_text, theme, instruction,
+                                     repeat_request)
+
+    asked_type = C.question_type_by_id(asked_type_id)
+    next_type = C.question_type_by_id(next_type_id)
     cefr = {
         "turn_number": turn_number,
         "part": "part3" if is_part3 else "part2",
@@ -95,8 +123,15 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
         "turn_band_name": L.band_name(band),
         "target_band": target_band,
         "target_band_name": L.band_name(target_band) if target_band else None,
+        # The PISA question type this turn's answer was responding to, and the
+        # one the next question uses. Stored so the ladder and the type rotation
+        # are both auditable from the evaluation rows alone.
+        "asked_type_id": asked_type_id,
+        "asked_type_label": asked_type.label if asked_type else None,
         "next_target_band": step["target_band"],
         "next_target_band_name": L.band_name(step["target_band"]),
+        "next_type_id": next_type_id,
+        "next_type_label": next_type.label if next_type else None,
         "proven_band": step["proven_band"],
         "direction": step["direction"],
         "repeat_request": repeat_request,
@@ -226,6 +261,9 @@ def _prior_turns(repo, session_id: str) -> List[dict]:
             "scores": cefr.get("scores") or {},
             "turn_band": cefr.get("turn_band"),
             "next_target_band": cefr.get("next_target_band"),
+            # The question type this turn's follow-up used, so the next turn can
+            # avoid repeating it while the student stays at one band.
+            "next_type_id": cefr.get("next_type_id"),
             "proven_band": cefr.get("proven_band"),
             "follow_up": cefr.get("follow_up") or "",
             "repeat_request": bool(cefr.get("repeat_request")),
@@ -279,14 +317,13 @@ def _write_evaluation(repo, turn_id: str, org_id: str, course_id: str,
     repo.conn.commit()
 
 
-# ── Grading + examining (one LLM call) ───────────────────────────────────────
+# ── Grading (call 1: scores only) ────────────────────────────────────────────
 
 def _grade(settings, question_text: str, prior: List[dict], answer_text: str,
-           turn_number: int, target_band: Optional[int], is_part3: bool,
-           is_final: bool, theme: str = "", high_band_frame: str = "") -> dict:
-    """Score this turn on the CEFR grid and write the next follow-up."""
-    system = _build_prompt(question_text, turn_number, target_band, is_part3,
-                           is_final, theme, high_band_frame)
+           turn_number: int, target_band: Optional[int],
+           is_part3: bool, theme: str = "") -> dict:
+    """Score this turn on the CEFR grid. Writes no question."""
+    system = _build_grade_prompt(question_text, turn_number, is_part3, theme)
     user = _build_transcript(question_text, prior, answer_text)
     try:
         return call_bedrock(settings, system, user,
@@ -294,47 +331,36 @@ def _grade(settings, question_text: str, prior: List[dict], answer_text: str,
                             retries=1, timeout=_LLM_TIMEOUT_S)
     except Exception as err:
         # A failed grade must not end the exam. Score the turn at whatever band
-        # the question was aimed at — the least-information guess — and fall back
-        # to a theme-anchored rephrase so the student still has something to
-        # answer. The row records that this happened.
+        # the question was aimed at — the least-information guess — and record
+        # that this happened so nobody reads it as a real judgement.
         logger.warning("CEFR grading failed on turn %d: %s", turn_number, err)
         band = float(target_band or 3)
         fallback = {c: band for c in C.CORE_CRITERIA}
         if is_part3:
             fallback[C.INTERACTION] = band
-        fallback["note"] = f"grading unavailable ({type(err).__name__}); scored at target band"
-        fallback["follow_up"] = (
-            "" if is_final else
-            "Thank you. Can you tell me a little more about that?")
+        fallback["note"] = (f"grading unavailable ({type(err).__name__}); "
+                            "scored at target band")
         fallback["degraded"] = True
         return fallback
 
 
-def _build_prompt(question_text: str, turn_number: int,
-                  target_band: Optional[int], is_part3: bool,
-                  is_final: bool, theme: str = "",
-                  high_band_frame: str = "") -> str:
-    """Assemble the grader/examiner system prompt for this turn."""
+def _build_grade_prompt(question_text: str, turn_number: int, is_part3: bool,
+                        theme: str = "") -> str:
+    """The grader's system prompt: the rubric and nothing about asking questions."""
     subject = f' on the theme "{theme}"' if theme else ""
+    criteria = list(C.CORE_CRITERIA) + ([C.INTERACTION] if is_part3 else [])
     lines = [
-        "You are an Epistemy CEFR speaking examiner and grader running a short "
+        "You are an Epistemy CEFR speaking grader marking one turn of a short "
         f"oral exam{subject}.",
         "",
-        C.EXAMINER_CONDUCT,
-        "",
         f'PART 2 QUESTION (the long turn): "{question_text}"',
-        C.part3_frame(theme, high_band_frame),
         "",
         f"THIS TURN: turn {turn_number} of {C.TOTAL_TURNS} — "
         + (f"Part 3 follow-up {turn_number - C.PART3_FIRST_TURN + 1} of "
            f"{C.TOTAL_TURNS - C.PART3_FIRST_TURN + 1}."
            if is_part3 else "the Part 2 long turn."),
-    ]
-
-    criteria = list(C.CORE_CRITERIA) + ([C.INTERACTION] if is_part3 else [])
-    lines += [
         "",
-        "STEP 1 — Score the student's latest answer on the CEFR grid: "
+        "Score the student's latest answer on the CEFR grid: "
         + ", ".join(criteria) + ".",
         "Each score is 1-6 where 1=A1, 2=A2, 3=B1, 4=B2, 5=C1, 6=C2. Half points "
         "are allowed (e.g. 3.5). The expected working range is 2-5.",
@@ -342,32 +368,13 @@ def _build_prompt(question_text: str, turn_number: int,
     if not is_part3:
         lines.append("Do NOT score interaction on this turn — it is a long turn "
                      "with no exchange to judge.")
-    lines.append(
-        "Judge only this latest answer, from the transcript as given. You are "
-        "reading a speech-to-text transcript, so do not infer pronunciation.")
-
-    if is_final:
-        lines += [
-            "",
-            "STEP 2 — This is the final turn. The exam ends here, so do NOT "
-            "write a follow-up question; return follow_up as an empty string.",
-        ]
-    else:
-        aim = target_band if target_band is not None else None
-        pitch = _pitch_directive(aim)
-        lines += [
-            "",
-            "STEP 2 — Write the next follow-up question." + (
-                f" Aim it at CEFR {L.band_name(aim)}." if aim else ""),
-            pitch,
-        ]
-
     lines += [
+        "Judge only this latest answer, from the transcript as given. You are "
+        "reading a speech-to-text transcript, so do not infer pronunciation.",
         "",
         "If the student is not answering but asking you to repeat, rephrase or "
-        "clarify, set repeat_request to true, still score what little they "
-        "produced, and make your follow-up a rephrase of the SAME question at "
-        "the same level.",
+        "clarify, set repeat_request to true and still score what little they "
+        "produced.",
         "",
         "CEFR GRID (Council of Europe, qualitative aspects of spoken language use):",
         C.CEFR_DESCRIPTORS,
@@ -375,24 +382,70 @@ def _build_prompt(question_text: str, turn_number: int,
         "Respond ONLY with minified JSON, no prose and no code fences:",
         "{" + ", ".join(f'"{c}": number' for c in criteria)
         + ', "repeat_request": bool, "note": "one internal sentence on what '
-          'drove these scores", "follow_up": "the next question, or \\"\\" on '
-          'the final turn"}',
+          'drove these scores"}',
     ]
     return "\n".join(lines)
 
 
-def _pitch_directive(target_band: Optional[int]) -> str:
-    """How to pitch the next question, given the band it is aimed at.
+# ── Examining (call 2: the next question only) ───────────────────────────────
 
-    The direction stored on the *previous* turn is what the ladder decided, but
-    the prompt only needs the absolute target plus a reminder of what raising or
-    lowering demand looks like, so both styles are offered.
+def _write_follow_up(settings, question_text: str, prior: List[dict],
+                     answer_text: str, theme: str, instruction: str,
+                     repeat_request: bool) -> str:
+    """Write the next follow-up for the already-chosen band and question type.
+
+    A separate call because the type depends on the grade that call 1 just
+    produced. Small prompt, small output, and a fast model — the student is
+    waiting on this, and writing one question needs far less of the model than
+    applying the rubric does.
     """
-    if target_band is None:
-        return C.PROBE_STYLE["same"]
-    return (f"{C.PROBE_STYLE['up']}\n{C.PROBE_STYLE['down']}\n"
-            f"Choose whichever pitches the question at "
-            f"{L.band_name(target_band)}.")
+    system = _build_examiner_prompt(question_text, theme, instruction,
+                                    repeat_request)
+    user = _build_transcript(question_text, prior, answer_text)
+    try:
+        out = call_bedrock(settings, system, user, max_tokens=_FOLLOW_UP_MAX_TOKENS,
+                           temperature=0.4, model=_FOLLOW_UP_MODEL,
+                           retries=1, timeout=_LLM_TIMEOUT_S)
+        text = (out.get("follow_up") or "").strip()
+    except Exception as err:
+        logger.warning("CEFR follow-up generation failed: %s", err)
+        text = ""
+    if text:
+        return text
+    # Last resort, deliberately theme-neutral: the model that knows this exam's
+    # topic is the one that just failed.
+    logger.warning("CEFR examiner produced no follow-up; using the generic probe")
+    return "Can you tell me a little more about that?"
+
+
+def _build_examiner_prompt(question_text: str, theme: str, instruction: str,
+                           repeat_request: bool) -> str:
+    """The examiner's system prompt: conduct, the topic frame, and the question to ask."""
+    subject = f' on the theme "{theme}"' if theme else ""
+    lines = [
+        "You are an Epistemy CEFR speaking examiner running a short oral "
+        f"exam{subject}. Write the next question for the student.",
+        "",
+        C.EXAMINER_CONDUCT,
+        "",
+        f'PART 2 QUESTION (the long turn): "{question_text}"',
+        C.part3_frame(theme),
+        "",
+        instruction,
+    ]
+    if repeat_request:
+        lines += [
+            "",
+            "The student did not answer — they asked you to repeat or rephrase. "
+            "Re-ask the SAME question in simpler words. Do not move on and do "
+            "not change the question type.",
+        ]
+    lines += [
+        "",
+        "Respond ONLY with minified JSON, no prose and no code fences:",
+        '{"follow_up": "the question to ask, one or two sentences, speakable aloud"}',
+    ]
+    return "\n".join(lines)
 
 
 def _build_transcript(question_text: str, prior: List[dict],
@@ -405,18 +458,3 @@ def _build_transcript(question_text: str, prior: List[dict],
             parts.append(f"Examiner: {p['follow_up']}")
     parts.append(f"Student's latest answer: {answer_text}")
     return "\n".join(parts)
-
-
-def _follow_up_text(graded: dict, direction: str) -> str:
-    """The follow-up to speak, with a safe default if the grader omitted one."""
-    text = (graded.get("follow_up") or "").strip()
-    if text:
-        return text
-    # Theme-neutral by necessity: the grader is what knows this exam's topic, and
-    # it has just failed to produce a question.
-    logger.warning("CEFR grader returned no follow_up (direction=%s)", direction)
-    if direction == "down":
-        return "Can you give me one example of that?"
-    if direction == "up":
-        return "What might happen if that changed?"
-    return "Can you tell me more about that?"
