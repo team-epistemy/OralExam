@@ -5184,9 +5184,15 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 # the question's EDS union drops that turn.
                 _prefill_session_paths(repo, d["settings"], caller.org_id, qrows)
 
+                # exam_kind/theme let the speaking exam name its topic in the
+                # examiner's spoken welcome. Additive: the Socratic client ignores
+                # both, and a Socratic assignment has neither in its config.
+                cfg = arow[3] if isinstance(arow[3], dict) else _json.loads(arow[3] or "{}")
                 return {
                     "session_id": session_id,
                     "questions": questions,
+                    "exam_kind": cfg.get("exam_kind"),
+                    "theme": cfg.get("cefr_theme") or "",
                 }
             finally:
                 _release_repo(d, repo)

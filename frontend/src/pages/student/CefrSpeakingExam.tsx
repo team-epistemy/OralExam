@@ -49,6 +49,24 @@ const METRIC_DEFS: Array<[string, string]> = [
 ];
 const TOTAL_TURNS = 5;
 
+// The examiner's spoken welcome. Shown on screen and read aloud by the same TTS
+// voice that asks the questions, so the student hears the examiner before the
+// first question rather than meeting the voice mid-test. Returned as paragraphs
+// for layout and joined for speech.
+function welcomeScript(topic: string): string[] {
+  const subject = topic ? topic.toLowerCase() : 'a familiar topic';
+  return [
+    'Hello, and welcome. I’m the examiner for today’s speaking test.',
+    `Over the next ten to fifteen minutes, I’ll ask you questions about ${subject}. ` +
+    'Some will be short. Others will ask you to explain your thinking in more detail, ' +
+    'and I may follow up on what you say.',
+    'There’s no need to rush. Take a moment to think before you answer. ' +
+    'Try to answer in full sentences and say as much as you can.',
+    'This session is being recorded so your responses can be reviewed.',
+    'When you’re ready, click Begin and we’ll start with the first question.',
+  ];
+}
+
 // Flatten the assessor's result into the shape the grader reads. Sent with the
 // answer so Fluency is judged on measured pausing and tempo rather than on a
 // transcript, which has already discarded both. Returns undefined in text mode,
@@ -104,6 +122,11 @@ export default function CefrSpeakingExam() {
   const [error, setError] = useState('');
   const [sessionId, setSessionId] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [topic, setTopic] = useState('');
+  // Browsers block audio that plays without a user gesture, so the welcome may
+  // be refused on arrival. When that happens the student gets a button to play
+  // it rather than silently missing the examiner's instructions.
+  const [welcomeBlocked, setWelcomeBlocked] = useState(false);
   const [history, setHistory] = useState<CefrTurn[]>([]);
   const [answers, setAnswers] = useState<AnswerRecord[]>([]);
   const [captured, setCaptured] = useState<AssessResult | null>(null);
@@ -128,8 +151,11 @@ export default function CefrSpeakingExam() {
   const rafRef = useRef<number>(0);
 
   // ── TTS (ElevenLabs proxy) ───────────────────────────────────────────────
-  const speak = useCallback(async (text: string) => {
-    if (!ttsOn || !text) return;
+  // Returns false when nothing was spoken — TTS unavailable, or the browser
+  // refused playback for want of a user gesture. The welcome needs to know,
+  // because a student who silently never hears it has lost the instructions.
+  const speak = useCallback(async (text: string): Promise<boolean> => {
+    if (!ttsOn || !text) return false;
     try {
       const token = localStorage.getItem('token');
       const resp = await fetch(`${API_BASE_URL}/api/tts`, {
@@ -137,13 +163,20 @@ export default function CefrSpeakingExam() {
         headers: { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ text }),
       });
-      if (!resp.ok) { if (resp.status === 503) setTtsAvailable(false); return; }
+      if (!resp.ok) { if (resp.status === 503) setTtsAvailable(false); return false; }
       setTtsAvailable(true);
       const audio = new Audio(URL.createObjectURL(await resp.blob()));
       audioRef.current?.pause();
       audioRef.current = audio;
-      audio.play().catch(() => {});
-    } catch { /* silent */ }
+      try {
+        await audio.play();
+        return true;
+      } catch {
+        return false;      // autoplay refused
+      }
+    } catch {
+      return false;
+    }
   }, [ttsOn]);
   const stopSpeech = useCallback(() => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } }, []);
 
@@ -285,6 +318,7 @@ export default function CefrSpeakingExam() {
         if (cancelled) return;
         setSessionId(res.session_id);
         setPrompt(res.questions[0]?.text || 'Please speak on the topic.');
+        setTopic(res.theme || '');
         setPhase('ready');
       })
       .catch((e) => { if (!cancelled) { setError(e?.message || 'Could not start the exam.'); setPhase('error'); } });
@@ -292,7 +326,19 @@ export default function CefrSpeakingExam() {
   }, [assignmentId]);
   useEffect(() => () => { stopSpeech(); recStreamRef.current?.getTracks().forEach((t) => t.stop()); }, [stopSpeech]);
 
+  // Read the welcome aloud once the session is ready. Spoken by the same voice
+  // that asks the questions, so the examiner is established before turn 1.
+  const spokenWelcomeRef = useRef(false);
+  useEffect(() => {
+    if (phase !== 'ready' || spokenWelcomeRef.current) return;
+    spokenWelcomeRef.current = true;
+    speak(welcomeScript(topic).join(' ')).then((ok) => setWelcomeBlocked(!ok));
+  }, [phase, topic, speak]);
+
   const begin = async () => {
+    // Cut the welcome off cleanly: the student clicked Begin, so the examiner
+    // must not still be reading the instructions over the first question.
+    stopSpeech();
     try { await post('/api/speech/token'); setAzureMode(true); } catch { setAzureMode(false); }
     setPhase('taking');
     speak(prompt);
@@ -350,6 +396,27 @@ export default function CefrSpeakingExam() {
   if (phase === 'ready') return (
     <div className="max-w-2xl mx-auto p-6 space-y-5">
       <h1 className="text-2xl font-bold text-gray-900">CEFR Speaking Test</h1>
+
+      {/* The examiner's welcome, displayed and spoken together. */}
+      <div className="bg-white rounded-xl border-2 border-blue-200 p-6 space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="inline-flex items-center gap-2 text-xs uppercase tracking-wide text-blue-600">
+            <Volume2 className="w-3.5 h-3.5" /> The examiner
+          </h2>
+          {welcomeBlocked && ttsAvailable && (
+            <button
+              onClick={() => speak(welcomeScript(topic).join(' ')).then((ok) => setWelcomeBlocked(!ok))}
+              className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-50"
+            >
+              <PlayCircle className="w-3.5 h-3.5" /> Play instructions
+            </button>
+          )}
+        </div>
+        {welcomeScript(topic).map((para, i) => (
+          <p key={i} className="text-[15px] leading-relaxed text-gray-800">{para}</p>
+        ))}
+      </div>
+
       <div className="bg-white rounded-xl border-2 border-gray-200 p-5 space-y-3">
         <h2 className="text-xs uppercase tracking-wide text-gray-500">How this works</h2>
         <p className="text-sm text-gray-700">
@@ -365,7 +432,7 @@ export default function CefrSpeakingExam() {
         <p className="text-xs text-gray-400 pt-1">Pronunciation is also shown for reference but does not set your CEFR level.</p>
       </div>
       <button onClick={begin} className="inline-flex items-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">
-        <PlayCircle className="w-5 h-5" /> Start speaking test
+        <PlayCircle className="w-5 h-5" /> Begin
       </button>
     </div>
   );

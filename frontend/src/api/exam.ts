@@ -11,6 +11,10 @@ export interface ExamQuestion {
 export interface StartExamResponse {
   session_id: string;
   questions: ExamQuestion[];
+  // Set only for a CEFR speaking assignment; the examiner's spoken welcome names
+  // the theme, so the student hears what the test is about before it starts.
+  exam_kind?: string | null;
+  theme?: string;
 }
 
 export interface EDSComponents {
