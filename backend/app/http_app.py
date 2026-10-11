@@ -5831,10 +5831,98 @@ class GradeUpsertRequest(BaseModel):
     comment: Optional[str] = Field(default=None, max_length=5000)
 
 
+_CEFR_DIMENSIONS = {"overall", "range", "accuracy", "fluency", "coherence", "interaction"}
+_CEFR_BANDS = {"A1", "A2", "B1", "B2", "C1", "C2"}
+
+
+class CefrCalibrationRequest(BaseModel):
+    """Upsert one rater's band override for a turn + CEFR dimension."""
+    session_id: str
+    turn_number: int = Field(ge=1, le=20)
+    dimension: str
+    human_band: str
+    machine_band: Optional[str] = None
+
+
 def _register_evaluation(app: FastAPI, deps) -> None:
     """Evaluation and grading endpoints with real DB and Bedrock implementations."""
     import json as _json, uuid as _uuid
     from datetime import datetime, timezone
+
+    # ── CEFR per-dimension calibration (speaking exam) ────────────────────
+    @app.post(R.CEFR_CALIBRATION)
+    def upsert_cefr_calibration(
+        req: CefrCalibrationRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Save (upsert) a rater's per-dimension CEFR band override for one turn."""
+        if req.dimension not in _CEFR_DIMENSIONS:
+            raise HTTPException(status_code=400, detail=f"dimension must be one of {sorted(_CEFR_DIMENSIONS)}")
+        if req.human_band not in _CEFR_BANDS:
+            raise HTTPException(status_code=400, detail=f"human_band must be one of {sorted(_CEFR_BANDS)}")
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.cefr_calibration')")
+                    if cur.fetchone()[0] is None:
+                        raise HTTPException(status_code=503, detail="calibration not available — run migration_027")
+                    cur.execute(
+                        """INSERT INTO cefr_calibration
+                               (org_id, session_id, turn_number, dimension, machine_band, human_band, rater_id)
+                           VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s)
+                           ON CONFLICT (session_id, turn_number, dimension, rater_id)
+                           DO UPDATE SET human_band = EXCLUDED.human_band,
+                                         machine_band = EXCLUDED.machine_band,
+                                         updated_at = NOW()""",
+                        (caller.org_id, req.session_id, req.turn_number, req.dimension,
+                         req.machine_band, req.human_band, caller.user_id),
+                    )
+                repo.conn.commit()
+                return {"status": "ok"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.CEFR_CALIBRATION)
+    def list_cefr_calibration(
+        session_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """This rater's saved band overrides for a session (to prefill the transcript)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.cefr_calibration')")
+                    if cur.fetchone()[0] is None:
+                        return {"overrides": []}
+                    cur.execute(
+                        """SELECT turn_number, dimension, machine_band, human_band
+                           FROM cefr_calibration
+                           WHERE session_id = %s::uuid AND org_id = %s::uuid AND rater_id = %s""",
+                        (session_id, caller.org_id, caller.user_id),
+                    )
+                    rows = cur.fetchall()
+                return {"overrides": [
+                    {"turn_number": r[0], "dimension": r[1], "machine_band": r[2], "human_band": r[3]}
+                    for r in rows]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
 
     # ── GET /api/evaluations/{turn_id} ────────────────────────────────────
     @app.get(R.EVALUATION_GET)

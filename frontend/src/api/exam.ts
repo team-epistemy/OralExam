@@ -57,6 +57,25 @@ export interface AnswerResponse {
   cefr?: CefrTurn; // present only for the communication (CEFR speaking) exam
 }
 
+// Human per-dimension band overrides for the CEFR speaking exam (calibration).
+export interface CefrOverride {
+  turn_number: number;
+  dimension: string;
+  machine_band: string | null;
+  human_band: string;
+}
+
+export async function getCefrCalibration(sessionId: string): Promise<CefrOverride[]> {
+  const r = await get<{ overrides: CefrOverride[] }>(`/api/cefr/calibration?session_id=${encodeURIComponent(sessionId)}`);
+  return r.overrides || [];
+}
+
+export async function saveCefrCalibration(body: {
+  session_id: string; turn_number: number; dimension: string; human_band: string; machine_band?: string | null;
+}): Promise<void> {
+  await post('/api/cefr/calibration', body);
+}
+
 export interface SessionStatus {
   session_id: string;
   status: 'active' | 'completed';

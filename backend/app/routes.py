@@ -58,6 +58,7 @@ EXAM_ASSIGN = "/api/courses/{course_id}/exams/assign"
 # ── Text-to-speech (ElevenLabs proxy) ────────────────────────────────────────
 TTS = "/api/tts"
 SPEECH_TOKEN = "/api/speech/token"   # POST: mint a short-lived Azure Speech token (CEFR speaking)
+CEFR_CALIBRATION = "/api/cefr/calibration"   # POST upsert / GET list: human per-dimension band overrides
 
 # ── M6 Delivery routes ──────────────────────────────────────────────────────
 ASSIGNMENTS_LIST = "/api/courses/{course_id}/assignments"

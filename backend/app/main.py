@@ -190,6 +190,12 @@ def migrate() -> None:
             print(f"applying {migration_026.name} ...")
             cur.execute(migration_026.read_text())
 
+        # Always apply migration_027 (CEFR per-dimension calibration; idempotent)
+        migration_027 = db_dir / "migration_027_cefr_calibration.sql"
+        if migration_027.exists():
+            print(f"applying {migration_027.name} ...")
+            cur.execute(migration_027.read_text())
+
     conn.commit()
     print("all schemas applied")
 

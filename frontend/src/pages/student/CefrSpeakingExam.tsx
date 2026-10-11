@@ -1,23 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Mic, Square, PlayCircle, Send, Volume2, VolumeX, Loader2 } from 'lucide-react';
+import { Mic, Square, PlayCircle, Send, Volume2, VolumeX, Loader2, RotateCcw } from 'lucide-react';
 import { API_BASE_URL } from '../../config';
 import { post } from '../../api/client';
-import { startExamSession, submitAnswer, completeSession } from '../../api/exam';
+import { startExamSession, submitAnswer, completeSession, getCefrCalibration, saveCefrCalibration } from '../../api/exam';
 import type { CefrTurn, CefrBandName } from '../../api/exam';
 import { createAssessor } from '../../speech/azureAssessor';
 import type { Assessor, AssessResult } from '../../speech/azureAssessor';
 
 // Dedicated CEFR speaking-test flow. Reuses the tested backend communication/
-// engine (Table-3 grading + A1-C2 ladder). Phase 2: Azure captures the answer
-// (real transcript + word timings + pronunciation); Anthropic keeps grading the
-// CEFR grid. Pronunciation/acoustic metrics are DISPLAY-ONLY — never folded into
-// the CEFR band or the ladder (accent-bias safeguard). Falls back to browser
-// Web Speech (text only) when the Azure speech token endpoint isn't configured.
+// engine (Table-3 grading + A1-C2 ladder). Capture is record-only (Azure
+// transcription; Web-Speech text fallback when Azure isn't configured) — no
+// typing. Pronunciation/acoustic metrics are display-only (never fold into the
+// CEFR band). The final transcript lists every prompt with response, pauses,
+// per-dimension scores, a human calibration control, the band, and the rationale.
 
 type Phase = 'loading' | 'ready' | 'taking' | 'done' | 'error';
-type Role = 'evaluator' | 'student';
-interface ThreadTurn { role: Role; text: string; cefr?: CefrTurn; pron?: AssessResult; audioUrl?: string }
+interface AnswerRecord {
+  turnNumber: number;
+  prompt: string;
+  pron: AssessResult | null; // transcript + words/pauses + pronunciation
+  cefr: CefrTurn | null;
+  feedback: string;          // grader's one-line "why this score"
+  audioUrl?: string;
+}
 
 const BAND_NAMES: CefrBandName[] = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
 const numToBand = (n: number | null | undefined): CefrBandName | '—' =>
@@ -29,18 +35,18 @@ function bandClasses(band: string | null | undefined): string {
   if (band === 'B1') return 'bg-blue-50 text-blue-700 border-blue-200';
   return 'bg-amber-50 text-amber-700 border-amber-200';
 }
-function scoreClasses(n: number | null | undefined): string {
-  if (n == null) return 'bg-gray-100 text-gray-500 border-gray-200';
-  if (n >= 80) return 'bg-green-50 text-green-700 border-green-200';
-  if (n >= 60) return 'bg-amber-50 text-amber-700 border-amber-200';
-  return 'bg-red-50 text-red-700 border-red-200';
-}
-
 const DIRECTION_LABEL: Record<CefrTurn['direction'], string> = { up: '↑ harder', same: '→ holding', down: '↓ easier' };
 const CRITERIA: Array<keyof CefrTurn['scores']> = ['range', 'accuracy', 'fluency', 'coherence', 'interaction'];
 const CRITERION_LABEL: Record<string, string> = {
   range: 'Range', accuracy: 'Accuracy', fluency: 'Fluency', coherence: 'Coherence', interaction: 'Interaction',
 };
+const METRIC_DEFS: Array<[string, string]> = [
+  ['Range', 'The variety of vocabulary and grammar you draw on.'],
+  ['Accuracy', 'How grammatically correct your speech is.'],
+  ['Fluency', 'How smoothly you speak — your pace and pausing.'],
+  ['Coherence', 'How well-organised and connected your ideas are.'],
+  ['Interaction', 'How you handle the back-and-forth (assessed on the follow-ups).'],
+];
 const TOTAL_TURNS = 5;
 
 // MediaRecorder WebM has no duration header, so <audio>.duration is Infinity and
@@ -57,6 +63,21 @@ function AudioReplay({ src }: { src: string }) {
   return <audio src={src} controls preload="auto" onLoadedMetadata={onMeta} className="h-8 mt-1" />;
 }
 
+// Response with inline pause markers (#6c).
+function ResponseWithPauses({ pron }: { pron: AssessResult | null }) {
+  if (!pron || !pron.words.length) return <p className="text-sm text-gray-500 italic">No word timings.</p>;
+  return (
+    <p className="text-sm leading-7">
+      {pron.words.map((w, i) => (
+        <span key={i}>
+          {w.gapBefore > 0 && <span className={`mx-1 px-1 rounded text-[11px] ${w.gapBefore >= 1 ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-500'}`}>⏸ {w.gapBefore}s</span>}
+          {w.word}{' '}
+        </span>
+      ))}
+    </p>
+  );
+}
+
 export default function CefrSpeakingExam() {
   const { assignmentId } = useParams<{ assignmentId: string }>();
   const navigate = useNavigate();
@@ -65,26 +86,26 @@ export default function CefrSpeakingExam() {
   const [error, setError] = useState('');
   const [sessionId, setSessionId] = useState('');
   const [prompt, setPrompt] = useState('');
-  const [thread, setThread] = useState<ThreadTurn[]>([]);
   const [history, setHistory] = useState<CefrTurn[]>([]);
-  const [draft, setDraft] = useState('');
+  const [answers, setAnswers] = useState<AnswerRecord[]>([]);
+  const [captured, setCaptured] = useState<AssessResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [recording, setRecording] = useState(false);
   const [liveInterim, setLiveInterim] = useState('');
   const [azureMode, setAzureMode] = useState(false);
-  const [lastPron, setLastPron] = useState<AssessResult | null>(null);
   const [ttsOn, setTtsOn] = useState(true);
   const [ttsAvailable, setTtsAvailable] = useState(true);
   const [micNotice, setMicNotice] = useState<string | null>(null);
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const assessorRef = useRef<Assessor | null>(null);
   const recognitionRef = useRef<any>(null);
+  const webTextRef = useRef('');
   const mediaRecRef = useRef<MediaRecorder | null>(null);
   const recChunksRef = useRef<Blob[]>([]);
   const recStreamRef = useRef<MediaStream | null>(null);
   const pendingAudioUrl = useRef<string | null>(null);
-  const threadEndRef = useRef<HTMLDivElement | null>(null);
 
   // ── TTS (ElevenLabs proxy) ───────────────────────────────────────────────
   const speak = useCallback(async (text: string) => {
@@ -106,7 +127,7 @@ export default function CefrSpeakingExam() {
   }, [ttsOn]);
   const stopSpeech = useCallback(() => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } }, []);
 
-  // ── Local audio capture for replay (session-only, parallel to recognition) ─
+  // ── Local audio capture for replay (session-only) ──────────────────────────
   const startLocalRecorder = useCallback(async () => {
     recChunksRef.current = [];
     try {
@@ -130,33 +151,31 @@ export default function CefrSpeakingExam() {
     mr.stop();
   }), []);
 
-  // ── Web Speech fallback (used only when Azure isn't configured) ────────────
+  // ── Web Speech fallback (text only; used when Azure isn't configured) ──────
   const startWebSpeech = () => {
     const SR = window as unknown as { SpeechRecognition?: new () => any; webkitSpeechRecognition?: new () => any };
     const Ctor = SR.SpeechRecognition || SR.webkitSpeechRecognition;
-    if (!Ctor) { setMicNotice("Voice input isn't supported here — type your answer instead."); return false; }
+    if (!Ctor) { setMicNotice("Voice input isn't supported in this browser — try Chrome, Edge, or Safari."); return false; }
     const rec: any = new Ctor();
     rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
-    let base = draft;
+    webTextRef.current = '';
     rec.onresult = (e: any) => {
       let interim = '', finalT = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const t = e.results[i][0].transcript;
         if (e.results[i].isFinal) finalT += t; else interim += t;
       }
-      if (finalT) base = (base ? base + ' ' : '') + finalT.trim();
-      setDraft((base + (interim ? ' ' + interim : '')).trim());
+      if (finalT) webTextRef.current = (webTextRef.current ? webTextRef.current + ' ' : '') + finalT.trim();
+      setLiveInterim((webTextRef.current + (interim ? ' ' + interim : '')).trim());
     };
-    rec.onerror = () => { setRecording(false); setMicNotice('Voice input had a problem — type your answer instead.'); };
+    rec.onerror = () => { setRecording(false); setMicNotice('Voice input had a problem — press Record to try again.'); };
     recognitionRef.current = rec;
     try { rec.start(); return true; } catch { setMicNotice('Could not start the microphone.'); return false; }
   };
 
-  // ── Unified record start/stop ──────────────────────────────────────────────
+  // ── Record start/stop ──────────────────────────────────────────────────────
   const startRecording = async () => {
-    stopSpeech();
-    setMicNotice(null);
-    setLiveInterim('');
+    stopSpeech(); setMicNotice(null); setLiveInterim(''); setCaptured(null);
     if (pendingAudioUrl.current) { URL.revokeObjectURL(pendingAudioUrl.current); pendingAudioUrl.current = null; }
     if (azureMode) {
       try {
@@ -169,32 +188,34 @@ export default function CefrSpeakingExam() {
         assessorRef.current = assessor;
         await startLocalRecorder();
         setRecording(true);
-      } catch (e: any) {
-        setMicNotice(`Could not start Azure speech (${e?.message || 'error'}). Type your answer instead.`);
-      }
+      } catch (e: any) { setMicNotice(`Could not start recording (${e?.message || 'error'}). Press Record to try again.`); }
     } else {
       if (startWebSpeech()) { await startLocalRecorder(); setRecording(true); }
     }
   };
 
   const stopRecording = async () => {
-    setRecording(false);
-    setLiveInterim('');
+    setRecording(false); setLiveInterim('');
     pendingAudioUrl.current = await stopLocalRecorder();
     if (azureMode && assessorRef.current) {
       try {
         const res = await assessorRef.current.stop();
         assessorRef.current = null;
-        setLastPron(res);
-        if (res.transcript) setDraft((d) => (d ? d + ' ' : '') + res.transcript);
-      } catch (e: any) { setMicNotice(`Scoring the audio failed: ${e?.message || 'error'}`); }
+        if (res.transcript) setCaptured(res);
+        else setMicNotice('No speech was captured — press Record to try again.');
+      } catch (e: any) { setMicNotice(`Transcription failed (${e?.message || 'error'}) — press Record to try again.`); }
     } else if (recognitionRef.current) {
       try { recognitionRef.current.onend = null; recognitionRef.current.stop(); } catch { /* ok */ }
       recognitionRef.current = null;
+      const text = webTextRef.current.trim();
+      if (text) setCaptured({ transcript: text, scores: { accuracy: null, fluency: null, completeness: null, pron: null, prosody: null },
+        words: text.split(/\s+/).map((w) => ({ word: w, gapBefore: 0 })), prosodyAvailable: false,
+        metrics: { wordCount: text.split(/\s+/).length, durationSec: null, speechRateWpm: null, articulationRateWpm: null, pauseCount: 0, longPauseCount: 0, meanPauseSec: 0, pauseRatio: null } });
+      else setMicNotice('No speech was captured — press Record to try again.');
     }
   };
 
-  // ── Session start ──────────────────────────────────────────────────────────
+  // ── Session ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!assignmentId) return;
     let cancelled = false;
@@ -208,49 +229,51 @@ export default function CefrSpeakingExam() {
       .catch((e) => { if (!cancelled) { setError(e?.message || 'Could not start the exam.'); setPhase('error'); } });
     return () => { cancelled = true; };
   }, [assignmentId]);
-
   useEffect(() => () => { stopSpeech(); recStreamRef.current?.getTracks().forEach((t) => t.stop()); }, [stopSpeech]);
-  useEffect(() => { threadEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [thread]);
 
   const begin = async () => {
-    // Probe whether Azure speech is configured; fall back to Web Speech if not.
-    try { await post('/api/speech/token'); setAzureMode(true); }
-    catch { setAzureMode(false); }
-    setThread([{ role: 'evaluator', text: prompt }]);
+    try { await post('/api/speech/token'); setAzureMode(true); } catch { setAzureMode(false); }
     setPhase('taking');
     speak(prompt);
   };
 
   const submit = async () => {
-    const answer = draft.trim();
-    if (!answer || submitting || recording) return;
+    if (!captured?.transcript || submitting || recording) return;
     stopSpeech();
     setSubmitting(true);
-    const pron = lastPron;
+    const answer = captured.transcript;
+    const pron = captured;
     const audioUrl = pendingAudioUrl.current ?? undefined;
+    const thisPrompt = prompt;
     pendingAudioUrl.current = null;
-    setThread((t) => [...t, { role: 'student', text: answer, pron: pron ?? undefined, audioUrl }]);
-    setDraft('');
-    setLastPron(null);
+    setCaptured(null);
     try {
       const resp = await submitAnswer(sessionId, 0, answer);
       if (resp.cefr) setHistory((h) => [...h, resp.cefr!]);
+      setAnswers((a) => [...a, {
+        turnNumber: resp.cefr?.turn_number ?? a.length + 1,
+        prompt: thisPrompt, pron, cefr: resp.cefr ?? null, feedback: resp.feedback || '', audioUrl,
+      }]);
       if (!resp.probe) {
         try { await completeSession(sessionId); } catch { /* best-effort */ }
+        try { const ov = await getCefrCalibration(sessionId); setOverrides(Object.fromEntries(ov.map((o) => [`${o.turn_number}:${o.dimension}`, o.human_band]))); } catch { /* ignore */ }
         setPhase('done');
       } else {
-        setThread((t) => [...t, { role: 'evaluator', text: resp.probe, cefr: resp.cefr }]);
         setPrompt(resp.probe);
         speak(resp.probe);
       }
-    } catch (e: any) {
-      setError(e?.message || 'Could not submit your answer.');
-      setPhase('error');
-    } finally { setSubmitting(false); }
+    } catch (e: any) { setError(e?.message || 'Could not submit your answer.'); setPhase('error'); }
+    finally { setSubmitting(false); }
+  };
+
+  const saveOverride = async (turnNumber: number, dimension: string, human: string, machine: string | null) => {
+    setOverrides((o) => ({ ...o, [`${turnNumber}:${dimension}`]: human }));
+    try { await saveCefrCalibration({ session_id: sessionId, turn_number: turnNumber, dimension, human_band: human, machine_band: machine }); }
+    catch { setMicNotice('Could not save the calibration — check your connection.'); }
   };
 
   const latest = history[history.length - 1];
-  const turnNo = thread.filter((t) => t.role === 'student').length;
+  const turnNo = answers.length;
 
   // ── Render ───────────────────────────────────────────────────────────────
   if (phase === 'loading') return <div className="flex items-center gap-2 text-gray-500 p-8"><Loader2 className="w-5 h-5 animate-spin" /> Loading your speaking test…</div>;
@@ -260,24 +283,32 @@ export default function CefrSpeakingExam() {
       <button onClick={() => navigate(-1)} className="px-4 py-2 border border-gray-300 rounded-lg text-sm">Go back</button>
     </div>
   );
+
+  // Screen 1 — instructions + metric definitions only (no prompt).
   if (phase === 'ready') return (
     <div className="max-w-2xl mx-auto p-6 space-y-5">
       <h1 className="text-2xl font-bold text-gray-900">CEFR Speaking Test</h1>
       <div className="bg-white rounded-xl border-2 border-gray-200 p-5 space-y-3">
         <h2 className="text-xs uppercase tracking-wide text-gray-500">How this works</h2>
         <p className="text-sm text-gray-700">
-          You'll give one longer answer, then four short follow-ups that adapt up or down the CEFR scale.
-          Each answer is graded on the CEFR grid — <b>Range, Accuracy, Fluency, Coherence</b> and (on follow-ups) <b>Interaction</b>.
-          Speak your answer (recorded and transcribed) or type it.
+          You'll answer one longer question, then four short follow-ups that adapt up or down the CEFR scale based on how you do.
+          Each answer is <b>recorded and transcribed</b> (there's no typing) and graded on the CEFR grid below.
         </p>
-        <p className="text-sm text-gray-500">Opening question:</p>
-        <p className="text-base text-gray-900 font-medium">{prompt}</p>
+        <h2 className="text-xs uppercase tracking-wide text-gray-500 pt-2">What's assessed</h2>
+        <dl className="space-y-1.5">
+          {METRIC_DEFS.map(([k, v]) => (
+            <div key={k} className="text-sm"><dt className="inline font-semibold text-gray-900">{k}: </dt><dd className="inline text-gray-600">{v}</dd></div>
+          ))}
+        </dl>
+        <p className="text-xs text-gray-400 pt-1">Pronunciation is also shown for reference but does not set your CEFR level.</p>
       </div>
       <button onClick={begin} className="inline-flex items-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">
         <PlayCircle className="w-5 h-5" /> Start speaking test
       </button>
     </div>
   );
+
+  // Done — detailed per-prompt transcript (#6).
   if (phase === 'done') {
     const final = history[history.length - 1];
     return (
@@ -287,10 +318,7 @@ export default function CefrSpeakingExam() {
           <div className="bg-white rounded-xl border-2 border-gray-200 p-5">
             <div className="flex items-center gap-4">
               <div className={`text-4xl font-bold px-5 py-3 rounded-xl border ${bandClasses(final.overall_band)}`}>{final.overall_band}</div>
-              <div className="text-sm text-gray-600">
-                <div>Overall CEFR (holistic across the exam)</div>
-                <div className="text-gray-400">Averaged over {history.length} graded answers.</div>
-              </div>
+              <div className="text-sm text-gray-600"><div>Overall CEFR (averaged across {answers.length} answers)</div></div>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-4">
               {CRITERIA.map((c) => (
@@ -300,33 +328,66 @@ export default function CefrSpeakingExam() {
                 </div>
               ))}
             </div>
-            <p className="text-xs text-gray-400 mt-3">
-              CEFR graded from the transcript (Range/Accuracy/Fluency/Coherence/Interaction). Pronunciation is shown per answer for reference but does not set the CEFR level.
-            </p>
           </div>
         )}
-        <div className="bg-white rounded-xl border-2 border-gray-200 p-5">
-          <h2 className="text-sm font-semibold text-gray-900 mb-3">Transcript</h2>
-          <div className="space-y-3">
-            {thread.map((t, i) => (
-              <div key={i}>
-                <div className="flex items-center gap-2">
-                  <span className={`text-[11px] font-semibold ${t.role === 'evaluator' ? 'text-blue-600' : 'text-gray-500'}`}>{t.role === 'evaluator' ? 'Examiner' : 'You'}</span>
-                  {t.cefr && <span className={`text-[11px] border rounded-full px-2 ${bandClasses(t.cefr.turn_band_name)}`}>{t.cefr.turn_band_name} · {DIRECTION_LABEL[t.cefr.direction]}</span>}
-                  {t.pron?.scores.pron != null && <span className={`text-[11px] border rounded-full px-2 ${scoreClasses(t.pron.scores.pron)}`}>pron {Math.round(t.pron.scores.pron)}</span>}
-                </div>
-                <p className="text-sm text-gray-800">{t.text}</p>
-                {t.audioUrl && <AudioReplay src={t.audioUrl} />}
+
+        {answers.map((a, i) => {
+          const sc = a.cefr?.scores ?? {};
+          const machineFor = (dim: string): string => dim === 'overall'
+            ? (a.cefr?.turn_band_name ?? '—')
+            : (numToBand((sc as any)[dim]) ?? '—');
+          return (
+            <div key={i} className="bg-white rounded-xl border-2 border-gray-200 p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-gray-900">Prompt {i + 1}</h2>
+                <span className={`text-sm font-bold border rounded-lg px-3 py-1 ${bandClasses(a.cefr?.turn_band_name)}`}>Band {a.cefr?.turn_band_name ?? '—'}</span>
               </div>
-            ))}
-          </div>
-        </div>
+              <p className="text-sm text-blue-700">{a.prompt}</p>
+
+              <div><div className="text-[11px] uppercase tracking-wide text-gray-400 mb-0.5">Response</div>
+                <p className="text-sm text-gray-800">{a.pron?.transcript || '(no speech captured)'}</p></div>
+
+              <div><div className="text-[11px] uppercase tracking-wide text-gray-400 mb-0.5">Response with pauses</div>
+                <ResponseWithPauses pron={a.pron} /></div>
+
+              <div><div className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Scores &amp; calibration</div>
+                <div className="space-y-1">
+                  {(['overall', ...CRITERIA] as string[]).map((dim) => {
+                    const machine = machineFor(dim);
+                    const key = `${a.turnNumber}:${dim}`;
+                    const human = overrides[key] ?? '';
+                    const na = dim !== 'overall' && (sc as any)[dim] == null;
+                    return (
+                      <div key={dim} className="flex items-center gap-2 text-sm">
+                        <span className="w-24 text-gray-600">{dim === 'overall' ? 'Overall' : CRITERION_LABEL[dim]}</span>
+                        <span className={`text-xs font-semibold border rounded px-2 ${bandClasses(na ? '—' : machine)}`}>{na ? 'n/a' : machine}</span>
+                        <span className="text-[11px] text-gray-400">machine</span>
+                        <span className="ml-auto text-[11px] text-gray-400">your rating:</span>
+                        <select value={human} disabled={na}
+                          onChange={(e) => saveOverride(a.turnNumber, dim, e.target.value, na ? null : machine)}
+                          className="text-xs border border-gray-300 rounded px-1 py-0.5 bg-white disabled:opacity-40">
+                          <option value="">—</option>
+                          {BAND_NAMES.map((b) => <option key={b}>{b}</option>)}
+                        </select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {a.feedback && <div><div className="text-[11px] uppercase tracking-wide text-gray-400 mb-0.5">Why this score</div>
+                <p className="text-sm text-gray-600 italic">{a.feedback}</p></div>}
+
+              {a.audioUrl && <div><div className="text-[11px] uppercase tracking-wide text-gray-400">Recording</div><AudioReplay src={a.audioUrl} /></div>}
+            </div>
+          );
+        })}
         <button onClick={() => navigate(`/student/results/${assignmentId}`)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">View results</button>
       </div>
     );
   }
 
-  // phase === 'taking'
+  // Screen 2+ — taking: prompt + record-only capture + read-only transcript.
   return (
     <div className="max-w-5xl mx-auto p-4">
       <div className="bg-blue-600 text-white rounded-t-xl px-5 py-3 flex items-center justify-between">
@@ -334,88 +395,75 @@ export default function CefrSpeakingExam() {
         <span className="text-sm text-blue-100">Turn {Math.min(turnNo + 1, TOTAL_TURNS)} of {TOTAL_TURNS}{azureMode ? '' : ' · text mode'}</span>
       </div>
       <div className="flex gap-5 bg-white rounded-b-xl border-2 border-t-0 border-gray-200 p-5">
-        <div className="flex-1 min-w-0">
-          <div className="space-y-3 max-h-[46vh] overflow-y-auto pr-1">
-            {thread.map((t, i) => (
-              <div key={i} className={t.role === 'evaluator' ? 'text-left' : 'text-right'}>
-                <span className={`inline-block max-w-[90%] rounded-2xl px-4 py-2 text-sm ${t.role === 'evaluator' ? 'bg-gray-100 text-gray-900' : 'bg-blue-600 text-white'}`}>{t.text}</span>
-              </div>
-            ))}
-            {recording && liveInterim && <div className="text-left text-xs text-gray-400 italic">{liveInterim}</div>}
-            {submitting && <div className="text-xs text-gray-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Scoring…</div>}
-            <div ref={threadEndRef} />
+        <div className="flex-1 min-w-0 space-y-4">
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Question</div>
+            <p className="text-lg text-gray-900 font-medium">{prompt}</p>
           </div>
 
-          <div className="mt-4 border-t border-gray-100 pt-3">
-            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Record your answer or type it here…" rows={3} disabled={submitting}
-              className="w-full border border-gray-300 rounded-lg p-3 text-sm resize-y focus:outline-none focus:ring-2 focus:ring-blue-500" />
-            {micNotice && <p className="text-xs text-amber-600 mt-1">{micNotice}</p>}
-            <div className="flex items-center gap-2 mt-2">
-              {!recording ? (
-                <button onClick={startRecording} disabled={submitting} className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm border border-gray-300 text-gray-700">
-                  <Mic className="w-4 h-4" /> Record
-                </button>
-              ) : (
-                <button onClick={stopRecording} className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm border border-red-300 bg-red-50 text-red-700">
-                  <Square className="w-4 h-4" /> Stop
-                </button>
-              )}
-              <button onClick={() => { setTtsOn((v) => !v); stopSpeech(); }} title={ttsAvailable ? 'Toggle examiner audio' : 'Audio narration unavailable'}
-                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm border border-gray-300 text-gray-700">
-                {ttsOn && ttsAvailable ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+          {/* Read-only transcription box (appears after the prompt) */}
+          <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 min-h-[5rem]">
+            <div className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Your response</div>
+            {recording ? (
+              <p className="text-sm text-gray-500 italic">{liveInterim || 'Listening…'}</p>
+            ) : captured?.transcript ? (
+              <p className="text-sm text-gray-800">{captured.transcript}</p>
+            ) : (
+              <p className="text-sm text-gray-400">Press Record and speak your answer. Your transcribed response will appear here (you can't edit it).</p>
+            )}
+          </div>
+          {micNotice && <p className="text-xs text-amber-600">{micNotice}</p>}
+
+          <div className="flex items-center gap-2">
+            {!recording ? (
+              <button onClick={startRecording} disabled={submitting} className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm border border-gray-300 text-gray-700">
+                {captured ? <RotateCcw className="w-4 h-4" /> : <Mic className="w-4 h-4" />} {captured ? 'Re-record' : 'Record'}
               </button>
-              <button onClick={submit} disabled={submitting || recording || !draft.trim()}
-                className="ml-auto inline-flex items-center gap-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
-                <Send className="w-4 h-4" /> Submit answer
+            ) : (
+              <button onClick={stopRecording} className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm border border-red-300 bg-red-50 text-red-700">
+                <Square className="w-4 h-4" /> Stop
               </button>
-            </div>
+            )}
+            <button onClick={() => { setTtsOn((v) => !v); stopSpeech(); }} title={ttsAvailable ? 'Toggle examiner audio' : 'Audio unavailable'}
+              className="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm border border-gray-300 text-gray-700">
+              {ttsOn && ttsAvailable ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+            </button>
+            <button onClick={submit} disabled={submitting || recording || !captured?.transcript}
+              className="ml-auto inline-flex items-center gap-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+              {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} Submit answer
+            </button>
           </div>
         </div>
 
-        {/* Right: per-question CEFR scorecard + pronunciation (display-only) */}
+        {/* Live scorecard — "This answer" vs "Running overall" kept distinct (#5 fix) */}
         <aside className="w-64 flex-shrink-0 hidden lg:block border-l border-gray-100 pl-4">
-          <h3 className="text-xs uppercase tracking-wide text-gray-500 mb-2">CEFR scorecard</h3>
           {!latest ? <p className="text-sm text-gray-400">Scores appear after your first answer.</p> : (
-            <div className="space-y-3">
-              <div className={`rounded-xl border px-4 py-3 text-center ${bandClasses(latest.overall_band)}`}>
-                <div className="text-3xl font-bold leading-none">{latest.overall_band}</div>
-                <div className="text-[11px] mt-1">Running overall</div>
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-xs uppercase tracking-wide text-gray-500 mb-1">This answer</h3>
+                <div className="flex items-center justify-between text-xs text-gray-600">
+                  <span>Band <b>{latest.turn_band_name}</b></span><span>{DIRECTION_LABEL[latest.direction]}</span>
+                </div>
+                <div className="space-y-1 mt-1">
+                  {CRITERIA.map((c) => {
+                    const v = latest.scores[c]; const b = v == null ? '—' : numToBand(v);
+                    return (
+                      <div key={c} className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-gray-600">{CRITERION_LABEL[c]}</span>
+                        <span className={`text-xs font-semibold border rounded px-2 ${bandClasses(b)}`}>{b}{v != null ? ` · ${v}` : ''}</span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-              <div className="text-xs text-gray-500 flex items-center justify-between">
-                <span>Last turn: <b>{latest.turn_band_name}</b></span><span>{DIRECTION_LABEL[latest.direction]}</span>
+              <div>
+                <h3 className="text-xs uppercase tracking-wide text-gray-500 mb-1">Running overall</h3>
+                <div className={`rounded-xl border px-4 py-2 text-center ${bandClasses(latest.overall_band)}`}>
+                  <div className="text-2xl font-bold leading-none">{latest.overall_band}</div>
+                  <div className="text-[11px] mt-1">avg across {history.length} answer(s)</div>
+                </div>
+                <p className="text-[11px] text-gray-400 mt-1">Next pitched at <b>{latest.next_target_band_name}</b>.</p>
               </div>
-              <div className="space-y-1">
-                {CRITERIA.map((c) => {
-                  const v = latest.scores[c]; const b = v == null ? '—' : numToBand(v);
-                  return (
-                    <div key={c} className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-gray-600">{CRITERION_LABEL[c]}</span>
-                      <span className={`text-xs font-semibold border rounded px-2 ${bandClasses(b)}`}>{b}{v != null ? ` · ${v}` : ''}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              <p className="text-[11px] text-gray-400">Next follow-up pitched at <b>{latest.next_target_band_name}</b>.</p>
-            </div>
-          )}
-
-          {lastPron && (
-            <div className="mt-4 pt-3 border-t border-gray-100">
-              <h3 className="text-xs uppercase tracking-wide text-gray-500 mb-2">Pronunciation (Azure)</h3>
-              <div className="grid grid-cols-2 gap-1">
-                {([['Accuracy', lastPron.scores.accuracy], ['Fluency', lastPron.scores.fluency], ['Prosody', lastPron.scores.prosody], ['Complete', lastPron.scores.completeness]] as const).map(([l, v]) => (
-                  <div key={l} className={`rounded border px-2 py-1 text-center ${scoreClasses(v)}`}>
-                    <div className="text-sm font-semibold">{v == null ? 'n/a' : Math.round(v)}</div>
-                    <div className="text-[10px]">{l}</div>
-                  </div>
-                ))}
-              </div>
-              <div className="text-[11px] text-gray-500 mt-2 space-y-0.5">
-                {lastPron.metrics.speechRateWpm != null && <div>Speech rate: {lastPron.metrics.speechRateWpm} wpm</div>}
-                {lastPron.metrics.pauseRatio != null && <div>Silence: {lastPron.metrics.pauseRatio}%</div>}
-                <div>Pauses: {lastPron.metrics.pauseCount} ({lastPron.metrics.longPauseCount} long)</div>
-              </div>
-              <p className="text-[11px] text-gray-400 mt-2">Native-similarity, for reference only — not used to set the CEFR level (can penalise legitimate accent variation).</p>
             </div>
           )}
         </aside>

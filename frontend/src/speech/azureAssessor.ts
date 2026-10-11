@@ -27,10 +27,14 @@ export interface SpeechMetrics {
   meanPauseSec: number;
   pauseRatio: number | null; // % of time not speaking
 }
+// Each word plus the silent gap (seconds) immediately before it (0 if none/below
+// the pause threshold) — lets the transcript show inline pause markers.
+export interface TimedWord { word: string; gapBefore: number }
 export interface AssessResult {
   transcript: string;
   scores: PronScores;
   metrics: SpeechMetrics;
+  words: TimedWord[];
   prosodyAvailable: boolean;
 }
 interface Word { word: string; start: number; duration: number; accuracy: number | null }
@@ -81,10 +85,15 @@ function aggregate(phrases: (Phrase | null)[]): AssessResult {
     scores[k] = round1(weightedMean(valid, k));
   });
   const pauses: number[] = [];
-  for (let i = 1; i < words.length; i++) {
-    const prevEnd = words[i - 1].start + words[i - 1].duration;
-    const gap = words[i].start - prevEnd;
-    if (gap >= PAUSE_MIN_SEC) pauses.push(gap);
+  const timedWords: { word: string; gapBefore: number }[] = [];
+  for (let i = 0; i < words.length; i++) {
+    let gapBefore = 0;
+    if (i > 0) {
+      const prevEnd = words[i - 1].start + words[i - 1].duration;
+      const gap = words[i].start - prevEnd;
+      if (gap >= PAUSE_MIN_SEC) { pauses.push(gap); gapBefore = round1(gap)!; }
+    }
+    timedWords.push({ word: words[i].word, gapBefore });
   }
   const speakingTime = words.reduce((s, w) => s + w.duration, 0);
   const span = words.length ? words[words.length - 1].start + words[words.length - 1].duration - words[0].start : 0;
@@ -92,6 +101,7 @@ function aggregate(phrases: (Phrase | null)[]): AssessResult {
   return {
     transcript: valid.map((p) => p.text).join(' ').trim(),
     scores,
+    words: timedWords,
     prosodyAvailable: scores.prosody != null,
     metrics: {
       wordCount: words.length,
