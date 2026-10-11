@@ -2178,6 +2178,7 @@ def _register_tts(app: FastAPI, deps) -> None:
     """ElevenLabs TTS proxy — keeps the key server-side; 503 when not configured."""
     from starlette.responses import Response
     from backend import tts_helper
+    from backend import azure_speech
 
     @app.post(R.TTS)
     def synthesize_speech(
@@ -2191,6 +2192,20 @@ def _register_tts(app: FastAPI, deps) -> None:
             raise HTTPException(status_code=503, detail="TTS is not configured")
         return Response(content=audio, media_type="audio/mpeg",
                         headers={"Cache-Control": "no-store"})
+
+    @app.post(R.SPEECH_TOKEN)
+    def speech_token(
+        x_user_id: str = Header("student"),
+        x_role: str = Header("student"),
+    ):
+        """Mint a short-lived Azure Speech token for the browser (CEFR speaking
+        exam pronunciation assessment). Authed (reached only through the Cognito
+        middleware); the Azure key stays server-side. 503 when not configured so
+        the speaking exam falls back to text capture."""
+        tok = azure_speech.issue_token(deps()["settings"])
+        if not tok:
+            raise HTTPException(status_code=503, detail="Speech service is not configured")
+        return {**tok, "cache_control": "no-store"}
 
 
 def _register_auth(app: FastAPI, deps) -> None:

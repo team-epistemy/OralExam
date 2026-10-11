@@ -40,6 +40,11 @@ class Settings:
     # flash, not turbo: turbo_v2_5 is deprecated and roughly 3x the model latency of
     # flash_v2_5 (~75ms), which every answer of every exam pays.
     elevenlabs_model: str = os.getenv("EPISTEMY_ELEVENLABS_MODEL", "eleven_flash_v2_5")
+    # Azure AI Speech: Secrets Manager id for the key + the resource region. Used
+    # only by the CEFR speaking exam to mint short-lived browser tokens for
+    # pronunciation assessment. Absent key → speaking falls back to text capture.
+    azure_speech_secret: str = os.getenv("EPISTEMY_AZURE_SPEECH_SECRET", "")
+    azure_speech_region: str = os.getenv("EPISTEMY_AZURE_SPEECH_REGION", "eastus")
     embed_model: str = os.getenv("EPISTEMY_EMBED_MODEL", EMBED_MODEL_ID)
     embed_dims: int = int(os.getenv("EPISTEMY_EMBED_DIMS", "1024"))
     bedrock_region: str = os.getenv("EPISTEMY_BEDROCK_REGION", "us-west-2")
@@ -87,6 +92,11 @@ class Settings:
     def elevenlabs_secret_name(self) -> str:
         """Secrets Manager id for the ElevenLabs API key (override via env, else default)."""
         return self.elevenlabs_secret or f"epistemy/elevenlabs-api-key-{self.env}"
+
+    @property
+    def azure_speech_secret_name(self) -> str:
+        """Secrets Manager id for the Azure Speech key (override via env, else default)."""
+        return self.azure_speech_secret or f"epistemy/azure-speech-key-{self.env}"
 
     @property
     def db_app_secret_name(self) -> str:
