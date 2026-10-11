@@ -1,0 +1,16 @@
+{
+  "name": "azure-prosody-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Quick demo: Azure Pronunciation Assessment (accuracy, fluency, prosody) plus transcript content grading",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "engines": { "node": ">=20.12" },
+  "dependencies": {
+    "express": "^5.1.0",
+    "microsoft-cognitiveservices-speech-sdk": "^1.52.0"
+  }
+}

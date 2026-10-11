@@ -1,0 +1,33 @@
+{
+  "_comment": "Speaking-exam prompts tagged by target CEFR level. The adaptive flow draws an unused question at the target level; if a level is exhausted it generates one via /api/generate-question. Keep prompts short, open-ended, and answerable in ~30-60s.",
+  "A1": [
+    "Tell me about your family.",
+    "What do you usually eat for breakfast?",
+    "Describe your home."
+  ],
+  "A2": [
+    "What did you do last weekend?",
+    "Describe your typical day at work or school.",
+    "Talk about a place you like to visit and why."
+  ],
+  "B1": [
+    "Describe a hobby you enjoy and explain why you like it.",
+    "What are the advantages and disadvantages of living in a big city?",
+    "Tell me about a memorable trip you have taken."
+  ],
+  "B2": [
+    "Why might speaking practice improve learning?",
+    "Do you think technology has made people more or less social? Explain.",
+    "Describe a challenge you faced and how you dealt with it."
+  ],
+  "C1": [
+    "To what extent should governments regulate artificial intelligence?",
+    "Some say remote work weakens team culture. How far do you agree?",
+    "Discuss the trade-offs between economic growth and environmental protection."
+  ],
+  "C2": [
+    "Is objectivity in journalism achievable, or inevitably compromised? Argue your position.",
+    "Evaluate the claim that individual choices matter little against systemic forces.",
+    "How should a society balance free expression against protection from harm?"
+  ]
+}

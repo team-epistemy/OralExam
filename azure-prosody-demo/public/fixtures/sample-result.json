@@ -1,0 +1,294 @@
+{
+  "question": "Why might speaking practice improve learning?",
+  "note": "Synthetic sample shaped like Azure's detailed JSON. Not real service output.",
+  "phrases": [
+    {
+      "RecognitionStatus": "Success",
+      "Offset": 4000000,
+      "Duration": 39700000,
+      "DisplayText": "I think the main reason is that students learn better when they speak.",
+      "NBest": [
+        {
+          "Confidence": 0.93,
+          "Lexical": "i think the main reason is that students learn better when they speak",
+          "Display": "I think the main reason is that students learn better when they speak.",
+          "PronunciationAssessment": {
+            "AccuracyScore": 90.1,
+            "FluencyScore": 86.4,
+            "CompletenessScore": 100,
+            "PronScore": 88.2,
+            "ProsodyScore": 78.5
+          },
+          "Words": [
+            {
+              "Word": "I",
+              "Offset": 4000000,
+              "Duration": 1200000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 96,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "think",
+              "Offset": 5700000,
+              "Duration": 3000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 92,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "the",
+              "Offset": 9100000,
+              "Duration": 1000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 88,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "main",
+              "Offset": 10400000,
+              "Duration": 2800000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 94,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "reason",
+              "Offset": 13700000,
+              "Duration": 3600000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 90,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "is",
+              "Offset": 17900000,
+              "Duration": 1200000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 95,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "that",
+              "Offset": 19400000,
+              "Duration": 1600000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 91,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "students",
+              "Offset": 21400000,
+              "Duration": 5200000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 83,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "learn",
+              "Offset": 27400000,
+              "Duration": 3000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 87,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "better",
+              "Offset": 30800000,
+              "Duration": 3400000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 89,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "when",
+              "Offset": 34700000,
+              "Duration": 2000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 93,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "they",
+              "Offset": 37100000,
+              "Duration": 1600000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 92,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "speak",
+              "Offset": 39100000,
+              "Duration": 4600000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 85,
+                "ErrorType": "None"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "RecognitionStatus": "Success",
+      "Offset": 56000000,
+      "Duration": 52500000,
+      "DisplayText": "It forces them to organize their thoughts, which is harder than writing.",
+      "NBest": [
+        {
+          "Confidence": 0.93,
+          "Lexical": "it forces them to organize their thoughts which is harder than writing",
+          "Display": "It forces them to organize their thoughts, which is harder than writing.",
+          "PronunciationAssessment": {
+            "AccuracyScore": 76.2,
+            "FluencyScore": 71.8,
+            "CompletenessScore": 100,
+            "PronScore": 74,
+            "ProsodyScore": 69.3
+          },
+          "Words": [
+            {
+              "Word": "It",
+              "Offset": 56000000,
+              "Duration": 1000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 94,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "forces",
+              "Offset": 57400000,
+              "Duration": 4000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 81,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "them",
+              "Offset": 61900000,
+              "Duration": 1600000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 90,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "to",
+              "Offset": 63900000,
+              "Duration": 1000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 92,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "organize",
+              "Offset": 65200000,
+              "Duration": 6200000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 48,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "their",
+              "Offset": 80400000,
+              "Duration": 2000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 86,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "thoughts",
+              "Offset": 82800000,
+              "Duration": 5000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 55,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "which",
+              "Offset": 92800000,
+              "Duration": 2400000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 91,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "is",
+              "Offset": 95600000,
+              "Duration": 1000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 95,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "harder",
+              "Offset": 96900000,
+              "Duration": 4000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 84,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "than",
+              "Offset": 101500000,
+              "Duration": 1600000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 90,
+                "ErrorType": "None"
+              }
+            },
+            {
+              "Word": "writing",
+              "Offset": 103500000,
+              "Duration": 5000000,
+              "PronunciationAssessment": {
+                "AccuracyScore": 88,
+                "ErrorType": "None"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "content": {
+    "range": "B2",
+    "rangeNote": "Gives a clear viewpoint using some complex sentences, with a little searching for words.",
+    "accuracy": "B2",
+    "accuracyNote": "Relatively high grammatical control; no errors that impede understanding.",
+    "coherence": "B1",
+    "coherenceNote": "Links points into a connected linear sequence but with limited cohesive devices.",
+    "relevance": 88,
+    "depth": 62,
+    "summary": "Gives a clear reason and a comparison with writing, but offers no example or evidence.",
+    "strengths": [
+      "Directly answers the question",
+      "Clear causal claim about organizing thoughts"
+    ],
+    "gaps": [
+      "No concrete example",
+      "Comparison with writing is asserted, not explained"
+    ]
+  }
+}

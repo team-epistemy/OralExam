@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speech Assessment Demo</title>
+<style>
+  :root {
+    --bg: #f7f6f2; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e4e2da;
+    --good: #1f7a4d; --good-bg: #e3f3ea; --ok: #8a6100; --ok-bg: #fbf0d3; --weak: #b3261e; --weak-bg: #fbe4e1;
+    --accent: #2f4b7c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --card: #1f1f1d; --ink: #ecebe6; --muted: #a09f97; --line: #333330;
+      --good: #6fd3a0; --good-bg: #17382a; --ok: #f0c565; --ok-bg: #3a2f10; --weak: #ff8f86; --weak-bg: #44201d;
+      --accent: #8fb0ee;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+  input[type=text] { width: 100%; padding: 10px 12px; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  select { font: inherit; padding: 8px 10px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  button { font: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  @media (prefers-color-scheme: dark) { button.primary { color: #101014; } }
+  button.recording { background: var(--weak); border-color: var(--weak); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .status { color: var(--muted); font-size: .9rem; }
+  .live { min-height: 1.5em; color: var(--muted); font-style: italic; margin-top: 12px; }
+  .scores { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .score { border-radius: 10px; padding: 12px; text-align: center; border: 1px solid var(--line); }
+  .score .n { font-size: 1.9rem; font-weight: 650; line-height: 1.1; }
+  .score .l { font-size: .78rem; color: var(--muted); }
+  .good { background: var(--good-bg); color: var(--good); } .ok { background: var(--ok-bg); color: var(--ok); }
+  .weak { background: var(--weak-bg); color: var(--weak); } .na { background: var(--bg); color: var(--muted); }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; }
+  .metric .v { font-weight: 600; } .metric .l { font-size: .78rem; color: var(--muted); }
+  .words { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 4px; }
+  .w { padding: 2px 7px; border-radius: 6px; cursor: default; }
+  .gap { font-size: .75rem; color: var(--muted); margin: 0 4px; }
+  .gap.long { color: var(--weak); font-weight: 600; }
+  .note { font-size: .85rem; color: var(--muted); margin-top: 10px; }
+  .cefr-top { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .cefr-badge { font-size: 2.4rem; font-weight: 700; line-height: 1; padding: 14px 20px; border-radius: 12px; border: 1px solid var(--line); background: var(--accent); color: #fff; min-width: 96px; text-align: center; }
+  @media (prefers-color-scheme: dark) { .cefr-badge { color: #101014; } }
+  .cefr-meta { font-size: .85rem; color: var(--muted); }
+  .cefr-meta b { color: var(--ink); }
+  .cefr-sub { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 14px; }
+  .cefr-measures { margin-top: 12px; font-size: .82rem; color: var(--muted); display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 4px 16px; }
+  .cefr-measures span b { color: var(--ink); font-weight: 600; }
+  .cefr-notes { margin: 12px 0 0; padding-left: 18px; font-size: .8rem; color: var(--muted); }
+  .cefr-notes li { margin-bottom: 4px; }
+  ul { margin: 6px 0 0; padding-left: 20px; }
+  #content strong { display: block; margin-top: 12px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Speech assessment demo</h1>
+  <p class="sub">How they spoke (Azure Pronunciation Assessment) next to what they said (transcript grading).</p>
+
+  <section class="card">
+    <label for="question">Question</label>
+    <input id="question" type="text" value="Why might speaking practice improve learning?">
+    <div class="row">
+      <button id="rec" class="primary">Start recording</button>
+      <button id="startAdaptive">Start adaptive test</button>
+      <button id="sample">Load sample result</button>
+      <span id="status" class="status"></span>
+    </div>
+    <div id="adaptiveStatus" class="status" style="margin-top:8px"></div>
+    <div id="live" class="live"></div>
+  </section>
+
+  <section id="placementCard" class="card hidden">
+    <h2>Adaptive placement</h2>
+    <div class="cefr-top">
+      <div id="placementBadge" class="cefr-badge">–</div>
+      <div id="placementMeta" class="cefr-meta"></div>
+    </div>
+    <div id="placementSub" class="cefr-sub scores"></div>
+    <div id="placementHistory" class="cefr-measures"></div>
+  </section>
+
+  <div id="results" class="hidden">
+    <section class="card">
+      <h2>Estimated CEFR level</h2>
+      <div class="cefr-top">
+        <div id="cefrBadge" class="cefr-badge">–</div>
+        <div id="cefrMeta" class="cefr-meta"></div>
+      </div>
+      <div id="cefrSub" class="cefr-sub scores"></div>
+      <div id="cefrMeasures" class="cefr-measures"></div>
+      <ul id="cefrNotes" class="cefr-notes"></ul>
+    </section>
+
+    <section class="card">
+      <h2>How they spoke (Azure pronunciation assessment)</h2>
+      <div id="scores" class="scores"></div>
+      <p id="prosodyNote" class="note hidden">Prosody was not returned for this locale or audio, so that score is blank.</p>
+      <p class="note">Azure returns five 0–100 sub-scores. <b>PronScore</b> (the overall) combines Accuracy + Fluency + Completeness but <b>excludes Prosody</b>. All are "similarity to native speakers", not a CEFR level.</p>
+    </section>
+
+    <section class="card">
+      <h2>Fluency measures from word timings</h2>
+      <div id="metrics" class="metrics"></div>
+    </section>
+
+    <section class="card">
+      <h2>Word by word</h2>
+      <div id="words" class="words"></div>
+      <p class="note">Colour is word accuracy. Numbers between words are pauses of 0.25s or more; red marks pauses over 1s.</p>
+    </section>
+
+    <section class="card">
+      <h2>What they said</h2>
+      <audio id="player" class="hidden" controls preload="metadata"></audio>
+      <p id="transcript"></p>
+      <div class="row"><button id="grade">Grade content</button><span id="gradeStatus" class="status"></span></div>
+      <div id="content"></div>
+    </section>
+
+    <section class="card">
+      <h2>Calibration</h2>
+      <p class="note" style="margin-top:0">A human rater's actual CEFR per dimension, for this question. Logged next to the machine estimate so you can track agreement and validate the thresholds. Each dimension shows the machine's band (est) for reference.</p>
+      <div id="calInputs" class="cefr-sub"></div>
+      <div class="row">
+        <button id="logRating">Log ratings</button>
+        <span id="calStatus" class="status"></span>
+      </div>
+      <div id="calSummary" class="cefr-meta" style="margin-top:12px"></div>
+      <div id="calRecent" class="cefr-measures"></div>
+    </section>
+  </div>
+</main>
+<script src="/vendor/speech-sdk.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
