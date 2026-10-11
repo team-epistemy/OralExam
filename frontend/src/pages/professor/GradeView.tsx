@@ -57,6 +57,7 @@ interface Cefr {
   overall_score?: number;
   overall_band?: string;
   final?: boolean;
+  follow_up?: string; // the next question this turn generated (= next turn's prompt)
 }
 
 interface TurnEvaluation {
@@ -504,6 +505,12 @@ function SessionDetail({
                           follow-up"), so the generic probe label would duplicate it. */}
                       {group.attempts.length > 1 && !ev.cefr && (
                         <p className="text-[11px] uppercase tracking-wide text-gray-400">{i === 0 ? 'Initial answer' : `Probe response ${i}`}</p>
+                      )}
+                      {/* Follow-up prompt the examiner asked for this turn (the
+                          previous turn's generated follow_up). Turn 1's prompt is
+                          the Part 2 card already shown in the group header. */}
+                      {i > 0 && group.attempts[i - 1]?.cefr?.follow_up && (
+                        <p className="text-sm text-blue-700"><span className="text-gray-400">Follow-up:</span>{' '}{group.attempts[i - 1].cefr!.follow_up}</p>
                       )}
                       <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">{sessionGrade.anonymized ? 'hidden (anonymized)' : 'no answer'}</em>}</p>
                       {(ev.rationale || ev.feedback) && (
