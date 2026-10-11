@@ -208,8 +208,45 @@ def test_the_widening_angle_goes_only_to_the_widening_type():
     assert frame not in other
 
 
+def test_c2_is_labelled_as_a_c1_task_because_it_has_no_task_of_its_own():
+    """Claiming "target C2" while handing over a C1 type contradicts the conduct
+    rule against swapping the type for a harder one."""
+    text, type_id = C.follow_up_instruction(6, "up")
+    assert "Target level: C1." in text
+    assert "Target level: C2" not in text
+    assert C.question_type_by_id(type_id).band == C.TOP_TYPED_BAND
+
+
+def test_a_clamped_target_says_c2_is_earned_on_the_answer_not_the_question():
+    text, _ = C.follow_up_instruction(6, "up")
+    assert "no harder task" in text
+    assert "C2 is awarded on how well they answer" in text
+
+
+def test_a_clamped_target_does_not_claim_the_question_got_harder():
+    # The task is the same C1 shape, so the ladder's move must not be reported.
+    assert "HIGHER" not in C.follow_up_instruction(6, "up")[0]
+    # ...but an unclamped move still is.
+    assert "HIGHER" in C.follow_up_instruction(5, "up")[0]
+
+
+def test_a_c2_score_is_reachable_though_no_question_targets_c2():
+    """The grader never sees the question type, so the band is not capped by it."""
+    from backend.communication import ladder as L
+    from backend.communication import turn as T
+    grade_prompt = T._build_grade_prompt(C.PART2_QUESTION, 3, True, "Free time")
+    for q in C.QUESTION_TYPES:
+        assert q.type_id not in grade_prompt and q.label not in grade_prompt
+    assert "Target level" not in grade_prompt
+
+    top = [{c: 6 for c in C.CORE_CRITERIA}] + [
+        dict({c: 6 for c in C.CORE_CRITERIA}, interaction=6)] * 4
+    assert L.final_result(top)["overall_band"] == "C2"
+
+
 def test_the_instruction_clamps_a_band_outside_a1_c2():
-    assert "Target level: C2" in C.follow_up_instruction(99, "up")[0]
+    # Clamps to the top band that actually has question types, not to C2.
+    assert "Target level: C1" in C.follow_up_instruction(99, "up")[0]
     assert "Target level: A1" in C.follow_up_instruction(-5, "down")[0]
 
 

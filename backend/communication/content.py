@@ -411,13 +411,34 @@ def follow_up_instruction(target_band: int, direction: str, used_type_ids=(),
     Returns (instruction_text, type_id). Store type_id with the turn and pass the
     exam's type_ids so far as `used_type_ids` next time, or the same type repeats
     for a student who never moves band.
+
+    The level named here is the band the chosen type actually belongs to, not the
+    ladder's raw target. They differ only at C2, which has no task shapes of its
+    own: claiming "target C2" while handing over a C1 type contradicts the conduct
+    rule forbidding the examiner from swapping the type for a harder one, and an
+    instruction the model has to reconcile is one it can reconcile inconsistently.
     """
     band = _clamp_band(target_band)
     qtype = pick_question_type(band, used_type_ids)
-    move = PROBE_STYLE.get(direction, "")
+    typed_band = min(band, TOP_TYPED_BAND)
+    # Suppress the ladder's move when the target was clamped: the task did not
+    # actually get harder, so saying it was "pitched one level HIGHER" is false.
+    move = "" if band > typed_band else PROBE_STYLE.get(direction, "")
     lines = [
         "NEXT FOLLOW-UP",
-        f"Target level: {BANDS[band - 1]}. {move}",
+        f"Target level: {BANDS[typed_band - 1]}." + (f" {move}" if move else ""),
+    ]
+    if band > typed_band:
+        # The ladder wants to push past the top of the bank. There is no harder
+        # task to give: what separates C2 from C1 in the CEFR descriptors is the
+        # manner of production (precise, idiomatic, effortless), which the grader
+        # reads off the answer rather than something a question can demand.
+        lines.append(
+            f"The student may be beyond {BANDS[typed_band - 1]}. There is no "
+            f"harder task than this one — {BANDS[band - 1]} is awarded on how "
+            "well they answer, not by asking something different. Ask this type "
+            "and let their answer show its own level.")
+    lines += [
         f"Question type: {qtype.label}. {qtype.instruction}",
         f'Question form — fill every <slot> from the student\'s last answer and '
         f'never say the slot names aloud: "{qtype.form}"',
