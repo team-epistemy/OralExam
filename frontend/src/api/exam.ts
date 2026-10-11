@@ -20,6 +20,32 @@ export interface EDSComponents {
   gen_score: number;
 }
 
+// Per-turn CEFR grid returned by the communication (speaking) exam. Mirrors the
+// `cefr` block built in backend/communication/turn.py. Bands are 1-6 (A1-C2);
+// band *names* are provided for display.
+export type CefrBandName = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
+
+export interface CefrTurn {
+  turn_number: number;
+  part: 'part2' | 'part3';
+  scores: Partial<Record<'range' | 'accuracy' | 'fluency' | 'coherence' | 'interaction', number>>;
+  turn_band: number;
+  turn_band_name: CefrBandName;
+  target_band: number | null;
+  target_band_name: CefrBandName | null;
+  next_target_band: number;
+  next_target_band_name: CefrBandName;
+  proven_band: number | null;
+  direction: 'up' | 'same' | 'down';
+  repeat_request: boolean;
+  degraded: boolean;
+  follow_up: string;
+  criterion_averages: Partial<Record<string, number>>;
+  overall_score: number;
+  overall_band: CefrBandName;
+  final: boolean;
+}
+
 export interface AnswerResponse {
   feedback: string;
   probe: string;
@@ -28,6 +54,7 @@ export interface AnswerResponse {
   eds_delta: number;
   eds_question?: number;
   eds_components?: EDSComponents;
+  cefr?: CefrTurn; // present only for the communication (CEFR speaking) exam
 }
 
 export interface SessionStatus {

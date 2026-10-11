@@ -17,7 +17,7 @@ export interface StudentAssignment {
   assignment_type: 'practice' | 'assignment' | 'exam';
   // Raw stored assignment config. Timed items carry time_limit_minutes;
   // duration_minutes is the older key some rows still use.
-  config: { difficulty?: string; time_limit_minutes?: number; duration_minutes?: number; max_questions?: number };
+  config: { difficulty?: string; time_limit_minutes?: number; duration_minutes?: number; max_questions?: number; exam_kind?: string };
   questions_count?: number;
   completed?: boolean;
   // null/absent until a professor grades this student's attempt; the score stays

@@ -13,6 +13,7 @@ import AssignmentPreview from './pages/professor/AssignmentPreview';
 import StudentDashboard from './pages/student/Dashboard';
 import StudentCourse from './pages/student/StudentCourse';
 import TakeExam from './pages/student/TakeExam';
+import CefrSpeakingExam from './pages/student/CefrSpeakingExam';
 import Results from './pages/student/Results';
 import AddProfessor from './pages/admin/AddProfessor';
 import AgentSimulations from './pages/admin/AgentSimulations';
@@ -162,6 +163,10 @@ export const router = createBrowserRouter([
       {
         path: '/student/exam/:assignmentId',
         element: <RequireRole role="student"><TakeExam /></RequireRole>,
+      },
+      {
+        path: '/student/speaking/:assignmentId',
+        element: <RequireRole role="student"><CefrSpeakingExam /></RequireRole>,
       },
       {
         path: '/student/results/:assignmentId',

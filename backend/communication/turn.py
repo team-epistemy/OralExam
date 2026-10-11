@@ -131,6 +131,10 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
         "eds_delta": 0,
         "eds_question": eds_question,
         "eds_components": None,
+        # Per-turn CEFR grid for the dedicated CEFR speaking UI (band scores,
+        # ladder target/direction, running overall). Additive: the Socratic/EDS
+        # path never sets this, so that flow is unaffected.
+        "cefr": cefr,
     }
 
 

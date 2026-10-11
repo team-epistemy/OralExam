@@ -102,7 +102,7 @@ export default function StudentCourse() {
                       <div className="mt-4 flex gap-2">
                         {canStart && (
                           <Link
-                            to={`/student/exam/${a.id}`}
+                            to={`/student/${a.config?.exam_kind === 'communication' ? 'speaking' : 'exam'}/${a.id}`}
                             className="flex items-center justify-center gap-2 flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
                           >
                             <PlayCircle className="w-4 h-4" />

@@ -219,11 +219,15 @@ def test_response_matches_the_shape_the_exam_page_reads(monkeypatch):
     _, responses = _run_exam(monkeypatch, [3] * 5)
     r = responses[0]
     assert set(r) == {"answered", "adequate", "feedback", "probe",
-                      "eds_delta", "eds_question", "eds_components"}
+                      "eds_delta", "eds_question", "eds_components", "cefr"}
     # adequate must stay false: the page advances the question on adequate, and
     # this exam type always runs all five turns.
     assert all(resp["adequate"] is False for resp in responses)
     assert r["answered"] is True
+    # The CEFR grid is surfaced to the client for the dedicated speaking UI.
+    assert set(r["cefr"]["scores"]) <= set(C.ALL_CRITERIA)
+    assert r["cefr"]["overall_band"] in C.BANDS
+    assert "direction" in r["cefr"] and "next_target_band" in r["cefr"]
 
 
 # ── Repeat requests and degradation ──────────────────────────────────────────
