@@ -2917,13 +2917,17 @@ def _query_exam_results(repo, assignment_id: str, student_id: str,
             (session_id,),
         )
         rows = cur.fetchall()
+    # Parse each turn's raw LLM output once. Communication (CEFR speaking) turns
+    # carry a `cefr` block; a session with any such turn is a speaking exam.
+    raws = [r[4] if isinstance(r[4], dict) else (_json.loads(r[4]) if r[4] else {}) for r in rows]
+    is_comm = any(isinstance(x, dict) and x.get("cefr") for x in raws)
     q_results, answered, score_sum = [], 0, 0.0
     # Carry the same EDS component breakdown the in-exam gauge shows, so Results
     # speaks one vocabulary: per-question components + an averaged aggregate.
     comp_keys = ("node_score", "edge_score", "r_gate", "gen_score")
     comp_sums = {k: 0.0 for k in comp_keys}
     comp_n = 0
-    for r in rows:
+    for i, r in enumerate(rows):
         if r[2]:
             answered += 1
         eds = float(r[3] or 0)
@@ -2933,7 +2937,15 @@ def _query_exam_results(repo, assignment_id: str, student_id: str,
             comp_n += 1
             for k in comp_keys:
                 comp_sums[k] += float(comp.get(k) or 0)
-        q_results.append({"question_id": str(r[0]), "question_text": r[1],
+        # Speaking exams are five sub-turns of ONE question (same question_id), so
+        # q.text is the Part-2 card for every turn. The real prompt each turn is
+        # the previous turn's follow-up (turn 1 = the Part-2 card itself). EDS
+        # exams have a distinct question per turn, so their text is used as-is.
+        qtext = r[1]
+        if is_comm and i > 0:
+            prev = raws[i - 1] or {}
+            qtext = (prev.get("cefr") or {}).get("follow_up") or prev.get("probe") or r[1]
+        q_results.append({"question_id": str(r[0]), "question_text": qtext,
                           "answer": r[2] or "", "score": round(eds * 100),
                           "feedback": _extract_feedback(r[4]), "components": comp})
     total = len(rows)
