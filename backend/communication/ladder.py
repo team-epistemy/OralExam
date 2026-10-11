@@ -55,6 +55,89 @@ def turn_band(scores: Dict[str, float]) -> int:
     return score_to_band(sum(present) / len(present))
 
 
+# ── Deterministic acoustic fluency (hybrid, A/B against the LLM grade) ────────
+# A transparent, research-anchored acoustic Fluency band computed ALONGSIDE the
+# LLM's holistic grade, so the two can be compared and the anchors tuned against
+# human re-bands over time. It does NOT feed the grade or the ladder — it is
+# evidence for calibration only. Anchors are per-CEFR-band central tendencies
+# from Tavakoli, Nakatsuhara & Hunter (2020) and Huang & Gráf (2020): indicative,
+# not validated cut-scores, so treat this as a prototype signal, not a verdict.
+
+def _clampf(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def _interp_band(value: float, anchors: Sequence[float]) -> float:
+    """Map a measure value to a continuous 1-6 band via the four band anchors at
+    A2/B1/B2/C1 (bands 2-5). Handles increasing (rates) and decreasing (pause)
+    measures, extrapolating past the ends with the nearest segment's slope."""
+    bands = (2.0, 3.0, 4.0, 5.0)
+    d = 1.0 if anchors[-1] >= anchors[0] else -1.0
+    if d * value <= d * anchors[0]:
+        slope = (bands[1] - bands[0]) / (anchors[1] - anchors[0])
+        return _clampf(bands[0] + (value - anchors[0]) * slope, 1.0, 6.0)
+    for i in range(len(anchors) - 1):
+        if d * value <= d * anchors[i + 1]:
+            frac = (value - anchors[i]) / (anchors[i + 1] - anchors[i])
+            return _clampf(bands[i] + frac * (bands[i + 1] - bands[i]), 1.0, 6.0)
+    slope = (bands[-1] - bands[-2]) / (anchors[-1] - anchors[-2])
+    return _clampf(bands[-1] + (value - anchors[-1]) * slope, 1.0, 6.0)
+
+
+# (derived key, [A2, B1, B2, C1] anchors, weight). Speech rate, phonation ratio
+# and mean length of run are the strongest fluency predictors (Kormos & Dénes);
+# pause DURATION is the weakest, so it carries the least weight.
+_ACOUSTIC_SPECS = (
+    ("speech_rate_wpm", (55.0, 95.0, 120.0, 140.0), 0.30),
+    ("phonation_pct", (46.0, 71.0, 77.0, 78.0), 0.30),
+    ("articulation_rate_wpm", (113.0, 134.0, 160.0, 168.0), 0.15),
+    ("mean_run_words", (2.3, 4.1, 6.1, 6.4), 0.15),
+    ("mean_pause_sec", (1.42, 0.63, 0.56, 0.54), 0.10),
+)
+
+
+def _num(v) -> Optional[float]:
+    """A finite float, or None (bools are not numbers here)."""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def acoustic_fluency(speech: Optional[dict]) -> Optional[dict]:
+    """A deterministic Fluency band from the Azure acoustic metrics, or None when
+    there is no usable audio evidence (text mode / nothing measured).
+
+    Phonation ratio (% speaking) is derived from pause_ratio and mean length of
+    run from word_count / (pauses + 1). Mean pause is used only when at least one
+    pause was measured (0 would read as 'no pauses', not 'not measured')."""
+    if not speech:
+        return None
+    pr = _num(speech.get("pause_ratio"))
+    wc = _num(speech.get("word_count"))
+    pc = _num(speech.get("pause_count"))
+    derived = {
+        "speech_rate_wpm": _num(speech.get("speech_rate_wpm")),
+        "articulation_rate_wpm": _num(speech.get("articulation_rate_wpm")),
+        "phonation_pct": (100.0 * (1.0 - pr)) if pr is not None else None,
+        "mean_run_words": (wc / (pc + 1.0)) if (wc and pc is not None) else None,
+        "mean_pause_sec": _num(speech.get("mean_pause_sec")) if (pc and pc > 0) else None,
+    }
+    num = den = 0.0
+    measures = []
+    for key, anchors, weight in _ACOUSTIC_SPECS:
+        val = derived.get(key)
+        if val is None:
+            continue
+        b = _interp_band(val, anchors)
+        measures.append({"measure": key, "value": round(val, 2), "band": round(b, 2)})
+        num += b * weight
+        den += weight
+    if den == 0:
+        return None
+    score = num / den
+    band = clamp_band(round_half_up(score))
+    return {"band": band, "band_name": band_name(band),
+            "score": round(score, 2), "measures": measures}
+
+
 # ── The ladder rule ──────────────────────────────────────────────────────────
 
 def next_step(result_band: int, target_band: Optional[int],

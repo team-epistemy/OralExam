@@ -191,3 +191,45 @@ def test_normalise_scores_clamps_out_of_range_and_defaults_the_unusable_scores()
     assert out["fluency"] == 4.5             # numeric strings are fine
     assert out["coherence"] == 3.0           # missing -> B1
     assert out["interaction"] == 3.0
+
+
+# ── Deterministic acoustic fluency (hybrid A/B) ──────────────────────────────
+
+def test_acoustic_fluency_none_without_audio():
+    assert L.acoustic_fluency(None) is None
+    assert L.acoustic_fluency({}) is None
+    # Present but unusable (all null) -> None, not a spurious band.
+    assert L.acoustic_fluency({"speech_rate_wpm": None, "pause_ratio": None}) is None
+
+
+def test_acoustic_fluency_fast_fluent_speaker_scores_high():
+    f = L.acoustic_fluency({
+        "speech_rate_wpm": 130, "articulation_rate_wpm": 160, "pause_ratio": 0.12,
+        "word_count": 90, "pause_count": 4, "mean_pause_sec": 0.5,
+    })
+    assert f is not None
+    assert 1 <= f["band"] <= 6
+    assert f["band"] >= 4                 # B2 or above
+    assert f["band_name"] in ("B2", "C1", "C2")
+    assert {m["measure"] for m in f["measures"]} == {
+        "speech_rate_wpm", "articulation_rate_wpm", "phonation_pct",
+        "mean_run_words", "mean_pause_sec"}
+
+
+def test_acoustic_fluency_slow_halting_speaker_scores_low():
+    f = L.acoustic_fluency({
+        "speech_rate_wpm": 60, "articulation_rate_wpm": 110, "pause_ratio": 0.5,
+        "word_count": 30, "pause_count": 12, "mean_pause_sec": 1.2,
+    })
+    assert f is not None and f["band"] <= 3        # B1 or below
+    # A faster, more fluent delivery must not score lower than a halting one.
+    fast = L.acoustic_fluency({"speech_rate_wpm": 130, "pause_ratio": 0.12,
+                               "word_count": 90, "pause_count": 4})
+    assert fast["score"] > f["score"]
+
+
+def test_acoustic_fluency_skips_mean_pause_when_no_pauses():
+    # pause_count 0 -> mean_pause is "not measured", not a 0s (perfect) pause.
+    f = L.acoustic_fluency({"speech_rate_wpm": 100, "pause_ratio": 0.1,
+                            "word_count": 50, "pause_count": 0, "mean_pause_sec": 0})
+    assert "mean_pause_sec" not in {m["measure"] for m in f["measures"]}

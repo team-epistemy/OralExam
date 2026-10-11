@@ -187,11 +187,14 @@ export interface ExamResult {
   questions_answered: number;
   feedback: string;
   components?: EDSComponents | null;
+  // Present for CEFR speaking exams; the UI shows this band instead of the EDS score.
+  cefr?: { overall_band: string | null; overall_score: number | null; criterion_averages: Record<string, number> | null } | null;
   question_results: {
     question_id: string;
     question_text: string;
     answer: string;
     score?: number;
+    band_name?: string | null; // per-turn CEFR band for speaking exams
     feedback?: string;
     components?: EDSComponents | null;
   }[];

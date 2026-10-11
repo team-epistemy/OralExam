@@ -2867,9 +2867,10 @@ def _withhold_unreleased(results: dict) -> dict:
         "grade_released": False,
         "score": None,
         "components": None,
+        "cefr": None,   # hold the CEFR band until the grade is released too
         "feedback": "Your professor hasn't released your grade yet.",
         "question_results": [
-            {k: v for k, v in q.items() if k not in ("score", "components", "feedback")}
+            {k: v for k, v in q.items() if k not in ("score", "components", "feedback", "band_name")}
             for q in results.get("question_results", [])
         ],
     }
@@ -2945,13 +2946,23 @@ def _query_exam_results(repo, assignment_id: str, student_id: str,
         if is_comm and i > 0:
             prev = raws[i - 1] or {}
             qtext = (prev.get("cefr") or {}).get("follow_up") or prev.get("probe") or r[1]
+        # Speaking exams present a CEFR band per turn, not an EDS /100 number.
+        band_name = (raws[i].get("cefr") or {}).get("turn_band_name") if is_comm else None
         q_results.append({"question_id": str(r[0]), "question_text": qtext,
                           "answer": r[2] or "", "score": round(eds * 100),
+                          "band_name": band_name,
                           "feedback": _extract_feedback(r[4]), "components": comp})
     total = len(rows)
     overall = round(score_sum / total * 100) if total else 0
     components = {k: comp_sums[k] / comp_n for k in comp_keys} if comp_n else None
     feedback = f"Answered {answered} of {total} questions · Epistemic Depth Score {overall}/100."
+    # A speaking exam is graded on the CEFR band, not an EDS score — expose the
+    # band and re-word the summary so no EDS number leaks into the student view.
+    last_cefr = next((raws[i].get("cefr") for i in range(len(raws) - 1, -1, -1)
+                      if isinstance(raws[i], dict) and raws[i].get("cefr")), None)
+    if is_comm and last_cefr:
+        feedback = (f"CEFR {last_cefr.get('overall_band', '—')} · "
+                    f"answered {answered} of {total} questions.")
 
     # A released grade is authoritative: show the professor's final score and
     # overall comment instead of the raw auto EDS.
@@ -2979,6 +2990,14 @@ def _query_exam_results(repo, assignment_id: str, student_id: str,
         "completed_at": srow[2].isoformat() if srow[2] else None,
         "grade_released": released or is_practice,
     }
+    # Speaking exams carry a CEFR result (band + per-criterion averages); the
+    # frontend renders this instead of the EDS gauge/score.
+    if is_comm and last_cefr:
+        out["cefr"] = {
+            "overall_band": last_cefr.get("overall_band"),
+            "overall_score": last_cefr.get("overall_score"),
+            "criterion_averages": last_cefr.get("criterion_averages"),
+        }
     if for_student and not is_practice and not released:
         return _withhold_unreleased(out)
     return out
@@ -6096,7 +6115,10 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                             "nodes_detected": comp.get("nodes_detected", []),
                             "edges_demonstrated": comp.get("edges_demonstrated", []),
                         },
-                        "rationale": _threshold_rationale(score, er[2], comp, fb),
+                        # Speaking (CEFR) turns have no EDS score, so the EDS
+                        # "Scored X/100 (…band)" rationale would be meaningless —
+                        # use the grader's note instead.
+                        "rationale": fb if raw.get("cefr") else _threshold_rationale(score, er[2], comp, fb),
                     })
 
                 if grade_row:

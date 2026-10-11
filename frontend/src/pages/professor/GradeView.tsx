@@ -66,6 +66,10 @@ interface Cefr {
   overall_band?: string;
   final?: boolean;
   follow_up?: string; // the next question this turn generated (= next turn's prompt)
+  // Deterministic acoustic Fluency band (hybrid A/B) computed alongside the LLM
+  // grade — evidence only, never fed into the grade or ladder.
+  acoustic_fluency?: { band: number; band_name: string; score: number } | null;
+  acoustic_fluency_delta?: number | null;
 }
 
 interface TurnEvaluation {
@@ -138,12 +142,16 @@ function bandStyle(band: number | null | undefined): string {
   return 'bg-orange-50 text-orange-700';                // A1-A2
 }
 
+const CEFR_BANDS = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
+const cefrName = (n: number | null | undefined): string =>
+  n == null ? '—' : (CEFR_BANDS[Math.min(5, Math.max(0, Math.round(n) - 1))] ?? '—');
+
 function ScoreCell({ label, value }: { label: string; value: number | null | undefined }) {
   return (
     <div className={`flex-1 min-w-[72px] rounded px-2 py-1 text-center ${bandStyle(value == null ? null : Math.round(value))}`}>
       <p className="text-[10px] uppercase tracking-wide opacity-70">{label}</p>
-      <p className="text-sm font-semibold tabular-nums">
-        {value == null ? '—' : value.toFixed(1)}
+      <p className="text-sm font-semibold">
+        {cefrName(value)}
       </p>
     </div>
   );
@@ -245,6 +253,16 @@ function CefrTurnScores({ cefr }: { cefr: Cefr }) {
           <ScoreCell key={key} label={label} value={cefr.scores?.[key]} />
         ))}
       </div>
+      {cefr.acoustic_fluency && (
+        <p className="text-[11px] text-gray-500">
+          Acoustic fluency (deterministic, A/B): <span className="font-semibold">{cefr.acoustic_fluency.band_name}</span> ({cefr.acoustic_fluency.score.toFixed(1)}/6)
+          {cefr.scores?.fluency != null && <> · LLM fluency {cefr.scores.fluency.toFixed(1)}</>}
+          {cefr.acoustic_fluency_delta != null && Math.abs(cefr.acoustic_fluency_delta) >= 1 && (
+            <span className="text-amber-600"> · Δ {cefr.acoustic_fluency_delta > 0 ? '+' : ''}{cefr.acoustic_fluency_delta} — review</span>
+          )}
+          <span className="text-gray-400"> · evidence only, not in the grade</span>
+        </p>
+      )}
     </div>
   );
 }
@@ -348,9 +366,6 @@ function CefrSummary({ cefr }: { cefr: Cefr }) {
         </div>
         <div className={`px-3 py-1.5 rounded-lg text-center ${bandStyle(cefr.turn_band && cefr.overall_band ? Math.round(cefr.overall_score ?? 0) : null)}`}>
           <p className="text-xl font-bold leading-none">{cefr.overall_band || '—'}</p>
-          <p className="text-[10px] opacity-70 tabular-nums">
-            {cefr.overall_score != null ? `${cefr.overall_score.toFixed(2)} / 6` : ''}
-          </p>
         </div>
       </div>
       <div className="flex flex-wrap gap-1">
@@ -661,7 +676,7 @@ function SessionDetail({
                     if (gc) {
                       return (
                         <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${bandStyle(Math.round(gc.overall_score ?? 0))}`}>
-                          {gc.overall_band} · {(gc.overall_score ?? 0).toFixed(2)}/6
+                          {gc.overall_band}
                         </span>
                       );
                     }

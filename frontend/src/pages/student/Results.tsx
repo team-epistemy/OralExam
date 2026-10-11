@@ -5,6 +5,16 @@ import { getExamResults } from '../../api/exam';
 import { EDSGauge, EDSBreakdown, EDSExplainer } from '../../components/Eds';
 import { downloadTranscriptPdf, resultsTranscript } from '../../transcript';
 
+const BAND_NAMES = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
+const numToBand = (n: number | null | undefined): string =>
+  n == null ? '—' : (BAND_NAMES[Math.min(5, Math.max(0, Math.round(n) - 1))] ?? '—');
+function bandClasses(band: string | null | undefined): string {
+  if (!band || band === '—') return 'bg-gray-100 text-gray-500 border-gray-200';
+  if (band.startsWith('C') || band === 'B2') return 'bg-green-50 text-green-700 border-green-200';
+  if (band === 'B1') return 'bg-blue-50 text-blue-700 border-blue-200';
+  return 'bg-amber-50 text-amber-700 border-amber-200';
+}
+
 export default function Results() {
   const { assignmentId = '' } = useParams();
 
@@ -60,6 +70,27 @@ export default function Results() {
                 </div>
               </div>
             </div>
+          ) : data.cefr ? (
+            /* CEFR speaking result — band only, no numeric score. */
+            <div className="bg-white border border-gray-200 rounded-xl p-6">
+              <div className="flex items-center gap-4">
+                <div className={`text-4xl font-bold px-5 py-3 rounded-xl border ${bandClasses(data.cefr.overall_band)}`}>{data.cefr.overall_band || '—'}</div>
+                <div className="text-sm text-gray-600">
+                  <p className="font-semibold text-gray-900">CEFR speaking result</p>
+                  <p className="text-gray-500">{data.questions_answered} of {data.total_questions} questions answered</p>
+                </div>
+              </div>
+              {data.cefr.criterion_averages && (
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-4">
+                  {(['range', 'accuracy', 'fluency', 'coherence', 'interaction'] as const).map((c) => (
+                    <div key={c} className={`rounded-lg border px-3 py-2 text-center ${bandClasses(numToBand(data.cefr!.criterion_averages![c]))}`}>
+                      <div className="text-lg font-semibold">{numToBand(data.cefr!.criterion_averages![c])}</div>
+                      <div className="text-[11px] capitalize">{c}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           ) : (
             /* EDS score summary — same gauge, bands, and breakdown as in-exam */
             <div className="bg-white border border-gray-200 rounded-xl p-6">
@@ -93,7 +124,9 @@ export default function Results() {
                 <li key={q.question_id || i} className="border-b border-gray-100 last:border-0 pb-3 last:pb-0">
                   <div className="flex items-start justify-between gap-3">
                     <p className="text-sm font-medium text-gray-900">{i + 1}. {q.question_text}</p>
-                    {q.score !== undefined && (
+                    {q.band_name ? (
+                      <span className={`text-xs font-semibold border rounded px-2 py-0.5 whitespace-nowrap ${bandClasses(q.band_name)}`}>{q.band_name}</span>
+                    ) : q.score !== undefined && (
                       <span className="text-xs font-semibold text-blue-600 whitespace-nowrap">EDS {Math.round(q.score)}/100</span>
                     )}
                   </div>

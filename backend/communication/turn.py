@@ -122,6 +122,13 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
 
     asked_type = C.question_type_by_id(asked_type_id)
     next_type = C.question_type_by_id(next_type_id)
+    # Hybrid A/B: a deterministic, research-anchored acoustic Fluency band,
+    # computed alongside the LLM grade. It does NOT change `scores`, `band`, the
+    # ladder or the overall — it is stored only so the LLM's Fluency can be
+    # audited against the acoustics and the anchors tuned against human re-bands.
+    acoustic = L.acoustic_fluency(speech)
+    acoustic_delta = (round(acoustic["score"] - float(scores["fluency"]), 2)
+                      if acoustic and scores.get("fluency") is not None else None)
     cefr = {
         "turn_number": turn_number,
         "part": "part3" if is_part3 else "part2",
@@ -146,6 +153,11 @@ def handle_turn(repo, settings, session_id: str, srow, req, config=None) -> dict
         # can be audited against the evidence behind it — and so it is visible
         # when a turn was graded blind because the student used text mode.
         "speech": speech,
+        # Deterministic acoustic Fluency band (hybrid A/B) next to the LLM grade,
+        # plus its gap from the LLM's Fluency score. None in text mode. Evidence
+        # only — never fed into the grade or the ladder.
+        "acoustic_fluency": acoustic,
+        "acoustic_fluency_delta": acoustic_delta,
         # Per-word pause timings, so the professor sees the same pause-annotated
         # transcript the student does instead of a flattened sentence.
         "words": timed_words,

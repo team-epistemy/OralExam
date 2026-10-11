@@ -109,8 +109,6 @@ export default function CefrSpeakingExam() {
   const [captured, setCaptured] = useState<AssessResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [liveInterim, setLiveInterim] = useState(''); // current phrase, partial
-  const [liveFinal, setLiveFinal] = useState('');     // finalized phrases so far
   const [azureMode, setAzureMode] = useState(false);
   const [ttsOn, setTtsOn] = useState(true);
   const [ttsAvailable, setTtsAvailable] = useState(true);
@@ -125,6 +123,9 @@ export default function CefrSpeakingExam() {
   const recChunksRef = useRef<Blob[]>([]);
   const recStreamRef = useRef<MediaStream | null>(null);
   const pendingAudioUrl = useRef<string | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const rafRef = useRef<number>(0);
 
   // ── TTS (ElevenLabs proxy) ───────────────────────────────────────────────
   const speak = useCallback(async (text: string) => {
@@ -170,6 +171,45 @@ export default function CefrSpeakingExam() {
     mr.stop();
   }), []);
 
+  // A lightweight live waveform driven by the mic level — tells the student their
+  // speech is being heard/processed, without the distracting partial transcript.
+  // Recognition still runs underneath for scoring; we just don't render the text.
+  const startWaveform = useCallback(() => {
+    const stream = recStreamRef.current;
+    if (!stream) return;
+    try {
+      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new Ctx();
+      audioCtxRef.current = ctx;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const draw = () => {
+        rafRef.current = requestAnimationFrame(draw);
+        const cv = canvasRef.current; const g = cv?.getContext('2d');
+        if (!cv || !g) return;
+        analyser.getByteFrequencyData(data);
+        const W = cv.width, H = cv.height;
+        g.clearRect(0, 0, W, H);
+        const bars = 28, step = Math.max(1, Math.floor(data.length / bars)), bw = W / bars;
+        g.fillStyle = '#2563eb';
+        for (let i = 0; i < bars; i++) {
+          const h = Math.max(2, (data[i * step] / 255) * H);
+          g.fillRect(i * bw + 1, (H - h) / 2, bw - 2, h);
+        }
+      };
+      draw();
+    } catch { /* no AudioContext: skip the waveform, recording still works */ }
+  }, []);
+  const stopWaveform = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = 0;
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+    const cv = canvasRef.current; cv?.getContext('2d')?.clearRect(0, 0, cv.width, cv.height);
+  }, []);
+
   // ── Web Speech fallback (text only; used when Azure isn't configured) ──────
   const startWebSpeech = () => {
     const SR = window as unknown as { SpeechRecognition?: new () => any; webkitSpeechRecognition?: new () => any };
@@ -185,7 +225,6 @@ export default function CefrSpeakingExam() {
         if (e.results[i].isFinal) finalT += t; else interim += t;
       }
       if (finalT) webTextRef.current = (webTextRef.current ? webTextRef.current + ' ' : '') + finalT.trim();
-      setLiveInterim((webTextRef.current + (interim ? ' ' + interim : '')).trim());
     };
     rec.onerror = () => { setRecording(false); setMicNotice('Voice input had a problem — press Record to try again.'); };
     recognitionRef.current = rec;
@@ -194,30 +233,30 @@ export default function CefrSpeakingExam() {
 
   // ── Record start/stop ──────────────────────────────────────────────────────
   const startRecording = async () => {
-    stopSpeech(); setMicNotice(null); setLiveInterim(''); setLiveFinal(''); setCaptured(null);
+    stopSpeech(); setMicNotice(null); setCaptured(null);
     if (pendingAudioUrl.current) { URL.revokeObjectURL(pendingAudioUrl.current); pendingAudioUrl.current = null; }
     if (azureMode) {
       try {
         const assessor = createAssessor({
           getToken: async () => { const r = await post<{ token: string; region: string }>('/api/speech/token'); return { token: r.token, region: r.region }; },
-          onInterim: (t) => setLiveInterim(t),
-          // Append each finalized phrase so the transcript builds up in real time
-          // (the pronunciation/word-timing data still comes from the same event).
-          onPhrase: (t) => { setLiveFinal((f) => (f ? f + ' ' : '') + t); setLiveInterim(''); },
+          // Recognition still runs for scoring; we no longer render the partial
+          // transcript (the waveform indicates speech is being heard instead).
           onError: (e) => setMicNotice(`Speech error: ${e.message}`),
         });
         await assessor.start();
         assessorRef.current = assessor;
         await startLocalRecorder();
+        startWaveform();
         setRecording(true);
       } catch (e: any) { setMicNotice(`Could not start recording (${e?.message || 'error'}). Press Record to try again.`); }
     } else {
-      if (startWebSpeech()) { await startLocalRecorder(); setRecording(true); }
+      if (startWebSpeech()) { await startLocalRecorder(); startWaveform(); setRecording(true); }
     }
   };
 
   const stopRecording = async () => {
-    setRecording(false); setLiveInterim('');
+    setRecording(false);
+    stopWaveform();
     pendingAudioUrl.current = await stopLocalRecorder();
     if (azureMode && assessorRef.current) {
       try {
@@ -440,11 +479,12 @@ export default function CefrSpeakingExam() {
           <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 min-h-[5rem]">
             <div className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Your response</div>
             {recording ? (
-              <p className="text-sm text-gray-700">
-                {liveFinal}
-                {liveInterim && <span className="text-gray-400 italic">{liveFinal ? ' ' : ''}{liveInterim}</span>}
-                {!liveFinal && !liveInterim && <span className="text-gray-400 italic">Listening…</span>}
-              </p>
+              // While speaking we show a live waveform (your speech is being heard
+              // and processed) rather than the streaming transcript.
+              <div className="flex flex-col items-center gap-1 py-2">
+                <canvas ref={canvasRef} width={320} height={44} className="w-full max-w-sm h-11" />
+                <span className="text-[11px] text-gray-400">Listening… your answer is being transcribed</span>
+              </div>
             ) : captured?.transcript ? (
               <p className="text-sm text-gray-800">{captured.transcript}</p>
             ) : (
