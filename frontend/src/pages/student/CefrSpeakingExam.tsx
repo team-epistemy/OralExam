@@ -8,6 +8,10 @@ import type { CefrTurn, CefrBandName, SpeechEvidence } from '../../api/exam';
 import { demoStart, demoAnswer, demoComplete, demoSpeechToken, demoTts, demoGetCefrCalibration, demoSaveCefrCalibration } from '../../api/demo';
 import { createAssessor } from '../../speech/azureAssessor';
 import type { Assessor, AssessResult } from '../../speech/azureAssessor';
+// Pre-recorded examiner intro (static instructions). Bundled so it plays
+// instantly with no ElevenLabs call per session. Regenerate via infra if the
+// welcomeScript() text changes. Vite resolves the hashed, base-correct URL.
+import examinerIntroAudio from '../../assets/examiner-intro.mp3';
 
 // Dedicated CEFR speaking-test flow. Reuses the tested backend communication/
 // engine (Table-3 grading + A1-C2 ladder). Capture is record-only (Azure
@@ -54,11 +58,16 @@ const TOTAL_TURNS = 5;
 // voice that asks the questions, so the student hears the examiner before the
 // first question rather than meeting the voice mid-test. Returned as paragraphs
 // for layout and joined for speech.
-function welcomeScript(topic: string): string[] {
-  const subject = topic ? topic.toLowerCase() : 'a familiar topic';
+// The examiner's opening instructions. Static (topic-agnostic) so it can be a
+// single pre-recorded clip played instantly — see examinerIntroAudio — instead
+// of calling ElevenLabs on every session. The theme is established by the first
+// question, not the intro. Keep this text in sync with the recorded asset; the
+// recording says "begin" lowercase (a mid-sentence capital made the TTS pause),
+// while the screen keeps "Begin" to match the button.
+function welcomeScript(): string[] {
   return [
     'Hello, and welcome. I’m the examiner for today’s speaking test.',
-    `Over the next ten to fifteen minutes, I’ll ask you questions about ${subject}. ` +
+    'Over the next ten to fifteen minutes, I’ll ask you a series of questions. ' +
     'Some will be short. Others will ask you to explain your thinking in more detail, ' +
     'and I may follow up on what you say.',
     'There’s no need to rush. Take a moment to think before you answer. ' +
@@ -123,7 +132,6 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
   const [error, setError] = useState('');
   const [sessionId, setSessionId] = useState('');
   const [prompt, setPrompt] = useState('');
-  const [topic, setTopic] = useState('');
   // Browsers block audio that plays without a user gesture, so the welcome may
   // be refused on arrival. When that happens the student gets a button to play
   // it rather than silently missing the examiner's instructions.
@@ -207,6 +215,21 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
     }
   }, [ttsOn, api]);
   const stopSpeech = useCallback(() => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } }, []);
+
+  // The examiner's opening instructions are a pre-recorded clip — played
+  // instantly from a bundled asset instead of synthesized per session. Routed
+  // through audioRef so Begin's stopSpeech() cuts it off like a spoken prompt.
+  // Returns false when nothing played (muted, or autoplay refused before a gesture).
+  const playIntro = useCallback(async (): Promise<boolean> => {
+    if (!ttsOn) return false;
+    try {
+      const audio = new Audio(examinerIntroAudio);
+      audioRef.current?.pause();
+      audioRef.current = audio;
+      setTtsAvailable(true);
+      try { await audio.play(); return true; } catch { return false; }
+    } catch { return false; }
+  }, [ttsOn]);
 
   // ── Local audio capture for replay (session-only) ──────────────────────────
   const startLocalRecorder = useCallback(async () => {
@@ -352,7 +375,6 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
         }
         setSessionId(res.session_id);
         setPrompt(res.questions[0]?.text || 'Please speak on the topic.');
-        setTopic(res.theme || '');
         setPhase('ready');
       })
       .catch((e) => { if (!cancelled) { setError(e?.message || 'Could not start the exam.'); setPhase('error'); } });
@@ -366,8 +388,8 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
   useEffect(() => {
     if (phase !== 'ready' || spokenWelcomeRef.current) return;
     spokenWelcomeRef.current = true;
-    speak(welcomeScript(topic).join(' ')).then((ok) => setWelcomeBlocked(!ok));
-  }, [phase, topic, speak]);
+    playIntro().then((ok) => setWelcomeBlocked(!ok));
+  }, [phase, playIntro]);
 
   const begin = async () => {
     // Cut the welcome off cleanly: the student clicked Begin, so the examiner
@@ -439,14 +461,14 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
           </h2>
           {welcomeBlocked && ttsAvailable && (
             <button
-              onClick={() => speak(welcomeScript(topic).join(' ')).then((ok) => setWelcomeBlocked(!ok))}
+              onClick={() => playIntro().then((ok) => setWelcomeBlocked(!ok))}
               className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-50"
             >
               <PlayCircle className="w-3.5 h-3.5" /> Play instructions
             </button>
           )}
         </div>
-        {welcomeScript(topic).map((para, i) => (
+        {welcomeScript().map((para, i) => (
           <p key={i} className="text-[15px] leading-relaxed text-gray-800">{para}</p>
         ))}
       </div>
