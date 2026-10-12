@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2 } from 'lucide-react';
@@ -200,9 +200,9 @@ function AnswerWithPauses({ words }: { words: Array<{ w: string; g: number }> })
       {words.map((tw, i) => (
         <span key={i}>
           {tw.g >= 0.3 && (
-            <span className={tw.g >= 1 ? 'text-red-500' : 'text-amber-500'}
+            <span className={`mx-0.5 font-medium tabular-nums ${tw.g >= 1 ? 'text-red-500' : 'text-amber-500'}`}
                   title={`${tw.g.toFixed(2)}s pause`}>
-              {tw.g >= 1 ? ' ⏸⏸ ' : ' ⏸ '}
+              ({tw.g.toFixed(1)}s)
             </span>
           )}
           {i > 0 && tw.g < 0.3 ? ' ' : ''}{tw.w}
@@ -269,46 +269,89 @@ function CefrTurnScores({ cefr }: { cefr: Cefr }) {
 
 const CEFR_BAND_NAMES = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'] as const;
 
+// CEFR bands are 1–6 for arithmetic (averaging criteria) and named for display.
+const bandToNum = (b?: string | null): number | null => {
+  if (!b) return null;
+  const i = (CEFR_BAND_NAMES as readonly string[]).indexOf(b);
+  return i < 0 ? null : i + 1;
+};
+const numToBand = (n: number | null | undefined): string | null =>
+  n == null ? null : (CEFR_BAND_NAMES[Math.max(0, Math.min(5, Math.round(n) - 1))] ?? null);
+
+// Apply a reviewer's per-dimension band overrides to one turn: an overridden
+// criterion replaces the machine score, and the turn band is re-derived — from
+// an explicit "overall" (Turn band) override if the reviewer set one, otherwise
+// by re-averaging the effective criteria. Turns with no override are unchanged.
+function effectiveTurn(cefr: Cefr, ov: Record<string, string>): Cefr {
+  const t = cefr.turn_number;
+  const scores: Record<string, number | null> = { ...(cefr.scores || {}) };
+  for (const [key] of CRITERIA) {
+    const o = ov[`${t}:${key}`];
+    if (o) scores[key] = bandToNum(o);
+  }
+  const direct = ov[`${t}:overall`];
+  let turnBandNum: number | null;
+  if (direct) {
+    turnBandNum = bandToNum(direct);
+  } else {
+    const vals = CRITERIA.map(([k]) => scores[k]).filter((v): v is number => v != null);
+    turnBandNum = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : cefr.turn_band;
+  }
+  return {
+    ...cefr, scores,
+    turn_band: turnBandNum ?? cefr.turn_band,
+    turn_band_name: numToBand(turnBandNum) ?? cefr.turn_band_name,
+  };
+}
+
+// Re-derive the session result from every graded turn with overrides applied:
+// per-criterion averages across turns, overall = mean of those averages. This is
+// what makes a reviewer's rubric edit flow up into the overall band on Save.
+function effectiveResult(evals: TurnEvaluation[], ov: Record<string, string>): Cefr | null {
+  const base = finalCefr(evals);
+  if (!base) return null;
+  const turns = evals.filter((e) => e.cefr).map((e) => effectiveTurn(e.cefr!, ov));
+  const averages: Record<string, number> = {};
+  for (const [key] of CRITERIA) {
+    const vals = turns.map((t) => t.scores?.[key]).filter((v): v is number => v != null);
+    if (vals.length) averages[key] = vals.reduce((a, b) => a + b, 0) / vals.length;
+  }
+  const avgVals = Object.values(averages);
+  const overallScore = avgVals.length
+    ? avgVals.reduce((a, b) => a + b, 0) / avgVals.length
+    : (base.overall_score ?? 0);
+  return {
+    ...base,
+    criterion_averages: averages,
+    overall_score: overallScore,
+    overall_band: numToBand(overallScore) ?? base.overall_band,
+  };
+}
+
 // Per-dimension band override. Saved against the professor as the rater, so two
 // markers on the same session keep their own judgements and neither overwrites
 // the machine band — the point is to compare them, not replace them. This does
 // not move the released grade; that stays the overall override below.
+// One rubric dimension's band: the model's band on the left, the reviewer's
+// chosen band in the dropdown. Picking a band only STAGES it — the recompute and
+// persistence happen when the reviewer presses Save below.
 function CefrOverrideRow({
-  sessionId, turnNumber, dimension, label, machineBand, value, onSave,
+  label, machineBand, value, onChange,
 }: {
-  sessionId: string; turnNumber: number; dimension: string; label: string;
-  machineBand: string | null; value?: string;
-  onSave: (dimension: string, band: string) => void;
+  label: string; machineBand: string | null; value?: string;
+  onChange: (band: string) => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const save = async (band: string) => {
-    if (!band) return;
-    setBusy(true);
-    try {
-      await saveCefrCalibration({
-        session_id: sessionId, turn_number: turnNumber, dimension,
-        human_band: band, machine_band: machineBand,
-      });
-      onSave(dimension, band);
-    } catch (err: any) {
-      alert(err?.message || 'Could not save the override.');
-    } finally {
-      setBusy(false);
-    }
-  };
   const disagrees = value && machineBand && value !== machineBand;
   return (
     <div className="flex items-center gap-2 text-[11px]">
       <span className="w-20 text-gray-500">{label}</span>
-      <span className={`w-8 text-center rounded ${bandStyle(
-        machineBand ? CEFR_BAND_NAMES.indexOf(machineBand as any) + 1 : null)}`}>
+      <span className={`w-8 text-center rounded ${bandStyle(bandToNum(machineBand))}`}>
         {machineBand || '—'}
       </span>
       <select
         value={value || ''}
-        disabled={busy}
-        onChange={(e) => save(e.target.value)}
-        className="border border-gray-300 rounded px-1 py-0.5 text-[11px] disabled:opacity-50"
+        onChange={(e) => onChange(e.target.value)}
+        className="border border-gray-300 rounded px-1 py-0.5 text-[11px]"
       >
         <option value="">your band…</option>
         {CEFR_BAND_NAMES.map((b) => <option key={b} value={b}>{b}</option>)}
@@ -319,32 +362,29 @@ function CefrOverrideRow({
 }
 
 function CefrCalibrationPanel({
-  sessionId, cefr, overrides, onSave,
+  cefr, draft, onChange,
 }: {
-  sessionId: string; cefr: Cefr;
-  overrides: Record<string, string>;
-  onSave: (turnNumber: number, dimension: string, band: string) => void;
+  cefr: Cefr;
+  draft: Record<string, string>;
+  onChange: (turnNumber: number, dimension: string, band: string) => void;
 }) {
   const dims: Array<[string, string, string | null]> = [
     ['overall', 'Turn band', cefr.turn_band_name || null],
     ...CRITERIA.map(([key, label]) => {
       const v = cefr.scores?.[key];
-      return [key, label,
-              v == null ? null : CEFR_BAND_NAMES[Math.max(0, Math.min(5, Math.round(v) - 1))]] as
-             [string, string, string | null];
+      return [key, label, numToBand(v)] as [string, string, string | null];
     }).filter(([, , band]) => band !== null),
   ];
   return (
     <div className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 space-y-1">
       <p className="text-[10px] uppercase tracking-wide text-gray-400">
-        Your band vs the model's — recorded for calibration, does not change the grade
+        Your band vs the model's — on Save this re-grades the turn and the overall band
       </p>
       {dims.map(([key, label, machine]) => (
         <CefrOverrideRow
-          key={key} sessionId={sessionId} turnNumber={cefr.turn_number}
-          dimension={key} label={label} machineBand={machine}
-          value={overrides[`${cefr.turn_number}:${key}`]}
-          onSave={(d, b) => onSave(cefr.turn_number, d, b)}
+          key={key} label={label} machineBand={machine}
+          value={draft[`${cefr.turn_number}:${key}`]}
+          onChange={(b) => onChange(cefr.turn_number, key, b)}
         />
       ))}
     </div>
@@ -450,6 +490,10 @@ export default function GradeView() {
     },
   });
 
+  // Speaking (CEFR) exams are scored as bands, not EDS — so the EDS average,
+  // score column and band column are hidden for them (they'd be meaningless).
+  const isSpeaking = (assignment?.config as { exam_kind?: string } | undefined)?.exam_kind === 'communication';
+
   const completedSessions = sessions.filter((s) => s.status === 'completed');
   const totalStudents = sessions.length;
   const completionRate = totalStudents > 0 ? Math.round((completedSessions.length / totalStudents) * 100) : 0;
@@ -497,19 +541,21 @@ export default function GradeView() {
       )}
 
       {/* Summary Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className={`grid grid-cols-1 gap-4 ${isSpeaking ? 'sm:grid-cols-2' : 'sm:grid-cols-3'}`}>
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center"><Users className="w-5 h-5 text-blue-600" /></div>
             <div><p className="text-2xl font-bold text-gray-900">{totalStudents}</p><p className="text-xs text-gray-500">Total Students</p></div>
           </div>
         </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-green-50 rounded-lg flex items-center justify-center"><BarChart3 className="w-5 h-5 text-green-600" /></div>
-            <div><p className="text-2xl font-bold text-gray-900">{averageEds}</p><p className="text-xs text-gray-500">Average EDS</p></div>
+        {!isSpeaking && (
+          <div className="bg-white rounded-xl border border-gray-200 p-5">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-green-50 rounded-lg flex items-center justify-center"><BarChart3 className="w-5 h-5 text-green-600" /></div>
+              <div><p className="text-2xl font-bold text-gray-900">{averageEds}</p><p className="text-xs text-gray-500">Average EDS</p></div>
+            </div>
           </div>
-        </div>
+        )}
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-purple-50 rounded-lg flex items-center justify-center"><CheckCircle2 className="w-5 h-5 text-purple-600" /></div>
@@ -531,8 +577,8 @@ export default function GradeView() {
               <tr className="border-b border-gray-100 bg-gray-50">
                 <th className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide px-5 py-3">Student</th>
                 <th className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide px-5 py-3">Status</th>
-                <th className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide px-5 py-3">EDS Score</th>
-                <th className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide px-5 py-3">Band</th>
+                {!isSpeaking && <th className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide px-5 py-3">EDS Score</th>}
+                {!isSpeaking && <th className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide px-5 py-3">Band</th>}
                 <th className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide px-5 py-3">Completed</th>
                 <th className="text-left text-xs font-medium text-gray-500 uppercase tracking-wide px-5 py-3"></th>
               </tr>
@@ -543,6 +589,7 @@ export default function GradeView() {
                   key={session.session_id}
                   session={session}
                   assignmentId={assignmentId!}
+                  isSpeaking={isSpeaking}
                   expanded={expandedSession === session.session_id}
                   onToggle={() => setExpandedSession(expandedSession === session.session_id ? null : session.session_id)}
                   queryClient={queryClient}
@@ -569,12 +616,14 @@ export default function GradeView() {
 function SessionRow({
   session,
   assignmentId,
+  isSpeaking,
   expanded,
   onToggle,
   queryClient,
 }: {
   session: SessionSummary;
   assignmentId: string;
+  isSpeaking: boolean;
   expanded: boolean;
   onToggle: () => void;
   queryClient: ReturnType<typeof useQueryClient>;
@@ -590,16 +639,20 @@ function SessionRow({
       <tr className="hover:bg-gray-50 cursor-pointer transition-colors" onClick={onToggle}>
         <td className="px-5 py-3"><p className="text-sm font-medium text-gray-900">{session.student_email}</p></td>
         <td className="px-5 py-3">{statusBadge(session.status)}</td>
-        <td className="px-5 py-3">
-          <span className={`text-sm font-bold ${edsColor(session.overall_eds)}`}>
-            {session.overall_eds !== null ? `${session.overall_eds}` : '--'}
-          </span>
-        </td>
-        <td className="px-5 py-3">
-          <span className={`text-xs px-2 py-0.5 rounded ${edsBgColor(session.overall_eds)} ${edsColor(session.overall_eds)} font-medium`}>
-            {edsBand(session.overall_eds)}
-          </span>
-        </td>
+        {!isSpeaking && (
+          <td className="px-5 py-3">
+            <span className={`text-sm font-bold ${edsColor(session.overall_eds)}`}>
+              {session.overall_eds !== null ? `${session.overall_eds}` : '--'}
+            </span>
+          </td>
+        )}
+        {!isSpeaking && (
+          <td className="px-5 py-3">
+            <span className={`text-xs px-2 py-0.5 rounded ${edsBgColor(session.overall_eds)} ${edsColor(session.overall_eds)} font-medium`}>
+              {edsBand(session.overall_eds)}
+            </span>
+          </td>
+        )}
         <td className="px-5 py-3">
           <span className="text-xs text-gray-500">{session.completed_at ? new Date(session.completed_at).toLocaleDateString() : '--'}</span>
         </td>
@@ -609,7 +662,7 @@ function SessionRow({
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={6} className="px-5 py-4 bg-gray-50 border-t border-gray-100">
+          <td colSpan={isSpeaking ? 4 : 6} className="px-5 py-4 bg-gray-50 border-t border-gray-100">
             <SessionDetail sessionId={session.session_id} sessionGrade={sessionGrade} assignmentId={assignmentId} queryClient={queryClient} />
           </td>
         </tr>
@@ -629,28 +682,81 @@ function SessionDetail({
   assignmentId: string;
   queryClient: ReturnType<typeof useQueryClient>;
 }) {
-  // This professor's own band overrides for the session, keyed "turn:dimension".
+  // This reviewer's own band overrides for the session, keyed "turn:dimension".
   // Scoped per rater server-side, so two markers never see each other's.
+  //   draft   — what the dropdowns currently show (edited freely)
+  //   applied — what the transcript is re-graded against (committed on Save)
+  // Both start from what was previously saved, so an earlier calibration is
+  // already reflected in the transcript on open.
   const { data: savedOverrides } = useQuery({
     queryKey: ['cefr-calibration', sessionId],
     queryFn: () => getCefrCalibration(sessionId),
     enabled: !!sessionId,
   });
-  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [applied, setApplied] = useState<Record<string, string>>({});
+  const [savingCal, setSavingCal] = useState(false);
   useEffect(() => {
     if (savedOverrides) {
-      setOverrides(Object.fromEntries(
-        savedOverrides.map((o) => [`${o.turn_number}:${o.dimension}`, o.human_band])));
+      const m = Object.fromEntries(
+        savedOverrides.map((o) => [`${o.turn_number}:${o.dimension}`, o.human_band]));
+      setDraft(m);
+      setApplied(m);
     }
   }, [savedOverrides]);
-  const noteOverride = (turnNumber: number, dimension: string, band: string) =>
-    setOverrides((o) => ({ ...o, [`${turnNumber}:${dimension}`]: band }));
+  const noteDraft = (turnNumber: number, dimension: string, band: string) =>
+    setDraft((d) => ({ ...d, [`${turnNumber}:${dimension}`]: band }));
+
+  // The model's band for every dimension of every turn — needed when persisting
+  // an override (we record what the reviewer disagreed with) and to recompute.
+  const machineByKey = useMemo(() => {
+    const m: Record<string, string | null> = {};
+    for (const e of sessionGrade?.evaluations || []) {
+      const c = e.cefr;
+      if (!c) continue;
+      m[`${c.turn_number}:overall`] = c.turn_band_name || null;
+      for (const [key] of CRITERIA) m[`${c.turn_number}:${key}`] = numToBand(c.scores?.[key]);
+    }
+    return m;
+  }, [sessionGrade]);
+
+  const calDirty = useMemo(() => {
+    const keys = new Set([...Object.keys(draft), ...Object.keys(applied)]);
+    for (const k of keys) if ((draft[k] || '') !== (applied[k] || '')) return true;
+    return false;
+  }, [draft, applied]);
+
+  // Persist every staged band that changed, then apply it so the transcript
+  // (per-turn and overall bands) re-grades against the reviewer's calibration.
+  const saveCalibration = async () => {
+    setSavingCal(true);
+    try {
+      const changed = Object.entries(draft).filter(([k, v]) => v && v !== applied[k]);
+      await Promise.all(changed.map(([k, band]) => {
+        const sep = k.indexOf(':');
+        const turnNumber = Number(k.slice(0, sep));
+        const dimension = k.slice(sep + 1);
+        return saveCefrCalibration({
+          session_id: sessionId, turn_number: turnNumber, dimension,
+          human_band: band, machine_band: machineByKey[k] ?? null,
+        });
+      }));
+      setApplied(draft);
+    } catch (err: any) {
+      alert(err?.message || 'Could not save the calibration.');
+      throw err;
+    } finally {
+      setSavingCal(false);
+    }
+  };
 
   if (!sessionGrade) {
     return <p className="text-sm text-gray-500">Loading session details...</p>;
   }
 
-  const cefrResult = finalCefr(sessionGrade.evaluations || []);
+  // The result re-graded against the committed overrides — a reviewer's rubric
+  // edit flows up into the overall band here once they Save.
+  const cefrResult = effectiveResult(sessionGrade.evaluations || [], applied);
 
   return (
     <div className="space-y-4">
@@ -672,7 +778,8 @@ function SessionDetail({
                   {(() => {
                     // A speaking exam's score is a CEFR band, not an EDS bucket —
                     // show the band so the header matches the panel below it.
-                    const gc = finalCefr(group.attempts);
+                    // Re-graded against the reviewer's committed overrides.
+                    const gc = effectiveResult(group.attempts, applied);
                     if (gc) {
                       return (
                         <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${bandStyle(Math.round(gc.overall_score ?? 0))}`}>
@@ -714,11 +821,12 @@ function SessionDetail({
                       )}
                       {ev.cefr && (
                         <>
-                          <CefrTurnScores cefr={ev.cefr} />
+                          {/* Turn scores re-graded against committed overrides;
+                              the calibration panel still shows the model's bands. */}
+                          <CefrTurnScores cefr={effectiveTurn(ev.cefr, applied)} />
                           <CefrAcoustics cefr={ev.cefr} />
                           <CefrCalibrationPanel
-                            sessionId={sessionId} cefr={ev.cefr}
-                            overrides={overrides} onSave={noteOverride} />
+                            cefr={ev.cefr} draft={draft} onChange={noteDraft} />
                         </>
                       )}
                       {ev.components && (
@@ -739,7 +847,15 @@ function SessionDetail({
         <p className="text-sm text-gray-500">No evaluations recorded for this session.</p>
       )}
 
-      <GradeEditor sessionId={sessionId} sessionGrade={sessionGrade} assignmentId={assignmentId} queryClient={queryClient} />
+      <GradeEditor
+        sessionId={sessionId} sessionGrade={sessionGrade} assignmentId={assignmentId}
+        queryClient={queryClient}
+        isSpeaking={!!cefrResult}
+        overallBand={cefrResult?.overall_band ?? null}
+        calDirty={calDirty}
+        savingCal={savingCal}
+        onSaveCalibration={calDirty ? saveCalibration : undefined}
+      />
     </div>
   );
 }
@@ -749,11 +865,23 @@ function GradeEditor({
   sessionGrade,
   assignmentId,
   queryClient,
+  isSpeaking = false,
+  overallBand = null,
+  calDirty = false,
+  savingCal = false,
+  onSaveCalibration,
 }: {
   sessionId: string;
   sessionGrade: SessionGrade;
   assignmentId: string;
   queryClient: ReturnType<typeof useQueryClient>;
+  // Speaking (CEFR) exams carry no numeric grade — the overall band stands in,
+  // and Save also commits the reviewer's rubric calibration.
+  isSpeaking?: boolean;
+  overallBand?: string | null;
+  calDirty?: boolean;
+  savingCal?: boolean;
+  onSaveCalibration?: () => Promise<void>;
 }) {
   const [score, setScore] = useState('');
   const [comment, setComment] = useState('');
@@ -769,7 +897,8 @@ function GradeEditor({
 
   const mutation = useMutation({
     mutationFn: () => post(`/api/grades/${sessionId}`, {
-      score: score === '' ? null : Number(score),
+      // Speaking exams are band-only — never write a numeric score for them.
+      score: isSpeaking ? null : (score === '' ? null : Number(score)),
       comment,
     }),
     onSuccess: () => {
@@ -780,8 +909,8 @@ function GradeEditor({
     },
   });
 
-  const handleSave = () => {
-    if (score !== '') {
+  const handleSave = async () => {
+    if (!isSpeaking && score !== '') {
       const n = Number(score);
       if (Number.isNaN(n) || n < 0 || n > 100) {
         setError('Score must be between 0 and 100');
@@ -789,9 +918,15 @@ function GradeEditor({
       }
     }
     setError('');
+    // Commit any staged rubric calibration first, so the re-graded bands are
+    // applied before (and regardless of) the comment save.
+    if (onSaveCalibration) {
+      try { await onSaveCalibration(); } catch { return; }
+    }
     mutation.mutate();
   };
 
+  const busy = mutation.isPending || savingCal;
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center justify-between">
@@ -800,13 +935,25 @@ function GradeEditor({
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-[140px_1fr] gap-3">
         <div>
-          <label className="block text-xs font-medium text-gray-500 mb-1">Grade (0–100)</label>
-          <input
-            type="number" min={0} max={100} value={score}
-            onChange={(e) => setScore(e.target.value)}
-            className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            placeholder="e.g. 75"
-          />
+          {isSpeaking ? (
+            <>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Overall CEFR band</label>
+              <div className={`inline-flex items-center justify-center min-w-[3rem] px-3 py-1.5 rounded-lg text-sm font-bold ${bandStyle(bandToNum(overallBand))}`}>
+                {overallBand || '—'}
+              </div>
+              {calDirty && <p className="mt-1 text-[11px] text-amber-600">Unsaved calibration — Save to apply.</p>}
+            </>
+          ) : (
+            <>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Grade (0–100)</label>
+              <input
+                type="number" min={0} max={100} value={score}
+                onChange={(e) => setScore(e.target.value)}
+                className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="e.g. 75"
+              />
+            </>
+          )}
         </div>
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">Overall comments (shown to the student)</label>
@@ -823,11 +970,11 @@ function GradeEditor({
       <div className="flex items-center gap-3">
         <button
           onClick={handleSave}
-          disabled={mutation.isPending}
+          disabled={busy}
           className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
         >
-          {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-          {mutation.isPending ? 'Saving…' : 'Save'}
+          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+          {busy ? 'Saving…' : 'Save'}
         </button>
         {saved && <span className="text-xs text-green-600">Saved</span>}
         {released && <span className="text-[11px] text-gray-400">Edits update what the student sees.</span>}
@@ -892,8 +1039,9 @@ function ReleasePreviewCard({ title, session }: { title: string; session: Sessio
 
   const scorePct = grade?.final_score != null ? Math.round(grade.final_score * 100) : session.overall_eds;
   const groups = grade?.evaluations ? groupByQuestion(grade.evaluations) : [];
-  // A speaking exam's grade is a CEFR band; the /100 is that band over six.
+  // A speaking exam's grade is a CEFR band — shown band-only, no numeric score.
   const cefrResult = finalCefr(grade?.evaluations || []);
+  const isSpeaking = !!cefrResult;
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -909,16 +1057,16 @@ function ReleasePreviewCard({ title, session }: { title: string; session: Sessio
         {/* Grade */}
         <div>
           <p className="text-[11px] uppercase tracking-wide text-gray-400">Grade</p>
-          <p className={`text-2xl font-bold ${edsColor(scorePct ?? null)}`}>
-            {scorePct != null ? scorePct : '--'}<span className="text-sm text-gray-400">/100</span>
-            {cefrResult ? (
-              <span className={`ml-2 text-xs px-2 py-0.5 rounded align-middle font-semibold ${bandStyle(Math.round(cefrResult.overall_score ?? 0))}`}>
-                CEFR {cefrResult.overall_band}
-              </span>
-            ) : (
+          {isSpeaking ? (
+            <p className={`text-2xl font-bold ${bandStyle(Math.round(cefrResult!.overall_score ?? 0)).split(' ').find((c) => c.startsWith('text-')) || 'text-gray-700'}`}>
+              CEFR {cefrResult!.overall_band || '—'}
+            </p>
+          ) : (
+            <p className={`text-2xl font-bold ${edsColor(scorePct ?? null)}`}>
+              {scorePct != null ? scorePct : '--'}<span className="text-sm text-gray-400">/100</span>
               <span className={`ml-2 text-xs px-2 py-0.5 rounded align-middle ${edsBgColor(scorePct ?? null)} ${edsColor(scorePct ?? null)}`}>{edsBand(scorePct ?? null)}</span>
-            )}
-          </p>
+            </p>
+          )}
         </div>
         {/* Overall comments */}
         <div>
@@ -942,7 +1090,14 @@ function ReleasePreviewCard({ title, session }: { title: string; session: Sessio
                 <li key={g.turn_index} className="text-sm">
                   <div className="flex items-start justify-between gap-3">
                     <p className="text-gray-800 font-medium">Q{g.turn_index + 1}. {g.question_text || 'Question'}</p>
-                    <span className={`text-xs font-semibold whitespace-nowrap ${edsColor(g.eds_score * 100)}`}>{Math.round(g.eds_score * 100)}/100</span>
+                    {(() => {
+                      const gc = finalCefr(g.attempts);
+                      return gc ? (
+                        <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${bandStyle(Math.round(gc.overall_score ?? 0))}`}>{gc.overall_band}</span>
+                      ) : (
+                        <span className={`text-xs font-semibold whitespace-nowrap ${edsColor(g.eds_score * 100)}`}>{Math.round(g.eds_score * 100)}/100</span>
+                      );
+                    })()}
                   </div>
                   {(() => {
                     const last = g.attempts[g.attempts.length - 1];
