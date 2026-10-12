@@ -64,7 +64,7 @@ function welcomeScript(topic: string): string[] {
     'There’s no need to rush. Take a moment to think before you answer. ' +
     'Try to answer in full sentences and say as much as you can.',
     'This session is being recorded so your responses can be reviewed.',
-    'When you’re ready, click Begin and we’ll start with the first question.',
+    'When you’re ready, click begin and we’ll start with the first question.',
   ];
 }
 
