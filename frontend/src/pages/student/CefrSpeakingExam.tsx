@@ -642,8 +642,14 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
           </div>
         </div>
 
-        {/* Live scorecard — "This answer" vs "Running overall" kept distinct (#5 fix) */}
+        {/* Live scorecard — "This answer" vs "Running overall" kept distinct (#5 fix).
+            Demo only: it exposes our live scoring to the reviewer. A real student
+            is never shown their running band mid-exam. */}
+        {demoToken && (
         <aside className="w-64 flex-shrink-0 hidden lg:block border-l border-gray-100 pl-4">
+          <div className="mb-3 rounded-lg bg-amber-50 border border-amber-200 px-3 py-1.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Live Scoring — only visible in Demo Mode</p>
+          </div>
           {!latest ? <p className="text-sm text-gray-400">Scores appear after your first answer.</p> : (
             <div className="space-y-4">
               <div>
@@ -674,6 +680,7 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
             </div>
           )}
         </aside>
+        )}
       </div>
     </div>
   );
