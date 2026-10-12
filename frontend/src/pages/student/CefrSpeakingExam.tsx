@@ -138,6 +138,9 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
   const [ttsAvailable, setTtsAvailable] = useState(true);
   const [micNotice, setMicNotice] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+  // Demo only: the detailed transcript is reached through an explicit examiner
+  // hand-off screen, since there is no professor view in the credential-free demo.
+  const [transcriptRevealed, setTranscriptRevealed] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const assessorRef = useRef<Assessor | null>(null);
@@ -471,6 +474,31 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
   // Done — detailed per-prompt transcript (#6).
   if (phase === 'done') {
     const final = history[history.length - 1];
+    // Demo hand-off: there is no professor view, so the examiner opens the
+    // detailed transcript from here rather than a graded dashboard.
+    if (demoToken && !transcriptRevealed) {
+      return (
+        <div className="max-w-xl mx-auto p-8 text-center space-y-6">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Speaking test complete</h1>
+            <p className="text-sm text-gray-500 mt-1.5">Thanks — your {answers.length} responses have been recorded for this demo.</p>
+          </div>
+          <div className="rounded-2xl border-2 border-blue-200 bg-blue-50 p-6 space-y-3">
+            <h2 className="text-lg font-semibold text-blue-900">Transcript for review by the examiner</h2>
+            <p className="text-sm text-blue-800/80">
+              A full per-prompt transcript — CEFR bands, pauses, pronunciation evidence,
+              and the examiner's calibration controls — is ready to review.
+            </p>
+            <button
+              onClick={() => setTranscriptRevealed(true)}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition-colors"
+            >
+              Open the detailed transcript
+            </button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="max-w-3xl mx-auto p-6 space-y-6">
         <h1 className="text-2xl font-bold text-gray-900">Speaking test complete</h1>
@@ -565,7 +593,7 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
   return (
     <div className="max-w-5xl mx-auto p-4">
       <div className="bg-blue-600 text-white rounded-t-xl px-5 py-3 flex items-center justify-between">
-        <span className="font-semibold">CEFR Speaking Test</span>
+        <span className="font-semibold">{demoToken ? 'Concept Experience · For DEMO Purposes Only' : 'CEFR Speaking Test'}</span>
         <span className="text-sm text-blue-100">Turn {Math.min(turnNo + 1, TOTAL_TURNS)} of {TOTAL_TURNS}{azureMode ? '' : ' · text mode'}</span>
       </div>
       <div className="flex gap-5 bg-white rounded-b-xl border-2 border-t-0 border-gray-200 p-5">
