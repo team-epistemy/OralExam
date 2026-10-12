@@ -1,6 +1,6 @@
 import { API_BASE_URL } from '../config';
 import { post } from './client';
-import type { StartExamResponse, AnswerResponse, SessionStatus, CaseMaterial } from './exam';
+import type { StartExamResponse, AnswerResponse, SessionStatus, CaseMaterial, CefrOverride, SpeechEvidence, TimedWordPayload } from './exam';
 
 // Professor mints a credential-free demo link for one of their assignments (authed).
 export interface DemoLinkCreated {
@@ -36,6 +36,7 @@ export interface DemoMeta {
   question_count: number;
   attempts_remaining: number;
   text_first: boolean;
+  exam_kind?: string | null;   // 'communication' → the CEFR speaking UI
   status?: string;     // set on error responses (not_found | expired | exhausted)
   message?: string;
 }
@@ -53,10 +54,11 @@ export function demoStart(token: string): Promise<StartExamResponse & { status?:
   return demoJson('POST', `/api/demo/${token}/start`, {});
 }
 
-export function demoAnswer(token: string, sessionId: string, questionIndex: number, answerText: string):
-  Promise<AnswerResponse> {
+export function demoAnswer(token: string, sessionId: string, questionIndex: number, answerText: string,
+  speech?: SpeechEvidence, words?: TimedWordPayload[]): Promise<AnswerResponse> {
   return demoJson('POST', `/api/demo/${token}/answer?session_id=${encodeURIComponent(sessionId)}`,
-    { question_index: questionIndex, answer_text: answerText });
+    { question_index: questionIndex, answer_text: answerText,
+      ...(speech ? { speech } : {}), ...(words && words.length ? { words } : {}) });
 }
 
 export function demoStatus(token: string, sessionId: string): Promise<SessionStatus> {
@@ -76,4 +78,20 @@ export async function demoTts(token: string, text: string): Promise<HTMLAudioEle
   });
   if (!res.ok) return null;
   return new Audio(URL.createObjectURL(await res.blob()));
+}
+
+// Public Azure Speech token for the demo (gated by the demo link, server-side).
+export function demoSpeechToken(token: string): Promise<{ token: string; region: string }> {
+  return demoJson('POST', `/api/demo/${token}/speech-token`, {});
+}
+
+// Demo reviewer's per-dimension band overrides (rater scoped to the demo token).
+export async function demoGetCefrCalibration(token: string, sessionId: string): Promise<CefrOverride[]> {
+  const r = await demoJson<{ overrides: CefrOverride[] }>('GET', `/api/demo/${token}/cefr-calibration?session_id=${encodeURIComponent(sessionId)}`);
+  return r.overrides || [];
+}
+export async function demoSaveCefrCalibration(token: string, body: {
+  session_id: string; turn_number: number; dimension: string; human_band: string; machine_band?: string | null;
+}): Promise<void> {
+  await demoJson('POST', `/api/demo/${token}/cefr-calibration`, body);
 }

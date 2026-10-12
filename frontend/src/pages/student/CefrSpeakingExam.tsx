@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Mic, Square, PlayCircle, Send, Volume2, VolumeX, Loader2, RotateCcw } from 'lucide-react';
 import { API_BASE_URL } from '../../config';
 import { post } from '../../api/client';
 import { startExamSession, submitAnswer, completeSession, getCefrCalibration, saveCefrCalibration } from '../../api/exam';
 import type { CefrTurn, CefrBandName, SpeechEvidence } from '../../api/exam';
+import { demoStart, demoAnswer, demoComplete, demoSpeechToken, demoTts, demoGetCefrCalibration, demoSaveCefrCalibration } from '../../api/demo';
 import { createAssessor } from '../../speech/azureAssessor';
 import type { Assessor, AssessResult } from '../../speech/azureAssessor';
 
@@ -114,7 +115,7 @@ function ResponseWithPauses({ pron }: { pron: AssessResult | null }) {
   );
 }
 
-export default function CefrSpeakingExam() {
+export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } = {}) {
   const { assignmentId } = useParams<{ assignmentId: string }>();
   const navigate = useNavigate();
 
@@ -150,6 +151,36 @@ export default function CefrSpeakingExam() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number>(0);
 
+  // Route every backend call to the demo endpoints when a demoToken is present,
+  // else the authenticated ones. One UI drives both the real exam and the
+  // credential-free demo; the scoring engine behind both is identical.
+  const api = useMemo(() => demoToken ? {
+    start: () => demoStart(demoToken),
+    answer: (sid: string, ans: string, sp?: SpeechEvidence, w?: Array<{ w: string; g: number }>) => demoAnswer(demoToken, sid, 0, ans, sp, w),
+    complete: (sid: string) => demoComplete(demoToken, sid),
+    speechToken: () => demoSpeechToken(demoToken),
+    tts: (text: string) => demoTts(demoToken, text),
+    getCalibration: (sid: string) => demoGetCefrCalibration(demoToken, sid),
+    saveCalibration: (body: { session_id: string; turn_number: number; dimension: string; human_band: string; machine_band?: string | null }) => demoSaveCefrCalibration(demoToken, body),
+  } : {
+    start: () => startExamSession(assignmentId!),
+    answer: (sid: string, ans: string, sp?: SpeechEvidence, w?: Array<{ w: string; g: number }>) => submitAnswer(sid, 0, ans, sp, w),
+    complete: (sid: string) => completeSession(sid),
+    speechToken: () => post<{ token: string; region: string }>('/api/speech/token'),
+    tts: async (text: string): Promise<HTMLAudioElement | null> => {
+      const t = localStorage.getItem('token');
+      const resp = await fetch(`${API_BASE_URL}/api/tts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(t ? { Authorization: `Bearer ${t}` } : {}) },
+        body: JSON.stringify({ text }),
+      });
+      if (!resp.ok) { if (resp.status === 503) setTtsAvailable(false); return null; }
+      return new Audio(URL.createObjectURL(await resp.blob()));
+    },
+    getCalibration: (sid: string) => getCefrCalibration(sid),
+    saveCalibration: (body: { session_id: string; turn_number: number; dimension: string; human_band: string; machine_band?: string | null }) => saveCefrCalibration(body),
+  }, [demoToken, assignmentId]);
+
   // ── TTS (ElevenLabs proxy) ───────────────────────────────────────────────
   // Returns false when nothing was spoken — TTS unavailable, or the browser
   // refused playback for want of a user gesture. The welcome needs to know,
@@ -157,15 +188,9 @@ export default function CefrSpeakingExam() {
   const speak = useCallback(async (text: string): Promise<boolean> => {
     if (!ttsOn || !text) return false;
     try {
-      const token = localStorage.getItem('token');
-      const resp = await fetch(`${API_BASE_URL}/api/tts`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ text }),
-      });
-      if (!resp.ok) { if (resp.status === 503) setTtsAvailable(false); return false; }
+      const audio = await api.tts(text);
+      if (!audio) return false;
       setTtsAvailable(true);
-      const audio = new Audio(URL.createObjectURL(await resp.blob()));
       audioRef.current?.pause();
       audioRef.current = audio;
       try {
@@ -177,7 +202,7 @@ export default function CefrSpeakingExam() {
     } catch {
       return false;
     }
-  }, [ttsOn]);
+  }, [ttsOn, api]);
   const stopSpeech = useCallback(() => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } }, []);
 
   // ── Local audio capture for replay (session-only) ──────────────────────────
@@ -271,7 +296,7 @@ export default function CefrSpeakingExam() {
     if (azureMode) {
       try {
         const assessor = createAssessor({
-          getToken: async () => { const r = await post<{ token: string; region: string }>('/api/speech/token'); return { token: r.token, region: r.region }; },
+          getToken: async () => { const r = await api.speechToken(); return { token: r.token, region: r.region }; },
           // Recognition still runs for scoring; we no longer render the partial
           // transcript (the waveform indicates speech is being heard instead).
           onError: (e) => setMicNotice(`Speech error: ${e.message}`),
@@ -311,11 +336,17 @@ export default function CefrSpeakingExam() {
 
   // ── Session ────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!assignmentId) return;
+    if (!assignmentId && !demoToken) return;
     let cancelled = false;
-    startExamSession(assignmentId)
+    api.start()
       .then((res) => {
         if (cancelled) return;
+        // Demo start can come back as an unavailable-link payload rather than a session.
+        if ((res as any).status && (res as any).status !== 'ok') {
+          setError((res as any).message || 'This demo link is no longer available.');
+          setPhase('error');
+          return;
+        }
         setSessionId(res.session_id);
         setPrompt(res.questions[0]?.text || 'Please speak on the topic.');
         setTopic(res.theme || '');
@@ -323,7 +354,7 @@ export default function CefrSpeakingExam() {
       })
       .catch((e) => { if (!cancelled) { setError(e?.message || 'Could not start the exam.'); setPhase('error'); } });
     return () => { cancelled = true; };
-  }, [assignmentId]);
+  }, [assignmentId, demoToken, api]);
   useEffect(() => () => { stopSpeech(); recStreamRef.current?.getTracks().forEach((t) => t.stop()); }, [stopSpeech]);
 
   // Read the welcome aloud once the session is ready. Spoken by the same voice
@@ -339,7 +370,7 @@ export default function CefrSpeakingExam() {
     // Cut the welcome off cleanly: the student clicked Begin, so the examiner
     // must not still be reading the instructions over the first question.
     stopSpeech();
-    try { await post('/api/speech/token'); setAzureMode(true); } catch { setAzureMode(false); }
+    try { await api.speechToken(); setAzureMode(true); } catch { setAzureMode(false); }
     setPhase('taking');
     speak(prompt);
   };
@@ -355,16 +386,16 @@ export default function CefrSpeakingExam() {
     pendingAudioUrl.current = null;
     setCaptured(null);
     try {
-      const resp = await submitAnswer(sessionId, 0, answer, toSpeechEvidence(pron),
-                                      pron?.words?.map((w) => ({ w: w.word, g: w.gapBefore })));
+      const resp = await api.answer(sessionId, answer, toSpeechEvidence(pron),
+                                    pron?.words?.map((w) => ({ w: w.word, g: w.gapBefore })));
       if (resp.cefr) setHistory((h) => [...h, resp.cefr!]);
       setAnswers((a) => [...a, {
         turnNumber: resp.cefr?.turn_number ?? a.length + 1,
         prompt: thisPrompt, pron, cefr: resp.cefr ?? null, feedback: resp.feedback || '', audioUrl,
       }]);
       if (!resp.probe) {
-        try { await completeSession(sessionId); } catch { /* best-effort */ }
-        try { const ov = await getCefrCalibration(sessionId); setOverrides(Object.fromEntries(ov.map((o) => [`${o.turn_number}:${o.dimension}`, o.human_band]))); } catch { /* ignore */ }
+        try { await api.complete(sessionId); } catch { /* best-effort */ }
+        try { const ov = await api.getCalibration(sessionId); setOverrides(Object.fromEntries(ov.map((o) => [`${o.turn_number}:${o.dimension}`, o.human_band]))); } catch { /* ignore */ }
         setPhase('done');
       } else {
         setPrompt(resp.probe);
@@ -376,7 +407,7 @@ export default function CefrSpeakingExam() {
 
   const saveOverride = async (turnNumber: number, dimension: string, human: string, machine: string | null) => {
     setOverrides((o) => ({ ...o, [`${turnNumber}:${dimension}`]: human }));
-    try { await saveCefrCalibration({ session_id: sessionId, turn_number: turnNumber, dimension, human_band: human, machine_band: machine }); }
+    try { await api.saveCalibration({ session_id: sessionId, turn_number: turnNumber, dimension, human_band: human, machine_band: machine }); }
     catch { setMicNotice('Could not save the calibration — check your connection.'); }
   };
 
@@ -523,7 +554,9 @@ export default function CefrSpeakingExam() {
             </div>
           );
         })}
-        <button onClick={() => navigate(`/student/results/${assignmentId}`)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">View results</button>
+        {demoToken
+          ? <p className="text-sm text-gray-500">That's the end of the demo — thanks for trying it. Each turn's bands and calibration are shown above.</p>
+          : <button onClick={() => navigate(`/student/results/${assignmentId}`)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">View results</button>}
       </div>
     );
   }

@@ -131,6 +131,8 @@ DEMO_ANSWER = "/api/demo/{token}/answer"                       # POST submit an 
 DEMO_STATUS = "/api/demo/{token}/status"                       # GET session status
 DEMO_COMPLETE = "/api/demo/{token}/complete"                   # POST complete a demo session
 DEMO_TTS = "/api/demo/{token}/tts"                             # POST text-to-speech proxy
+DEMO_SPEECH_TOKEN = "/api/demo/{token}/speech-token"           # POST public Azure Speech token (gated by the demo link)
+DEMO_CEFR_CALIBRATION = "/api/demo/{token}/cefr-calibration"   # POST/GET demo reviewer band overrides
 
 
 def frontend_config() -> dict:

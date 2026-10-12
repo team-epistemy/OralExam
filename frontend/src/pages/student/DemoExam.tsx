@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import TakeExam from './TakeExam';
+import CefrSpeakingExam from './CefrSpeakingExam';
 import { demoMeta, type DemoMeta } from '../../api/demo';
 
 // Public, credential-free demo. Validates the token (expiry / attempt cap live on the
@@ -46,14 +47,17 @@ export default function DemoExam() {
     );
   }
 
+  const isSpeaking = meta.exam_kind === 'communication';
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
+    <div className={`${isSpeaking ? 'max-w-7xl' : 'max-w-5xl'} mx-auto px-4 py-6`}>
       <div className="mb-3 flex flex-wrap items-center gap-2 bg-blue-50 border border-blue-200 text-blue-800 rounded-xl px-4 py-2.5 text-sm">
         <span className="font-semibold">Epistemy demo</span>
         <span>— no login required. This is a practice run; nothing is saved.</span>
         <span className="ml-auto text-blue-600 text-xs">{meta.attempts_remaining} attempt{meta.attempts_remaining === 1 ? '' : 's'} left</span>
       </div>
-      <TakeExam demoToken={token} assignmentId={meta.assignment_id} />
+      {isSpeaking
+        ? <CefrSpeakingExam demoToken={token} />
+        : <TakeExam demoToken={token} assignmentId={meta.assignment_id} />}
     </div>
   );
 }

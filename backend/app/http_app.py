@@ -1329,17 +1329,26 @@ def _register_demo(app: FastAPI, deps) -> None:
                     cur.execute("SELECT to_regclass('public.demo_link')")
                     if cur.fetchone()[0] is None:
                         return {"status": "error", "message": "demo_link table not present — run migration_026."}
-                    cur.execute("SELECT title FROM assignment WHERE assignment_id = %s::uuid", (assignment_id,))
+                    cur.execute("SELECT title, config FROM assignment WHERE assignment_id = %s::uuid", (assignment_id,))
                     arow = cur.fetchone()
                     if not arow:
                         raise AuthorizationError("assignment not found")
+                    # Speaking (CEFR) demos are for a reviewer, not a student, and each run
+                    # is a full multi-turn session — so give them a roomier default cap than
+                    # the subject-test demos (50 attempts / 45 days), unless the caller asked
+                    # for more. The frontend mints with defaults, so this is the effective cap.
+                    cfg = arow[1] if isinstance(arow[1], dict) else {}
+                    days, max_attempts = req.days, req.max_attempts
+                    if cfg.get("exam_kind") == "communication":
+                        days = max(days, 45)
+                        max_attempts = max(max_attempts, 50)
                     token = _secrets.token_urlsafe(16)
                     cur.execute("""INSERT INTO demo_link (token, org_id, assignment_id, max_attempts, expires_at, created_by)
                                    VALUES (%s, %s::uuid, %s::uuid, %s, NOW() + (%s || ' days')::interval, %s)""",
-                                (token, caller.org_id, assignment_id, req.max_attempts, req.days, caller.user_id))
+                                (token, caller.org_id, assignment_id, max_attempts, days, caller.user_id))
                 repo.conn.commit()
                 return {"token": token, "url": DEMO_URL_BASE + token, "title": arow[0],
-                        "assignment_id": assignment_id, "days": req.days, "max_attempts": req.max_attempts}
+                        "assignment_id": assignment_id, "days": days, "max_attempts": max_attempts}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -1365,14 +1374,17 @@ def _register_demo(app: FastAPI, deps) -> None:
         def _fn(d, repo, link):
             org_id, assignment_id = link[1], str(link[2])
             with repo.conn.cursor() as cur:
-                cur.execute("""SELECT a.title, a.question_set_id FROM assignment a WHERE a.assignment_id = %s::uuid""",
+                cur.execute("""SELECT a.title, a.question_set_id, a.config FROM assignment a WHERE a.assignment_id = %s::uuid""",
                             (assignment_id,))
                 a = cur.fetchone()
                 cur.execute("SELECT COUNT(*) FROM question_set_membership WHERE question_set_id = %s::uuid",
                             (str(a[1]),) if a else (None,))
                 qc = cur.fetchone()[0] if a else 0
+            config = a[2] if a and isinstance(a[2], dict) else {}
             return {"assignment_id": assignment_id, "title": a[0] if a else "Demo",
                     "question_count": qc, "attempts_remaining": link[3] - link[4],
+                    # exam_kind lets the demo page pick the CEFR speaking UI vs the Socratic one.
+                    "exam_kind": config.get("exam_kind"),
                     "text_first": get_text_first(repo, org_id)}
         return _with_demo(token, _fn)
 
@@ -1409,11 +1421,12 @@ def _register_demo(app: FastAPI, deps) -> None:
                 if not got:
                     repo.conn.rollback()
                     return {"status": "exhausted", "message": "This demo has reached its attempt limit."}
-                cur.execute("SELECT course_id, question_set_id FROM assignment WHERE assignment_id = %s::uuid",
+                cur.execute("SELECT course_id, question_set_id, config FROM assignment WHERE assignment_id = %s::uuid",
                             (assignment_id,))
                 arow = cur.fetchone()
             repo.conn.commit()
             course_id = str(arow[0]); question_set_id = str(arow[1])
+            config = arow[2] if isinstance(arow[2], dict) else {}
             student_id = f"demo:{link[0][:10]}:{_uuid.uuid4().hex[:8]}"
             session_id = str(_uuid.uuid4())
             with repo.conn.cursor() as cur:
@@ -1428,7 +1441,10 @@ def _register_demo(app: FastAPI, deps) -> None:
             repo.conn.commit()
             questions = [{"question_id": str(q[0]), "topic": (q[2][0] if isinstance(q[2], list) and q[2] else "general"),
                           "text": q[1], "index": q[3]} for q in qrows]
-            return {"session_id": session_id, "questions": questions, "demo_student_id": student_id}
+            return {"session_id": session_id, "questions": questions, "demo_student_id": student_id,
+                    # Mirror the authed start: the speaking UI uses these for its
+                    # examiner welcome and to pick the CEFR flow.
+                    "exam_kind": config.get("exam_kind"), "theme": config.get("cefr_theme")}
         return _with_demo(token, _fn)
 
     @app.post(R.DEMO_ANSWER)
@@ -1444,8 +1460,19 @@ def _register_demo(app: FastAPI, deps) -> None:
             if not srow or not str(srow[0]).startswith(f"demo:{link[0][:10]}:"):
                 return {"status": "forbidden", "message": "session does not belong to this demo"}
             with repo.conn.cursor() as cur:
-                cur.execute("SELECT question_set_id FROM assignment WHERE assignment_id = %s::uuid", (assignment_id,))
-                qset = str(cur.fetchone()[0])
+                cur.execute("SELECT question_set_id, config FROM assignment WHERE assignment_id = %s::uuid", (assignment_id,))
+                arow = cur.fetchone()
+            qset = str(arow[0])
+            config = arow[1] if isinstance(arow[1], dict) else {}
+            # Speaking (CEFR) demos reuse the SAME tested communication engine as a
+            # real exam; only the identity/session are the throwaway demo ones. The
+            # srow shape matches what handle_turn expects from submit_answer:
+            # (session_id, assignment_id, student_id, course_id, status, turn_idx, org_id).
+            if config.get("exam_kind") == "communication":
+                comm_srow = (session_id, assignment_id, str(srow[0]), str(srow[1]),
+                             "active", 0, str(org_id))
+                return communication.handle_turn(repo, d["settings"], session_id,
+                                                 comm_srow, req, config)
             return _demo_answer_turn(repo, d["settings"], str(org_id), str(srow[1]), str(srow[0]),
                                      session_id, qset, req.question_index, req.answer_text)
         return _with_demo(token, _fn)
@@ -1482,6 +1509,66 @@ def _register_demo(app: FastAPI, deps) -> None:
                 raise HTTPException(status_code=503, detail="tts unavailable")
             from fastapi import Response
             return Response(content=audio, media_type="audio/mpeg")
+        return _with_demo(token, _fn)
+
+    @app.post(R.DEMO_SPEECH_TOKEN)
+    def demo_speech_token(token: str):
+        """Public Azure Speech token for a demo — gated on a valid, non-exhausted,
+        unexpired demo link (via _with_demo). The key never leaves the server;
+        issue_token caches ~8 min so one token serves a turn, not unlimited minting."""
+        from backend import azure_speech
+        def _fn(d, repo, link):
+            tok = azure_speech.issue_token(d["settings"])
+            if not tok:
+                raise HTTPException(status_code=503, detail="Speech service is not configured")
+            return {**tok, "cache_control": "no-store"}
+        return _with_demo(token, _fn)
+
+    @app.post(R.DEMO_CEFR_CALIBRATION)
+    def demo_cefr_calibration(token: str, req: CefrCalibrationRequest):
+        """Save a demo reviewer's per-dimension band override. rater_id is scoped
+        to the demo token, so demo calibrations never collide with real raters'."""
+        if req.dimension not in _CEFR_DIMENSIONS:
+            raise HTTPException(status_code=400, detail=f"dimension must be one of {sorted(_CEFR_DIMENSIONS)}")
+        if req.human_band not in _CEFR_BANDS:
+            raise HTTPException(status_code=400, detail=f"human_band must be one of {sorted(_CEFR_BANDS)}")
+
+        def _fn(d, repo, link):
+            rater = f"demo:{link[0][:10]}"
+            with repo.conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.cefr_calibration')")
+                if cur.fetchone()[0] is None:
+                    raise HTTPException(status_code=503, detail="calibration not available")
+                cur.execute(
+                    """INSERT INTO cefr_calibration
+                           (org_id, session_id, turn_number, dimension, machine_band, human_band, rater_id)
+                       VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s)
+                       ON CONFLICT (session_id, turn_number, dimension, rater_id)
+                       DO UPDATE SET human_band = EXCLUDED.human_band,
+                                     machine_band = EXCLUDED.machine_band, updated_at = NOW()""",
+                    (link[1], req.session_id, req.turn_number, req.dimension,
+                     req.machine_band, req.human_band, rater))
+            repo.conn.commit()
+            return {"status": "ok"}
+        return _with_demo(token, _fn)
+
+    @app.get(R.DEMO_CEFR_CALIBRATION)
+    def demo_cefr_calibration_list(token: str, session_id: str):
+        """This demo's saved band overrides for a session (to prefill the transcript)."""
+        def _fn(d, repo, link):
+            rater = f"demo:{link[0][:10]}"
+            with repo.conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.cefr_calibration')")
+                if cur.fetchone()[0] is None:
+                    return {"overrides": []}
+                cur.execute(
+                    """SELECT turn_number, dimension, machine_band, human_band
+                       FROM cefr_calibration
+                       WHERE session_id = %s::uuid AND org_id = %s::uuid AND rater_id = %s""",
+                    (session_id, link[1], rater))
+                rows = cur.fetchall()
+            return {"overrides": [{"turn_number": r[0], "dimension": r[1],
+                                   "machine_band": r[2], "human_band": r[3]} for r in rows]}
         return _with_demo(token, _fn)
 
 
