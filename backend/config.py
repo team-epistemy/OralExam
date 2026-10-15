@@ -57,6 +57,14 @@ class Settings:
     use_bedrock: bool = os.getenv("EPISTEMY_USE_BEDROCK", "0") == "1"
     ecr_repo: str = os.getenv("EPISTEMY_ECR_REPO", "epistemy-m3")
 
+    # --- GCP migration (parallel run). Default "aws" leaves every existing path
+    # unchanged; "gcp" resolves DB creds from GCP Secret Manager so the same
+    # image runs on Cloud Run against Cloud SQL. db_host_override points at the
+    # Cloud SQL Auth Proxy / connector when the secret JSON omits a host. ---
+    secrets_provider: str = os.getenv("EPISTEMY_SECRETS_PROVIDER", "aws")
+    gcp_project: str = os.getenv("EPISTEMY_GCP_PROJECT", "") or os.getenv("GOOGLE_CLOUD_PROJECT", "")
+    db_host_override: str = os.getenv("EPISTEMY_DB_HOST", "")
+
     def __post_init__(self) -> None:
         # S3 names are globally unique; encode account+region to avoid collisions
         if not self.bucket:

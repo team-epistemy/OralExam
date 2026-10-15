@@ -44,9 +44,23 @@ def build_pool(settings: Settings):
 
 
 def _db_credentials(settings: Settings, app_role: bool = False) -> dict:
-    """Fetch DB creds: the runtime app role when app_role else the admin owner."""
+    """Fetch DB creds: the runtime app role when app_role else the admin owner.
+
+    secrets_provider=="gcp" resolves the same logical secret from GCP Secret
+    Manager (name is the AWS id minus the "epistemy/" prefix) so the image runs
+    unchanged on Cloud Run against Cloud SQL; host falls back to db_host_override
+    (the Cloud SQL Auth Proxy / connector) when the secret JSON omits a host.
+    """
     sid = (settings.db_app_secret_name if app_role
            else settings.db_secret_arn or settings.db_secret_name)
+    if settings.secrets_provider == "gcp":
+        from backend import gcp_secrets
+        creds = json.loads(gcp_secrets.get_secret(settings.gcp_project, sid.split("/", 1)[-1]))
+        if settings.db_host_override:
+            creds["host"] = settings.db_host_override
+        creds.setdefault("host", "127.0.0.1")
+        creds.setdefault("dbname", settings.db_name)
+        return creds
     sm = boto3.client("secretsmanager", region_name=settings.region)
     return json.loads(sm.get_secret_value(SecretId=sid)["SecretString"])
 
