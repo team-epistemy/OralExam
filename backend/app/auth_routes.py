@@ -25,6 +25,11 @@ from backend.models import Role
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+class MigrateRequest(BaseModel):
+    email: str
+    password: str
+
+
 class ProfessorRequest(BaseModel):
     email: str
     password: str | None = None
@@ -97,6 +102,46 @@ def _mirror_public_enrollment(cur, org_id: str, course_id: str, email: str) -> N
 
 def register_auth_routes(app: FastAPI, deps) -> None:
     """Attach professor-provisioning and invitation endpoints."""
+
+    @app.post("/api/auth/migrate")
+    def migrate_identity(req: MigrateRequest):
+        """JIT Cognito->GCIP migration (public at the middleware; pre-auth).
+
+        Only active when auth_provider == "gcip". Verifies the password against
+        Cognito, then creates the GCIP user with uid == the existing IdP subject
+        so the GCIP token resolves to the same app_user. The client then signs in
+        via the GCIP SDK. Idempotent.
+        """
+        d = deps(); settings = d["settings"]
+        if settings.auth_provider != "gcip":
+            raise HTTPException(status_code=400, detail="migration not enabled")
+        from backend import gcp_secrets
+        from backend.auth import jit
+        cognito = json.loads(gcp_secrets.resolve(settings, settings.cognito_secret_name))
+        try:
+            jit.verify_cognito_password(cognito, req.email, req.password)
+        except jit.MigrationError as e:
+            raise HTTPException(status_code=e.status, detail=e.detail)
+        # Find the existing identity (SECURITY DEFINER read; runtime role can't
+        # scan auth.app_user directly).
+        pool = d["pool"]; conn = pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT cognito_sub, org_id, role, status "
+                            "FROM auth.user_for_migration(%s)", (req.email,))
+                row = cur.fetchone()
+            conn.rollback()
+        finally:
+            factory.return_connection_to_pool(pool, conn)
+        if not row:
+            raise HTTPException(status_code=403, detail="no account for this email")
+        sub, org_id, role, _status = row
+        try:
+            result = jit.ensure_gcip_user(settings.gcp_project, sub, req.email,
+                                          req.password, role, str(org_id))
+        except jit.MigrationError as e:
+            raise HTTPException(status_code=e.status, detail=e.detail)
+        return {"status": result}
 
     @app.post("/api/auth/professors")
     def create_professor(req: ProfessorRequest, x_org_name: str = Header(...),

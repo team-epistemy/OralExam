@@ -70,6 +70,7 @@ logger = logging.getLogger(__name__)
 # ?token= query param (EventSource cannot set headers) — see the middleware.
 _PUBLIC_PATH_PREFIXES = (
     "/api/auth/config", "/api/auth/invitations/redeem",
+    "/api/auth/migrate",  # JIT Cognito->GCIP migration; pre-auth (user has no GCIP token yet)
     "/api/demo/",  # credential-free demo links; endpoints self-authenticate via token
     "/health", "/config", "/app", "/static",
     "/docs", "/openapi.json", "/redoc", "/favicon",

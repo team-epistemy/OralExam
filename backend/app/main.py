@@ -196,6 +196,12 @@ def migrate() -> None:
             print(f"applying {migration_027.name} ...")
             cur.execute(migration_027.read_text())
 
+        # Always apply migration_028 (JIT Cognito->GCIP migration helper; idempotent)
+        migration_028 = db_dir / "migration_028_jit_migration.sql"
+        if migration_028.exists():
+            print(f"applying {migration_028.name} ...")
+            cur.execute(migration_028.read_text())
+
     conn.commit()
     print("all schemas applied")
 
