@@ -69,6 +69,10 @@ class Settings:
     gcs_bucket: str = os.getenv("EPISTEMY_GCS_BUCKET", "")
     pubsub_topic: str = os.getenv("EPISTEMY_PUBSUB_TOPIC", "epistemy-ingest-dev")
     pubsub_subscription: str = os.getenv("EPISTEMY_PUBSUB_SUBSCRIPTION", "epistemy-ingest-dev-sub")
+    # Identity provider for request-token verification: "cognito" (default) or
+    # "gcip" (Google Identity Platform). Independent of secrets_provider so the
+    # migration can flip auth separately from storage/DB.
+    auth_provider: str = os.getenv("EPISTEMY_AUTH_PROVIDER", "cognito")
 
     def __post_init__(self) -> None:
         # S3 names are globally unique; encode account+region to avoid collisions

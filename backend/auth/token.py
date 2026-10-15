@@ -38,6 +38,44 @@ class AccessTokenValidator:
         return claims
 
 
-def validator_from_config(cfg: dict) -> AccessTokenValidator:
-    """Build a validator from the epistemy/cognito-{env} secret dict."""
+class FirebaseTokenValidator:
+    """Validate a GCIP / Firebase ID token (RS256), the GCP-side analogue of the
+    Cognito access-token validator. Same .validate(token)->claims surface so the
+    IdentityResolver is provider-agnostic.
+
+    issuer = https://securetoken.google.com/{project}; aud = {project}. Unlike
+    Cognito there's no token_use/client_id — the audience is the project id.
+    """
+
+    _JWK_URL = ("https://www.googleapis.com/service_accounts/v1/jwk/"
+                "securetoken@system.gserviceaccount.com")
+
+    def __init__(self, project_id: str):
+        self.project_id = project_id
+        self.issuer = f"https://securetoken.google.com/{project_id}"
+        self._jwks = PyJWKClient(self._JWK_URL, lifespan=3600)
+
+    def validate(self, token: str) -> dict:
+        try:
+            key = self._jwks.get_signing_key_from_jwt(token).key
+            claims = jwt.decode(
+                token, key, algorithms=["RS256"],
+                issuer=self.issuer, audience=self.project_id,
+                options={"require": ["exp", "iss", "aud", "sub"]},
+            )
+        except Exception as exc:  # signature, exp, iss, aud, kid, malformed
+            raise TokenError(f"invalid token: {exc}") from exc
+        if not claims.get("sub"):
+            raise TokenError("no subject")
+        return claims
+
+
+def validator_from_config(cfg: dict):
+    """Build the token validator for the configured IdP.
+
+    provider=="gcip" → Firebase/GCIP ID-token validator (project id);
+    otherwise the Cognito access-token validator (issuer + client_id).
+    """
+    if cfg.get("provider") == "gcip":
+        return FirebaseTokenValidator(cfg["project_id"])
     return AccessTokenValidator(cfg["issuer"], cfg["client_id"])

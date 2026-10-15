@@ -121,7 +121,14 @@ def build_embedder(settings: Settings):
 
 
 def build_cognito_config(settings: Settings) -> dict:
-    """Load the Cognito pool/client/issuer config (AWS or GCP Secret Manager)."""
+    """Request-token validator config for the configured IdP.
+
+    auth_provider=="gcip" → GCIP/Firebase (verify ID tokens against the project),
+    no secret needed. Otherwise the Cognito pool/client/issuer config from Secret
+    Manager (AWS or GCP). (JIT migration reads the Cognito config separately.)
+    """
+    if settings.auth_provider == "gcip":
+        return {"provider": "gcip", "project_id": settings.gcp_project}
     from backend import gcp_secrets
     return json.loads(gcp_secrets.resolve(settings, settings.cognito_secret_name))
 
