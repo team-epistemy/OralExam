@@ -2306,8 +2306,18 @@ def _register_auth(app: FastAPI, deps) -> None:
         Uses settings directly (not deps()) so the login page works even when
         the DB pool is cold or unavailable.
         """
-        cognito = factory.build_cognito_config(load_settings())
+        s = load_settings()
+        if s.auth_provider == "gcip":
+            # GCIP: the SPA signs in directly for an ID token (no Hosted UI).
+            return {
+                "provider": "gcip",
+                "apiKey": s.gcip_api_key,
+                "projectId": s.gcp_project,
+                "authDomain": s.gcip_auth_domain or f"{s.gcp_project}.firebaseapp.com",
+            }
+        cognito = factory.build_cognito_config(s)
         return {
+            "provider": "cognito",
             "domain": cognito["domain"],
             "clientId": cognito["client_id"],
             "region": cognito["region"],

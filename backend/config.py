@@ -73,6 +73,10 @@ class Settings:
     # "gcip" (Google Identity Platform). Independent of secrets_provider so the
     # migration can flip auth separately from storage/DB.
     auth_provider: str = os.getenv("EPISTEMY_AUTH_PROVIDER", "cognito")
+    # GCIP web-client config the SPA needs (browser API key — not a secret;
+    # authDomain defaults to <project>.firebaseapp.com). Only used in gcip mode.
+    gcip_api_key: str = os.getenv("EPISTEMY_GCIP_API_KEY", "")
+    gcip_auth_domain: str = os.getenv("EPISTEMY_GCIP_AUTH_DOMAIN", "")
 
     def __post_init__(self) -> None:
         # S3 names are globally unique; encode account+region to avoid collisions

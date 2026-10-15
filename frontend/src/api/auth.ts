@@ -3,9 +3,14 @@
 import { API_BASE_URL } from '../config';
 
 interface AuthConfig {
+  provider?: 'cognito' | 'gcip';
   hostedUiUrl: string;
   clientId: string;
   scopes: string[];
+  // GCIP (Identity Platform) mode:
+  apiKey?: string;
+  projectId?: string;
+  authDomain?: string;
 }
 
 let _cfg: AuthConfig | null = null;
@@ -16,6 +21,37 @@ async function authConfig(): Promise<AuthConfig> {
   if (!res.ok) throw new Error('auth config unavailable');
   _cfg = await res.json();
   return _cfg!;
+}
+
+// Which IdP the backend is configured for; drives the login UX at runtime so the
+// same build works against a Cognito backend (Hosted UI) or a GCIP one (password).
+export async function authProvider(): Promise<'cognito' | 'gcip'> {
+  return (await authConfig()).provider ?? 'cognito';
+}
+
+// GCIP email/password sign-in via the Identity Platform REST API. On first
+// sign-in the user may not exist in GCIP yet — fall back to the backend JIT
+// migration (verifies against Cognito + provisions the GCIP user), then retry.
+// Stores the ID token as the bearer token, like the Cognito path.
+export async function gcipLogin(email: string, password: string): Promise<void> {
+  const cfg = await authConfig();
+  const signIn = () => fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${cfg.apiKey}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, returnSecureToken: true }) });
+
+  let res = await signIn();
+  if (!res.ok) {
+    const mig = await fetch(`${API_BASE_URL}/api/auth/migrate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }) });
+    if (!mig.ok) throw new Error('Invalid email or password.');
+    res = await signIn();
+  }
+  if (!res.ok) throw new Error('Invalid email or password.');
+  const data = await res.json();
+  localStorage.setItem('token', data.idToken);
+  if (data.refreshToken) localStorage.setItem('refresh_token', data.refreshToken);
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -68,6 +104,11 @@ export async function logout(): Promise<void> {
   const logoutUri = `${window.location.origin}${import.meta.env.BASE_URL}login`;
   try {
     const cfg = await authConfig();
+    if (cfg.provider === 'gcip') {
+      // No Hosted-UI session to clear; the local token clear above is enough.
+      window.location.href = logoutUri;
+      return;
+    }
     const url = new URL(`${cfg.hostedUiUrl}/logout`);
     url.search = new URLSearchParams({
       client_id: cfg.clientId,
@@ -118,6 +159,20 @@ export function refreshAccessToken(): Promise<string | null> {
     if (!refreshToken) return null;
     try {
       const cfg = await authConfig();
+      if (cfg.provider === 'gcip') {
+        // GCIP refresh via the Secure Token endpoint; returns a fresh ID token.
+        const r = await fetch(`https://securetoken.googleapis.com/v1/token?key=${cfg.apiKey}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }).toString(),
+        });
+        if (!r.ok) return null;
+        const t = await r.json();
+        const idTok = t.id_token as string | undefined;
+        if (!idTok) return null;
+        localStorage.setItem('token', idTok);
+        if (t.refresh_token) localStorage.setItem('refresh_token', t.refresh_token);
+        return idTok;
+      }
       const res = await fetch(`${cfg.hostedUiUrl}/oauth2/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
