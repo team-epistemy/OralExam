@@ -64,6 +64,11 @@ class Settings:
     secrets_provider: str = os.getenv("EPISTEMY_SECRETS_PROVIDER", "aws")
     gcp_project: str = os.getenv("EPISTEMY_GCP_PROJECT", "") or os.getenv("GOOGLE_CLOUD_PROJECT", "")
     db_host_override: str = os.getenv("EPISTEMY_DB_HOST", "")
+    # GCS materials bucket + Pub/Sub ingest topic/subscription (used when
+    # secrets_provider == "gcp"; the S3/SQS names above are ignored then).
+    gcs_bucket: str = os.getenv("EPISTEMY_GCS_BUCKET", "")
+    pubsub_topic: str = os.getenv("EPISTEMY_PUBSUB_TOPIC", "epistemy-ingest-dev")
+    pubsub_subscription: str = os.getenv("EPISTEMY_PUBSUB_SUBSCRIPTION", "epistemy-ingest-dev-sub")
 
     def __post_init__(self) -> None:
         # S3 names are globally unique; encode account+region to avoid collisions

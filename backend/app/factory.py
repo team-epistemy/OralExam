@@ -86,8 +86,11 @@ def return_connection_to_pool(pool, conn) -> None:
     pool.putconn(conn)
 
 
-def build_storage(settings: Settings) -> BotoS3Storage:
-    """S3 storage bound to the materials bucket and its KMS key alias."""
+def build_storage(settings: Settings):
+    """Materials storage: GCS when secrets_provider=="gcp", else S3."""
+    if settings.secrets_provider == "gcp":
+        from backend.storage.gcs_client import GcsStorage
+        return GcsStorage(settings.gcs_bucket, ttl=settings.presign_ttl)
     from botocore.config import Config
     # SigV4 required for SSE-KMS presigned URLs (SigV2 silently fails)
     cfg = Config(signature_version="s3v4")
@@ -99,7 +102,12 @@ def build_storage(settings: Settings) -> BotoS3Storage:
                          ttl=settings.presign_ttl)
 
 
-def build_queue(settings: Settings) -> SqsQueue:
+def build_queue(settings: Settings):
+    """Ingest queue: Pub/Sub when secrets_provider=="gcp", else SQS."""
+    if settings.secrets_provider == "gcp":
+        from backend.async_jobs.pubsub_queue import PubSubQueue
+        return PubSubQueue(settings.gcp_project, settings.pubsub_topic,
+                           settings.pubsub_subscription)
     sqs = boto3.client("sqs", region_name=settings.region)
     return SqsQueue(sqs, settings.queue_url)
 
