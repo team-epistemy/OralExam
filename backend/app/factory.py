@@ -121,10 +121,9 @@ def build_embedder(settings: Settings):
 
 
 def build_cognito_config(settings: Settings) -> dict:
-    """Load the Cognito pool/client/issuer config from Secrets Manager."""
-    sm = boto3.client("secretsmanager", region_name=settings.region)
-    return json.loads(
-        sm.get_secret_value(SecretId=settings.cognito_secret_name)["SecretString"])
+    """Load the Cognito pool/client/issuer config (AWS or GCP Secret Manager)."""
+    from backend import gcp_secrets
+    return json.loads(gcp_secrets.resolve(settings, settings.cognito_secret_name))
 
 
 def build_identity_resolver(settings: Settings, pool):

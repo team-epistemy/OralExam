@@ -58,6 +58,9 @@ def _resolve_anthropic_key(settings: Settings) -> Optional[str]:
     key = os.getenv("ANTHROPIC_API_KEY")
     if key:
         return key
+    if getattr(settings, "secrets_provider", "aws") == "gcp":
+        from backend import gcp_secrets
+        return gcp_secrets.resolve(settings, settings.anthropic_secret_name).strip()
     secret_id = getattr(settings, "anthropic_secret", "")
     if not secret_id:
         return None  # let the SDK's own resolution run (and error if truly unset)

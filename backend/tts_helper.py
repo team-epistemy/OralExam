@@ -29,9 +29,13 @@ def _resolve_key(settings: Settings) -> Optional[str]:
     if secret in _key_cache:
         return _key_cache[secret]
     try:
-        import boto3
-        sm = boto3.client("secretsmanager", region_name=settings.region)
-        val = sm.get_secret_value(SecretId=secret)["SecretString"].strip()
+        if getattr(settings, "secrets_provider", "aws") == "gcp":
+            from backend import gcp_secrets
+            val = gcp_secrets.resolve(settings, secret).strip()
+        else:
+            import boto3
+            sm = boto3.client("secretsmanager", region_name=settings.region)
+            val = sm.get_secret_value(SecretId=secret)["SecretString"].strip()
         _key_cache[secret] = val
         return val
     except Exception as exc:  # noqa: BLE001 - missing/inaccessible secret -> text-only

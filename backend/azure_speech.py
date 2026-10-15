@@ -38,9 +38,13 @@ def _resolve_key(settings: Settings) -> Optional[str]:
     if secret in _key_cache:
         return _key_cache[secret]
     try:
-        import boto3
-        sm = boto3.client("secretsmanager", region_name=settings.region)
-        raw = sm.get_secret_value(SecretId=secret)["SecretString"].strip()
+        if getattr(settings, "secrets_provider", "aws") == "gcp":
+            from backend import gcp_secrets
+            raw = gcp_secrets.resolve(settings, secret).strip()
+        else:
+            import boto3
+            sm = boto3.client("secretsmanager", region_name=settings.region)
+            raw = sm.get_secret_value(SecretId=secret)["SecretString"].strip()
         # Stored as a raw key string (matches the demo); tolerate a JSON object too.
         val = raw
         try:
