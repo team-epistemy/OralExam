@@ -1,0 +1,16 @@
+# Keep the Cloud Build upload small: the Dockerfile only needs
+# requirements-runtime.txt + backend/. Everything else is noise.
+.git/
+.gitignore
+frontend/
+infra/
+tests/
+scripts/
+*.md
+*.pdf
+**/__pycache__/
+**/*.pyc
+.venv/
+venv/
+.DS_Store
+backend/app/static/frontend/
