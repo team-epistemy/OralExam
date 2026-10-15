@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta, date
 import threading
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 _PUBLIC_PATH_PREFIXES = (
     "/api/auth/config", "/api/auth/invitations/redeem",
     "/api/auth/migrate",  # JIT Cognito->GCIP migration; pre-auth (user has no GCIP token yet)
+    "/api/pubsub/ingest",  # Pub/Sub push target; self-authenticates via the push OIDC token
     "/api/demo/",  # credential-free demo links; endpoints self-authenticate via token
     "/health", "/config", "/app", "/static",
     "/docs", "/openapi.json", "/redoc", "/favicon",
@@ -2324,6 +2325,42 @@ def _register_auth(app: FastAPI, deps) -> None:
             "hostedUiUrl": cognito.get("hosted_ui_url"),
             "scopes": ["openid", "email", "profile"],
         }
+
+    @app.post("/api/pubsub/ingest")
+    async def pubsub_ingest(request: Request):
+        """Pub/Sub push target for ingest jobs (GCP worker). Verifies the push
+        OIDC token, decodes the IngestMessage, runs the pipeline, and always acks
+        (200) — failures are recorded on the job, mirroring the SQS worker, so a
+        poison message can't loop forever. Returns 401 on a bad push token.
+        """
+        import base64 as _b64, json as _json
+        from fastapi import Response
+        s = load_settings()
+        # Verify the push is from our Pub/Sub subscription (OIDC), when configured.
+        if s.pubsub_push_sa:
+            authz = request.headers.get("authorization", "")
+            tok = authz[7:] if authz.lower().startswith("bearer ") else ""
+            try:
+                from google.oauth2 import id_token as _idt
+                from google.auth.transport import requests as _greq
+                claims = _idt.verify_oauth2_token(
+                    tok, _greq.Request(), audience=s.pubsub_push_audience or None)
+                if claims.get("email") != s.pubsub_push_sa or not claims.get("email_verified"):
+                    return Response(status_code=401, content="bad push identity")
+            except Exception:
+                return Response(status_code=401, content="invalid push token")
+        envelope = await request.json()
+        data = (envelope.get("message") or {}).get("data")
+        if not data:
+            return Response(status_code=204)  # nothing to do; ack
+        from backend.models import IngestMessage
+        msg = IngestMessage(**_json.loads(_b64.b64decode(data).decode()))
+        worker = factory.build_worker(s)
+        try:
+            worker.pipeline.run(msg)
+        except Exception as exc:  # noqa: BLE001 — record + ack (no infinite redelivery)
+            worker._mark_failed(msg, exc)
+        return Response(status_code=204)
 
     @app.get("/api/auth/me")
     def me(x_user_id: str = Header(...), x_role: str = Header(...),

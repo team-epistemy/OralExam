@@ -77,6 +77,17 @@ class Settings:
     # authDomain defaults to <project>.firebaseapp.com). Only used in gcip mode.
     gcip_api_key: str = os.getenv("EPISTEMY_GCIP_API_KEY", "")
     gcip_auth_domain: str = os.getenv("EPISTEMY_GCIP_AUTH_DOMAIN", "")
+    # Embeddings provider: "" (legacy: use_bedrock→Bedrock else Fake), "fake",
+    # "bedrock", or "vertex" (GCP-native; outputDimensionality matches embed_dims).
+    embed_provider: str = os.getenv("EPISTEMY_EMBED_PROVIDER", "")
+    # gemini-embedding-001 supports outputDimensionality=1024 (matches embed_dims
+    # / the pgvector columns); text-embedding-005 caps at 768.
+    vertex_embed_model: str = os.getenv("EPISTEMY_VERTEX_EMBED_MODEL", "gemini-embedding-001")
+    vertex_location: str = os.getenv("EPISTEMY_VERTEX_LOCATION", "us-central1")
+    # Pub/Sub push: the service account whose OIDC token signs push requests to
+    # the ingest endpoint (verified there), and that endpoint's own URL (audience).
+    pubsub_push_sa: str = os.getenv("EPISTEMY_PUBSUB_PUSH_SA", "")
+    pubsub_push_audience: str = os.getenv("EPISTEMY_PUBSUB_PUSH_AUDIENCE", "")
 
     def __post_init__(self) -> None:
         # S3 names are globally unique; encode account+region to avoid collisions

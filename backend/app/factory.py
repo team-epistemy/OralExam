@@ -113,8 +113,13 @@ def build_queue(settings: Settings):
 
 
 def build_embedder(settings: Settings):
-    """Real Bedrock embedder when enabled, else the deterministic fake."""
-    if not settings.use_bedrock:
+    """Embedder by provider: Vertex (GCP-native), Bedrock, or the deterministic
+    fake. Default (empty provider) preserves the legacy use_bedrock behavior."""
+    if settings.embed_provider == "vertex":
+        from backend.embedding.vertex import VertexEmbedder
+        return VertexEmbedder(settings.gcp_project, settings.vertex_location,
+                              settings.vertex_embed_model, dims=settings.embed_dims)
+    if settings.embed_provider == "fake" or (not settings.embed_provider and not settings.use_bedrock):
         return FakeEmbedder(dims=settings.embed_dims)
     client = boto3.client("bedrock-runtime", region_name=settings.bedrock_region)
     return BedrockEmbedder(client, settings.embed_model, dims=settings.embed_dims)
