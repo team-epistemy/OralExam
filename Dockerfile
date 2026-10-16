@@ -1,5 +1,5 @@
 # Epistemy M3 — single image, two entrypoints (serve / worker).
-FROM public.ecr.aws/docker/library/python:3.11-slim
+FROM mirror.gcr.io/library/python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
