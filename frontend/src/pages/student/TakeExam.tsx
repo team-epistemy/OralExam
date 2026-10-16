@@ -4,9 +4,9 @@ import { useMutation } from '@tanstack/react-query';
 import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen } from 'lucide-react';
 import { downloadTranscriptPdf, examTranscript } from '../../transcript';
 import { typeNoun, typeNounLower } from '../../assignmentType';
-import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft } from '../../api/exam';
+import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft, transcribeAudio } from '../../api/exam';
 import type { CaseMaterial } from '../../api/exam';
-import { demoMeta, demoCase, demoStart, demoAnswer, demoComplete, demoTts } from '../../api/demo';
+import { demoMeta, demoCase, demoStart, demoAnswer, demoComplete, demoTts, demoTranscribe } from '../../api/demo';
 import { get } from '../../api/client';
 import { API_BASE_URL } from '../../config';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
@@ -400,6 +400,12 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // Voice: TTS (ElevenLabs proxy) speaks questions/probes; ASR (Web Speech API) dictates answers.
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const recognitionRef = useRef<{ stop: () => void; start: () => void } | null>(null);
+  // Subject-exam ASR on GCP: record then transcribe via Google STT (VITE_SUBJECT_ASR
+  // =google), vs the browser Web Speech API otherwise. Speaking exam keeps Azure.
+  const useGoogleAsr = import.meta.env.VITE_SUBJECT_ASR === 'google';
+  const mediaRecRef = useRef<MediaRecorder | null>(null);
+  const recChunksRef = useRef<Blob[]>([]);
+  const recStreamRef = useRef<MediaStream | null>(null);
   const spokenRef = useRef<string>('');
   // Org "text-first render" flag (from assignment meta): true = show probe immediately +
   // play TTS async; false = reveal probe text together with the audio. Kept in a ref so
@@ -407,6 +413,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const textFirstRef = useRef<boolean>(true);
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
   const [ttsOn, setTtsOn] = useState(true);
   // Honest audio/mic states: whether spoken questions are actually available,
   // and a non-destructive inline notice for mic problems (never the full error
@@ -473,6 +480,12 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     const rec = recognitionRef.current as any;
     recognitionRef.current = null;
     if (rec) { try { rec.onend = null; rec.stop(); } catch { /* already stopped */ } }
+    // Google-STT path: hard-stop the recorder WITHOUT transcribing (clear onstop),
+    // so a programmatic stop (submit / question change / unmount) never appends a
+    // stale transcript to the next answer.
+    const mr = mediaRecRef.current; mediaRecRef.current = null;
+    if (mr) { try { mr.onstop = null; if (mr.state !== 'inactive') mr.stop(); } catch { /* already stopped */ } }
+    recStreamRef.current?.getTracks().forEach((t) => t.stop());
     setListening(false);
     setSpeaking(false);
   }, []);
@@ -488,7 +501,49 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // in-flight question audio — otherwise the examiner keeps talking on the next page.
   useEffect(() => () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } }, []);
 
-  const toggleMic = () => {
+  const toggleMic = async () => {
+    // Google-STT path (GCP): record a clip, transcribe on stop, append to the box.
+    if (useGoogleAsr) {
+      if (listening) {
+        // User stop → transcribe: let the recorder's onstop handle it.
+        const mr = mediaRecRef.current;
+        if (mr && mr.state !== 'inactive') { try { mr.stop(); } catch { /* ok */ } }
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setMicNotice("Voice input isn't available in this browser — you can type your answer instead."); return;
+      }
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }  // cut question audio
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recStreamRef.current = stream;
+        const mr = new MediaRecorder(stream);
+        recChunksRef.current = [];
+        mr.ondataavailable = (e) => { if (e.data.size) recChunksRef.current.push(e.data); };
+        mr.onstop = async () => {
+          recStreamRef.current?.getTracks().forEach((t) => t.stop());
+          const blob = new Blob(recChunksRef.current, { type: mr.mimeType || 'audio/webm' });
+          mediaRecRef.current = null;
+          setListening(false); setSpeaking(false);
+          if (!blob.size) return;
+          setTranscribing(true);
+          try {
+            const transcript = isDemo ? await demoTranscribe(demoToken!, blob) : await transcribeAudio(blob);
+            if (transcript) setDraft((prev) => (prev ? prev + ' ' : '') + transcript.trim());
+            else setMicNotice("Didn't catch any speech — try again, or type your answer.");
+          } catch {
+            setMicNotice('Transcription failed — you can type your answer instead.');
+          } finally { setTranscribing(false); }
+        };
+        mediaRecRef.current = mr;
+        mr.start();
+        setMicNotice(null); setListening(true);
+      } catch {
+        setMicNotice('Could not start the microphone. You can type your answer instead.');
+      }
+      return;
+    }
+
     const SR = (window as unknown as { SpeechRecognition?: new () => any; webkitSpeechRecognition?: new () => any });
     const Ctor = SR.SpeechRecognition || SR.webkitSpeechRecognition;
     if (!Ctor) { setMicNotice("Voice input isn't supported in this browser — try Chrome, Edge, or Safari. You can type your answer instead."); return; }
@@ -1479,14 +1534,15 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               <div className="flex gap-2 mt-2">
                 <button
                   onClick={toggleMic}
-                  title={listening ? 'Stop dictation' : 'Answer by voice'}
-                  className={`relative flex items-center justify-center px-3 py-2.5 rounded-lg border text-sm font-medium transition-colors ${
+                  disabled={transcribing}
+                  title={transcribing ? 'Transcribing…' : listening ? 'Stop & transcribe' : 'Answer by voice'}
+                  className={`relative flex items-center justify-center px-3 py-2.5 rounded-lg border text-sm font-medium transition-colors disabled:opacity-60 ${
                     listening
                       ? `bg-green-50 border-green-400 text-green-600 ${speaking ? 'ring-2 ring-green-300 animate-pulse' : ''}`
                       : 'border-gray-300 text-gray-700 hover:bg-gray-50'
                   }`}
                 >
-                  <Mic className="w-4 h-4" />
+                  {transcribing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
                   {listening && (
                     <span className={`ml-1.5 inline-block w-2 h-2 rounded-full bg-green-500 ${speaking ? 'animate-ping' : 'opacity-60'}`} />
                   )}

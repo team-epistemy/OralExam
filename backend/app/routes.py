@@ -132,6 +132,7 @@ DEMO_STATUS = "/api/demo/{token}/status"                       # GET session sta
 DEMO_COMPLETE = "/api/demo/{token}/complete"                   # POST complete a demo session
 DEMO_TTS = "/api/demo/{token}/tts"                             # POST text-to-speech proxy
 DEMO_SPEECH_TOKEN = "/api/demo/{token}/speech-token"           # POST public Azure Speech token (gated by the demo link)
+DEMO_TRANSCRIBE = "/api/demo/{token}/transcribe"               # POST audio -> Google STT transcript (subject-exam dictation)
 DEMO_CEFR_CALIBRATION = "/api/demo/{token}/cefr-calibration"   # POST/GET demo reviewer band overrides
 
 

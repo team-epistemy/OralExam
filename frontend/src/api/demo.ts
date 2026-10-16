@@ -85,6 +85,14 @@ export function demoSpeechToken(token: string): Promise<{ token: string; region:
   return demoJson('POST', `/api/demo/${token}/speech-token`, {});
 }
 
+// Transcribe a recorded answer clip for a demo subject exam (Google STT, GCP).
+export async function demoTranscribe(token: string, blob: Blob): Promise<string> {
+  const res = await fetch(`${API_BASE_URL}/api/demo/${token}/transcribe`, {
+    method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob });
+  if (!res.ok) throw new Error('transcription failed');
+  return (await res.json()).transcript || '';
+}
+
 // Demo reviewer's per-dimension band overrides (rater scoped to the demo token).
 export async function demoGetCefrCalibration(token: string, sessionId: string): Promise<CefrOverride[]> {
   const r = await demoJson<{ overrides: CefrOverride[] }>('GET', `/api/demo/${token}/cefr-calibration?session_id=${encodeURIComponent(sessionId)}`);

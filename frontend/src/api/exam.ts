@@ -1,4 +1,18 @@
 import { get, post, createSSEConnection } from './client';
+import { API_BASE_URL } from '../config';
+
+// Transcribe a recorded answer clip via the backend (Google STT on GCP). Used by
+// the subject exam when VITE_SUBJECT_ASR=google instead of the Web Speech API.
+export async function transcribeAudio(blob: Blob): Promise<string> {
+  const token = localStorage.getItem('token');
+  const res = await fetch(`${API_BASE_URL}/api/speech/transcribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': blob.type || 'audio/webm', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: blob,
+  });
+  if (!res.ok) throw new Error('transcription failed');
+  return (await res.json()).transcript || '';
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

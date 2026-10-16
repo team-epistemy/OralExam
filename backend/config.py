@@ -88,6 +88,11 @@ class Settings:
     # the ingest endpoint (verified there), and that endpoint's own URL (audience).
     pubsub_push_sa: str = os.getenv("EPISTEMY_PUBSUB_PUSH_SA", "")
     pubsub_push_audience: str = os.getenv("EPISTEMY_PUBSUB_PUSH_AUDIENCE", "")
+    # Google Speech-to-Text (subject-exam answer dictation; the speaking exam
+    # keeps Azure). Chirp 2 in us-central1 by default.
+    stt_location: str = os.getenv("EPISTEMY_STT_LOCATION", "us-central1")
+    stt_model: str = os.getenv("EPISTEMY_STT_MODEL", "chirp_2")
+    stt_language: str = os.getenv("EPISTEMY_STT_LANGUAGE", "en-US")
 
     def __post_init__(self) -> None:
         # S3 names are globally unique; encode account+region to avoid collisions

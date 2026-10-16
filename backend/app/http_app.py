@@ -1513,6 +1513,24 @@ def _register_demo(app: FastAPI, deps) -> None:
             return Response(content=audio, media_type="audio/mpeg")
         return _with_demo(token, _fn)
 
+    @app.post(R.DEMO_TRANSCRIBE)
+    async def demo_transcribe(token: str, request: Request):
+        """Public (demo-gated) Google STT for subject-exam dictation. Body is the
+        raw audio bytes; returns the transcript. Speaking demos keep Azure."""
+        audio = await request.body()
+        def _fn(d, repo, link):
+            if not audio:
+                raise HTTPException(status_code=400, detail="no audio provided")
+            s = d["settings"]
+            from backend.google_speech import GoogleSpeech
+            try:
+                transcript = GoogleSpeech(s.gcp_project, s.stt_location, s.stt_model,
+                                          s.stt_language).transcribe(audio)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=f"transcription failed: {exc}")
+            return {"transcript": transcript}
+        return _with_demo(token, _fn)
+
     @app.post(R.DEMO_SPEECH_TOKEN)
     def demo_speech_token(token: str):
         """Public Azure Speech token for a demo — gated on a valid, non-exhausted,
@@ -2361,6 +2379,23 @@ def _register_auth(app: FastAPI, deps) -> None:
         except Exception as exc:  # noqa: BLE001 — record + ack (no infinite redelivery)
             worker._mark_failed(msg, exc)
         return Response(status_code=204)
+
+    @app.post("/api/speech/transcribe")
+    async def speech_transcribe(request: Request):
+        """Transcribe a short audio clip (subject-exam answer dictation) via
+        Google STT. Authenticated (student's token); the speaking exam still uses
+        Azure separately. Body is the raw audio bytes (WEBM/OPUS from the browser)."""
+        s = load_settings()
+        audio = await request.body()
+        if not audio:
+            raise HTTPException(status_code=400, detail="no audio provided")
+        from backend.google_speech import GoogleSpeech
+        try:
+            transcript = GoogleSpeech(s.gcp_project, s.stt_location, s.stt_model,
+                                      s.stt_language).transcribe(audio)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"transcription failed: {exc}")
+        return {"transcript": transcript}
 
     @app.get("/api/auth/me")
     def me(x_user_id: str = Header(...), x_role: str = Header(...),
