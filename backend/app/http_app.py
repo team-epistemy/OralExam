@@ -1599,6 +1599,7 @@ def _register_routes(app: FastAPI, deps) -> None:
     register_auth_routes(app, deps)
     _register_health(app, deps)
     _register_materials(app, deps)
+    _register_proctoring(app, deps)
     _register_reads(app, deps)
     _register_search(app, deps)
     _register_dashboard(app, deps)
@@ -2460,6 +2461,76 @@ def _register_materials(app: FastAPI, deps) -> None:
             try:
                 api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
                 return api.register_by_name(x_user_id, x_role, x_org_name, version_id)
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+def _register_proctoring(app: FastAPI, deps) -> None:
+    """Exam camera snapshots (identity / proctor / response). Student presigns a
+    direct-to-bucket PUT per snapshot; professor/admin lists them for review.
+    Authed only — demo (credential-free) exams never record."""
+    from pydantic import BaseModel as _BaseModel
+
+    class ProctorPresignRequest(_BaseModel):
+        session_id: str
+        kind: str                 # identity | proctor | response
+        turn_index: int | None = None
+
+    _KINDS = {"identity", "proctor", "response"}
+
+    @app.post("/api/proctoring/presign")
+    def proctor_presign(req: ProctorPresignRequest, x_org_name: str = Header(...),
+                        x_user_id: str = Header(...), x_role: str = Header(...)):
+        """Student requests a signed PUT URL for one snapshot of their own session;
+        records the session_media row. The browser then PUTs the JPEG directly."""
+        def _do():
+            import uuid as _uuid
+            if req.kind not in _KINDS:
+                raise HTTPException(status_code=400, detail="invalid kind")
+            d = deps(); repo = _request_repo(d)
+            try:
+                repo.set_tenant(x_org_name)
+                with repo.conn.cursor() as cur:
+                    # The caller may only snapshot their own active session.
+                    cur.execute("SELECT 1 FROM exam_session WHERE session_id=%s::uuid "
+                                "AND org_id=%s::uuid AND student_id=%s",
+                                (req.session_id, x_org_name, x_user_id))
+                    if not cur.fetchone():
+                        raise HTTPException(status_code=404, detail="session not found")
+                    media_id = str(_uuid.uuid4())
+                    key = f"{x_org_name}/proctoring/{req.session_id}/{req.kind}/{media_id}.jpg"
+                    cur.execute("""INSERT INTO session_media
+                                   (media_id, session_id, org_id, kind, turn_index, storage_key)
+                                   VALUES (%s::uuid,%s::uuid,%s::uuid,%s,%s,%s)""",
+                                (media_id, req.session_id, x_org_name, req.kind, req.turn_index, key))
+                repo.conn.commit()
+                url = d["storage"].presign_put(key, "image/jpeg", 10_000_000)
+                return {"media_id": media_id, "url": url}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get("/api/exams/{session_id}/proctoring")
+    def proctor_list(session_id: str, x_org_name: str = Header(...),
+                     x_user_id: str = Header(...), x_role: str = Header(...)):
+        """Professor/admin review: the session's snapshots with signed view URLs."""
+        def _do():
+            if x_role not in ("professor", "platform_admin"):
+                raise HTTPException(status_code=403, detail="review is professor/admin only")
+            d = deps(); repo = _request_repo(d)
+            try:
+                repo.set_tenant(x_org_name)
+                with repo.conn.cursor() as cur:
+                    cur.execute("""SELECT media_id, kind, turn_index, storage_key, captured_at
+                                   FROM session_media WHERE session_id=%s::uuid
+                                   ORDER BY captured_at""", (session_id,))
+                    rows = cur.fetchall()
+                repo.conn.rollback()
+                media = [{"media_id": str(r[0]), "kind": r[1], "turn_index": r[2],
+                          "captured_at": r[4].isoformat() if r[4] else None,
+                          "url": d["storage"].presign_get(r[3], ttl=600)} for r in rows]
+                return {"media": media}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

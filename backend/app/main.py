@@ -202,6 +202,12 @@ def migrate() -> None:
             print(f"applying {migration_028.name} ...")
             cur.execute(migration_028.read_text())
 
+        # Always apply migration_029 (exam proctoring/identity/response snapshots; idempotent)
+        migration_029 = db_dir / "migration_029_session_media.sql"
+        if migration_029.exists():
+            print(f"applying {migration_029.name} ...")
+            cur.execute(migration_029.read_text())
+
     conn.commit()
     print("all schemas applied")
 
