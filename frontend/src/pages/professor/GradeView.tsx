@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2 } from 'lucide-react';
 import { get, post } from '../../api/client';
 import { getCefrCalibration, saveCefrCalibration } from '../../api/exam';
+import { listProctoring } from '../../api/proctoring';
 
 interface SessionSummary {
   session_id: string;
@@ -671,6 +672,48 @@ function SessionRow({
   );
 }
 
+// Proctoring review: camera snapshots captured during the session (identity /
+// periodic / per-answer), with signed view URLs. Empty (renders nothing) when the
+// exam wasn't proctored.
+function ProctoringPanel({ sessionId }: { sessionId: string }) {
+  const { data: media = [] } = useQuery({
+    queryKey: ['proctoring', sessionId],
+    queryFn: () => listProctoring(sessionId),
+    enabled: !!sessionId,
+  });
+  if (media.length === 0) return null;
+  const identity = media.find((m) => m.kind === 'identity');
+  const rest = media.filter((m) => m.kind !== 'identity');
+  const label = (m: { kind: string; turn_index: number | null }) =>
+    m.kind === 'response' ? `Answer${m.turn_index != null ? ` ${m.turn_index + 1}` : ''}` : 'Proctor';
+  return (
+    <div className="rounded-lg bg-white border border-gray-200 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wide">Proctoring — {media.length} snapshot{media.length === 1 ? '' : 's'}</h4>
+        <span className="text-[11px] text-gray-400">camera stills · integrity review</span>
+      </div>
+      <div className="flex gap-4">
+        {identity && (
+          <figure className="flex-shrink-0">
+            <img src={identity.url} alt="identity" className="w-28 h-28 object-cover rounded-lg border border-gray-200" />
+            <figcaption className="text-[11px] text-gray-500 mt-1 text-center">Identity</figcaption>
+          </figure>
+        )}
+        <div className="flex gap-2 overflow-x-auto">
+          {rest.map((m) => (
+            <figure key={m.media_id} className="flex-shrink-0">
+              <img src={m.url} alt={m.kind} className="w-20 h-20 object-cover rounded border border-gray-200" />
+              <figcaption className="text-[10px] text-gray-400 mt-0.5 text-center">
+                {label(m)}{m.captured_at ? ` · ${new Date(m.captured_at).toLocaleTimeString()}` : ''}
+              </figcaption>
+            </figure>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SessionDetail({
   sessionId,
   sessionGrade,
@@ -765,6 +808,7 @@ function SessionDetail({
           Practice test — anonymized. Student identity and verbatim answers are hidden; only scores and reasoning are shown.
         </div>
       )}
+      <ProctoringPanel sessionId={sessionId} />
       {cefrResult && <CefrSummary cefr={cefrResult} />}
       {/* Per-question responses, scores, and reasoning */}
       {sessionGrade.evaluations && sessionGrade.evaluations.length > 0 ? (

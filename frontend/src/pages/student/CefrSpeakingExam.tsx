@@ -12,6 +12,8 @@ import type { Assessor, AssessResult } from '../../speech/azureAssessor';
 // instantly with no ElevenLabs call per session. Regenerate via infra if the
 // welcomeScript() text changes. Vite resolves the hashed, base-correct URL.
 import examinerIntroAudio from '../../assets/examiner-intro.mp3';
+import ProctoringConsent from '../../components/ProctoringConsent';
+import { useProctoring } from '../../proctoring/useProctoring';
 
 // Dedicated CEFR speaking-test flow. Reuses the tested backend communication/
 // engine (Table-3 grading + A1-C2 ladder). Capture is record-only (Azure
@@ -132,6 +134,14 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
   const [error, setError] = useState('');
   const [sessionId, setSessionId] = useState('');
   const [prompt, setPrompt] = useState('');
+  // Camera-snapshot proctoring — authed speaking exams only (never demo links).
+  const needsProctor = !demoToken;
+  const [proctorConsent, setProctorConsent] = useState<'pending' | 'granted' | 'declined'>(
+    demoToken ? 'granted' : 'pending');
+  const { captureResponse: proctorCapture } = useProctoring({
+    sessionId,
+    enabled: needsProctor && proctorConsent === 'granted' && phase === 'taking' && !!sessionId,
+  });
   // Browsers block audio that plays without a user gesture, so the welcome may
   // be refused on arrival. When that happens the student gets a button to play
   // it rather than silently missing the examiner's instructions.
@@ -402,6 +412,7 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
 
   const submit = async () => {
     if (!captured?.transcript || submitting || recording) return;
+    if (needsProctor && proctorConsent === 'granted') proctorCapture(answers.length);  // response snapshot
     stopSpeech();
     setSubmitting(true);
     const answer = captured.transcript;
@@ -445,6 +456,18 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
     <div className="max-w-xl mx-auto p-8 space-y-4">
       <p className="text-red-600">{error}</p>
       <button onClick={() => navigate(-1)} className="px-4 py-2 border border-gray-300 rounded-lg text-sm">Go back</button>
+    </div>
+  );
+
+  // Proctoring consent gate (authed speaking exams).
+  if (needsProctor && proctorConsent === 'pending') {
+    return <ProctoringConsent onConsent={() => setProctorConsent('granted')} onDecline={() => setProctorConsent('declined')} />;
+  }
+  if (needsProctor && proctorConsent === 'declined') return (
+    <div className="max-w-md mx-auto p-8 text-center space-y-3">
+      <h2 className="text-lg font-semibold text-gray-900">Camera consent required</h2>
+      <p className="text-sm text-gray-500">This exam is proctored and can't be taken without camera monitoring.</p>
+      <button onClick={() => navigate('/student/dashboard')} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">Return to dashboard</button>
     </div>
   );
 

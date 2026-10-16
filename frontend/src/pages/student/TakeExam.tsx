@@ -12,6 +12,8 @@ import { API_BASE_URL } from '../../config';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 import { EDSGauge, EDSBreakdown, EDSExplainer } from '../../components/Eds';
 import type { ExamQuestion, AnswerResponse, EDSComponents } from '../../api/exam';
+import ProctoringConsent from '../../components/ProctoringConsent';
+import { useProctoring } from '../../proctoring/useProctoring';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -420,6 +422,15 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // screen — a mic hiccup must not blow away an in-progress exam).
   const [ttsAvailable, setTtsAvailable] = useState(true);
   const [micNotice, setMicNotice] = useState<string | null>(null);
+
+  // Camera-snapshot proctoring — authed exams only (never demo links or preview).
+  const needsProctor = !preview && !isDemo;
+  const [proctorConsent, setProctorConsent] = useState<'pending' | 'granted' | 'declined'>(
+    !preview && !isDemo ? 'pending' : 'granted');
+  const { captureResponse: proctorCapture } = useProctoring({
+    sessionId: sessionId ?? '',
+    enabled: needsProctor && proctorConsent === 'granted' && phase === 'taking' && !!sessionId,
+  });
 
   // Case context: the source document(s) this exam is drawn from, kept viewable
   // throughout so the student can always re-read the case while answering.
@@ -947,8 +958,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     );
     scrollBottom();
 
+    if (needsProctor && proctorConsent === 'granted') proctorCapture(current);  // response snapshot
     answerMutation.mutate({ questionIndex: current, text: studentText });
-  }, [draft, current, answerMutation, scrollBottom, timerExpired, stopMic]);
+  }, [draft, current, answerMutation, scrollBottom, timerExpired, stopMic, needsProctor, proctorConsent, proctorCapture]);
 
   // ── Keyboard shortcut ──────────────────────────────────────────────────────
 
@@ -1002,6 +1014,22 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           >
             Return to Dashboard
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Proctoring consent gate (authed exams) ──────────────────────────────────
+  if (needsProctor && proctorConsent === 'pending') {
+    return <ProctoringConsent onConsent={() => setProctorConsent('granted')} onDecline={() => setProctorConsent('declined')} />;
+  }
+  if (needsProctor && proctorConsent === 'declined') {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center p-6">
+        <div className="max-w-md text-center space-y-3">
+          <h2 className="text-lg font-semibold text-gray-900">Camera consent required</h2>
+          <p className="text-sm text-gray-500">This exam is proctored and can't be taken without camera monitoring. Contact your instructor if you believe this is a mistake.</p>
+          <button onClick={() => navigate('/student/dashboard')} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">Return to dashboard</button>
         </div>
       </div>
     );
