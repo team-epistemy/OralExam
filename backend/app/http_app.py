@@ -2499,7 +2499,10 @@ def _register_proctoring(app: FastAPI, deps) -> None:
                     if not cur.fetchone():
                         raise HTTPException(status_code=404, detail="session not found")
                     media_id = str(_uuid.uuid4())
-                    key = f"{x_org_name}/proctoring/{req.session_id}/{req.kind}/{media_id}.jpg"
+                    # Top-level `proctoring/` prefix so a bucket lifecycle rule can
+                    # expire only proctoring media (90-day retention) without touching
+                    # course materials, which live under `{org}/...`.
+                    key = f"proctoring/{x_org_name}/{req.session_id}/{req.kind}/{media_id}.jpg"
                     cur.execute("""INSERT INTO session_media
                                    (media_id, session_id, org_id, kind, turn_index, storage_key)
                                    VALUES (%s::uuid,%s::uuid,%s::uuid,%s,%s,%s)""",
