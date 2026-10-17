@@ -11,7 +11,7 @@ import re
 import time
 from datetime import datetime, timezone, timedelta, date
 import threading
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -1589,6 +1589,40 @@ def _register_demo(app: FastAPI, deps) -> None:
                 rows = cur.fetchall()
             return {"overrides": [{"turn_number": r[0], "dimension": r[1],
                                    "machine_band": r[2], "human_band": r[3]} for r in rows]}
+        return _with_demo(token, _fn)
+
+    @app.post(R.DEMO_CEFR_RELIABILITY)
+    def demo_speaking_reliability(token: str, req: SpeakingReliabilityRequest):
+        """Store per-attempt transcription-reliability metadata for a demo turn.
+        METADATA ONLY — never affects the CEFR band. Best-effort: the frontend
+        ignores failures so a persist error never breaks the demo exam."""
+        def _fn(d, repo, link):
+            with repo.conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.speaking_reliability')")
+                if cur.fetchone()[0] is None:
+                    raise HTTPException(status_code=503, detail="reliability not available")
+                cur.execute(
+                    """INSERT INTO speaking_reliability
+                           (org_id, session_id, turn_number, raw_nbest_json, confidence_mean,
+                            transcript_reliability, intelligibility, needs_review, needs_review_reason,
+                            corrected_transcript, reviewed_by, rescored_bands)
+                       VALUES (%s::uuid, %s::uuid, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                       ON CONFLICT (session_id, turn_number)
+                       DO UPDATE SET raw_nbest_json = EXCLUDED.raw_nbest_json,
+                                     confidence_mean = EXCLUDED.confidence_mean,
+                                     transcript_reliability = EXCLUDED.transcript_reliability,
+                                     intelligibility = EXCLUDED.intelligibility,
+                                     needs_review = EXCLUDED.needs_review,
+                                     needs_review_reason = EXCLUDED.needs_review_reason,
+                                     updated_at = NOW()""",
+                    (link[1], req.session_id, req.turn_number,
+                     _json.dumps(req.raw_nbest_json) if req.raw_nbest_json is not None else None,
+                     req.confidence_mean, req.transcript_reliability, req.intelligibility,
+                     req.needs_review, req.needs_review_reason,
+                     req.corrected_transcript, req.reviewed_by,
+                     _json.dumps(req.rescored_bands) if req.rescored_bands is not None else None))
+            repo.conn.commit()
+            return {"status": "ok"}
         return _with_demo(token, _fn)
 
 
@@ -6060,6 +6094,26 @@ class CefrCalibrationRequest(BaseModel):
     machine_band: Optional[str] = None
 
 
+class SpeakingReliabilityRequest(BaseModel):
+    """Per-attempt transcription-reliability / intelligibility METADATA for one
+    speaking turn. METADATA ONLY — none of these fields ever feed the CEFR band
+    (mirrors the pronunciation/prosody accent-bias exclusion). All reliability
+    values are nullable: None means "unmeasured", never 0. Post-review fields are
+    filled later when an examiner reviews an attempt that needs_review flagged."""
+    session_id: str
+    turn_number: int = Field(ge=1, le=20)
+    raw_nbest_json: Optional[Any] = None          # raw Azure Detailed NBest (list/dict)
+    confidence_mean: Optional[float] = None        # word-weighted mean NBest[0].Confidence (0–1)
+    transcript_reliability: Optional[float] = None # conservative 0–1 combination (provisional)
+    intelligibility: Optional[float] = None        # placeholder; always None for now
+    needs_review: bool = False
+    needs_review_reason: Optional[str] = None
+    # Post-human-review fields (optional; set when an examiner reviews a flagged attempt).
+    corrected_transcript: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    rescored_bands: Optional[Any] = None           # examiner's re-scored bands (dict)
+
+
 def _register_evaluation(app: FastAPI, deps) -> None:
     """Evaluation and grading endpoints with real DB and Bedrock implementations."""
     import json as _json, uuid as _uuid
@@ -6136,6 +6190,59 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                 return {"overrides": [
                     {"turn_number": r[0], "dimension": r[1], "machine_band": r[2], "human_band": r[3]}
                     for r in rows]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/cefr/reliability (transcription-reliability metadata) ────
+    @app.post(R.CEFR_RELIABILITY)
+    def upsert_speaking_reliability(
+        req: SpeakingReliabilityRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Store (upsert) per-attempt transcription-reliability metadata for one
+        speaking turn. METADATA ONLY — never affects the CEFR band. Best-effort by
+        design: a failed persist must not break the exam, so the frontend ignores
+        errors here. One row per (session, turn)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.speaking_reliability')")
+                    if cur.fetchone()[0] is None:
+                        raise HTTPException(status_code=503, detail="reliability not available — run migration_029")
+                    cur.execute(
+                        """INSERT INTO speaking_reliability
+                               (org_id, session_id, turn_number, raw_nbest_json, confidence_mean,
+                                transcript_reliability, intelligibility, needs_review, needs_review_reason,
+                                corrected_transcript, reviewed_by, rescored_bands)
+                           VALUES (%s::uuid, %s::uuid, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                           ON CONFLICT (session_id, turn_number)
+                           DO UPDATE SET raw_nbest_json = EXCLUDED.raw_nbest_json,
+                                         confidence_mean = EXCLUDED.confidence_mean,
+                                         transcript_reliability = EXCLUDED.transcript_reliability,
+                                         intelligibility = EXCLUDED.intelligibility,
+                                         needs_review = EXCLUDED.needs_review,
+                                         needs_review_reason = EXCLUDED.needs_review_reason,
+                                         corrected_transcript = EXCLUDED.corrected_transcript,
+                                         reviewed_by = EXCLUDED.reviewed_by,
+                                         rescored_bands = EXCLUDED.rescored_bands,
+                                         updated_at = NOW()""",
+                        (caller.org_id, req.session_id, req.turn_number,
+                         _json.dumps(req.raw_nbest_json) if req.raw_nbest_json is not None else None,
+                         req.confidence_mean, req.transcript_reliability, req.intelligibility,
+                         req.needs_review, req.needs_review_reason,
+                         req.corrected_transcript, req.reviewed_by,
+                         _json.dumps(req.rescored_bands) if req.rescored_bands is not None else None),
+                    )
+                repo.conn.commit()
+                return {"status": "ok"}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

@@ -101,6 +101,25 @@ export async function saveCefrCalibration(body: {
   await post('/api/cefr/calibration', body);
 }
 
+// Per-attempt transcription-reliability METADATA. This NEVER affects the CEFR
+// band (mirrors the pronunciation/prosody accent-bias exclusion) — it is a
+// recognizer-confidence signal used only to route attempts to examiner review.
+// Nullable reliability values mean "unmeasured", never 0.
+export interface ReliabilityPayload {
+  session_id: string;
+  turn_number: number;
+  raw_nbest_json?: unknown;
+  confidence_mean?: number | null;
+  transcript_reliability?: number | null;
+  intelligibility?: number | null;
+  needs_review?: boolean;
+  needs_review_reason?: string | null;
+}
+
+export async function saveCefrReliability(body: ReliabilityPayload): Promise<void> {
+  await post('/api/cefr/reliability', body);
+}
+
 export interface SessionStatus {
   session_id: string;
   status: 'active' | 'completed';
