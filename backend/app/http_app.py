@@ -2500,17 +2500,21 @@ def _register_materials(app: FastAPI, deps) -> None:
         return _guard(deps, _do)
 
 
+class ProctorPresignRequest(BaseModel):
+    session_id: str
+    kind: str                 # identity | proctor | response
+    turn_index: int | None = None
+
+
 def _register_proctoring(app: FastAPI, deps) -> None:
     """Exam camera snapshots (identity / proctor / response). Student presigns a
     direct-to-bucket PUT per snapshot; professor/admin lists them for review.
-    Authed only — demo (credential-free) exams never record."""
-    from pydantic import BaseModel as _BaseModel
+    Authed only — demo (credential-free) exams never record.
 
-    class ProctorPresignRequest(_BaseModel):
-        session_id: str
-        kind: str                 # identity | proctor | response
-        turn_index: int | None = None
-
+    Note: ProctorPresignRequest is defined at module scope (not here). With
+    `from __future__ import annotations` active, FastAPI must resolve the body
+    model's forward-ref via module globals — a function-local class is invisible
+    to it and gets mis-read as a query param (breaks body parsing + OpenAPI)."""
     _KINDS = {"identity", "proctor", "response"}
 
     @app.post("/api/proctoring/presign")
