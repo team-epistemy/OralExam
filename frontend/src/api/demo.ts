@@ -1,6 +1,6 @@
 import { API_BASE_URL } from '../config';
 import { post } from './client';
-import type { StartExamResponse, AnswerResponse, SessionStatus, CaseMaterial, CefrOverride, SpeechEvidence, TimedWordPayload } from './exam';
+import type { StartExamResponse, AnswerResponse, SessionStatus, CaseMaterial, CefrOverride, SpeechEvidence, TimedWordPayload, ReliabilityPayload } from './exam';
 
 // Professor mints a credential-free demo link for one of their assignments (authed).
 export interface DemoLinkCreated {
@@ -102,4 +102,10 @@ export async function demoSaveCefrCalibration(token: string, body: {
   session_id: string; turn_number: number; dimension: string; human_band: string; machine_band?: string | null;
 }): Promise<void> {
   await demoJson('POST', `/api/demo/${token}/cefr-calibration`, body);
+}
+
+// Per-attempt transcription-reliability metadata for a demo turn (never affects
+// the band; best-effort — see saveCefrReliability in exam.ts).
+export async function demoSaveCefrReliability(token: string, body: ReliabilityPayload): Promise<void> {
+  await demoJson('POST', `/api/demo/${token}/cefr-reliability`, body);
 }

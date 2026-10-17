@@ -59,6 +59,7 @@ EXAM_ASSIGN = "/api/courses/{course_id}/exams/assign"
 TTS = "/api/tts"
 SPEECH_TOKEN = "/api/speech/token"   # POST: mint a short-lived Azure Speech token (CEFR speaking)
 CEFR_CALIBRATION = "/api/cefr/calibration"   # POST upsert / GET list: human per-dimension band overrides
+CEFR_RELIABILITY = "/api/cefr/reliability"   # POST upsert: per-attempt transcription-reliability metadata (never affects the band)
 
 # ── M6 Delivery routes ──────────────────────────────────────────────────────
 ASSIGNMENTS_LIST = "/api/courses/{course_id}/assignments"
@@ -134,6 +135,7 @@ DEMO_TTS = "/api/demo/{token}/tts"                             # POST text-to-sp
 DEMO_SPEECH_TOKEN = "/api/demo/{token}/speech-token"           # POST public Azure Speech token (gated by the demo link)
 DEMO_TRANSCRIBE = "/api/demo/{token}/transcribe"               # POST audio -> Google STT transcript (subject-exam dictation)
 DEMO_CEFR_CALIBRATION = "/api/demo/{token}/cefr-calibration"   # POST/GET demo reviewer band overrides
+DEMO_CEFR_RELIABILITY = "/api/demo/{token}/cefr-reliability"    # POST per-attempt transcription-reliability metadata (demo)
 
 
 def frontend_config() -> dict:

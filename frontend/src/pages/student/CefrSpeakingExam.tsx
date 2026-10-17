@@ -3,9 +3,9 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { Mic, Square, PlayCircle, Send, Volume2, VolumeX, Loader2, RotateCcw } from 'lucide-react';
 import { API_BASE_URL } from '../../config';
 import { post } from '../../api/client';
-import { startExamSession, submitAnswer, completeSession, getCefrCalibration, saveCefrCalibration } from '../../api/exam';
-import type { CefrTurn, CefrBandName, SpeechEvidence } from '../../api/exam';
-import { demoStart, demoAnswer, demoComplete, demoSpeechToken, demoTts, demoGetCefrCalibration, demoSaveCefrCalibration } from '../../api/demo';
+import { startExamSession, submitAnswer, completeSession, getCefrCalibration, saveCefrCalibration, saveCefrReliability } from '../../api/exam';
+import type { CefrTurn, CefrBandName, SpeechEvidence, ReliabilityPayload } from '../../api/exam';
+import { demoStart, demoAnswer, demoComplete, demoSpeechToken, demoTts, demoGetCefrCalibration, demoSaveCefrCalibration, demoSaveCefrReliability } from '../../api/demo';
 import { createAssessor } from '../../speech/azureAssessor';
 import type { Assessor, AssessResult } from '../../speech/azureAssessor';
 // Pre-recorded examiner intro (static instructions). Bundled so it plays
@@ -183,6 +183,7 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
     tts: (text: string) => demoTts(demoToken, text),
     getCalibration: (sid: string) => demoGetCefrCalibration(demoToken, sid),
     saveCalibration: (body: { session_id: string; turn_number: number; dimension: string; human_band: string; machine_band?: string | null }) => demoSaveCefrCalibration(demoToken, body),
+    saveReliability: (body: ReliabilityPayload) => demoSaveCefrReliability(demoToken, body),
   } : {
     start: () => startExamSession(assignmentId!),
     answer: (sid: string, ans: string, sp?: SpeechEvidence, w?: Array<{ w: string; g: number }>) => submitAnswer(sid, 0, ans, sp, w),
@@ -200,6 +201,7 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
     },
     getCalibration: (sid: string) => getCefrCalibration(sid),
     saveCalibration: (body: { session_id: string; turn_number: number; dimension: string; human_band: string; machine_band?: string | null }) => saveCefrCalibration(body),
+    saveReliability: (body: ReliabilityPayload) => saveCefrReliability(body),
   }, [demoToken, assignmentId]);
 
   // ── TTS (ElevenLabs proxy) ───────────────────────────────────────────────
@@ -365,6 +367,13 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
       const text = webTextRef.current.trim();
       if (text) setCaptured({ transcript: text, scores: { accuracy: null, fluency: null, completeness: null, pron: null, prosody: null },
         words: text.split(/\s+/).map((w) => ({ word: w, gapBefore: 0 })), prosodyAvailable: false,
+        // Web-Speech text fallback carries no recognizer confidence, so reliability
+        // is unmeasured (null, not 0) and the attempt is routed to a human.
+        reliability: { confidenceMean: null, weakWordRate: null,
+          errorTypeCounts: { omission: 0, insertion: 0, mispronunciation: 0, none: 0 },
+          nbestSpread: null, transcriptReliability: null, intelligibility: null,
+          needsReview: true, needsReviewReason: 'reliability_unmeasured' },
+        rawNBest: [],
         metrics: { wordCount: text.split(/\s+/).length, durationSec: null, speechRateWpm: null, articulationRateWpm: null, pauseCount: 0, longPauseCount: 0, meanPauseSec: 0, pauseRatio: null } });
       else setMicNotice('No speech was captured — press Record to try again.');
     }
@@ -425,10 +434,22 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
       const resp = await api.answer(sessionId, answer, toSpeechEvidence(pron),
                                     pron?.words?.map((w) => ({ w: w.word, g: w.gapBefore })));
       if (resp.cefr) setHistory((h) => [...h, resp.cefr!]);
+      const turnNumber = resp.cefr?.turn_number ?? answers.length + 1;
       setAnswers((a) => [...a, {
-        turnNumber: resp.cefr?.turn_number ?? a.length + 1,
-        prompt: thisPrompt, pron, cefr: resp.cefr ?? null, feedback: resp.feedback || '', audioUrl,
+        turnNumber, prompt: thisPrompt, pron, cefr: resp.cefr ?? null, feedback: resp.feedback || '', audioUrl,
       }]);
+      // Persist transcription-reliability metadata for this attempt — best-effort,
+      // fire-and-forget: this is diagnostic metadata that NEVER affects the band,
+      // so a failed persist must not surface to the student or block the exam.
+      if (pron) {
+        const r = pron.reliability;
+        void api.saveReliability({
+          session_id: sessionId, turn_number: turnNumber,
+          raw_nbest_json: pron.rawNBest, confidence_mean: r.confidenceMean,
+          transcript_reliability: r.transcriptReliability, intelligibility: r.intelligibility,
+          needs_review: r.needsReview, needs_review_reason: r.needsReviewReason,
+        }).catch(() => { /* best-effort: ignore */ });
+      }
       if (!resp.probe) {
         try { await api.complete(sessionId); } catch { /* best-effort */ }
         try { const ov = await api.getCalibration(sessionId); setOverrides(Object.fromEntries(ov.map((o) => [`${o.turn_number}:${o.dimension}`, o.human_band]))); } catch { /* ignore */ }
