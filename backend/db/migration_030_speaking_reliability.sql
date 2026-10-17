@@ -1,4 +1,4 @@
--- migration_029: per-attempt transcription-reliability / intelligibility metadata
+-- migration_030: per-attempt transcription-reliability / intelligibility metadata
 -- for the CEFR speaking exam. One row per (session, turn): the raw Azure NBest
 -- JSON plus the derived reliability signals, and the post-human-review fields an
 -- examiner fills when an attempt is routed for review.
