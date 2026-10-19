@@ -22,6 +22,7 @@ import AdminTesting from './pages/admin/AdminTesting';
 import AdminDirectory from './pages/admin/AdminDirectory';
 import AdminPerformance from './pages/admin/AdminPerformance';
 import AdminToneLab from './pages/admin/AdminToneLab';
+import CefrReview from './pages/admin/CefrReview';
 import DemoExam from './pages/student/DemoExam';
 
 function getUser() {
@@ -109,6 +110,10 @@ export const router = createBrowserRouter([
       {
         path: '/admin/testing',
         element: <RequireRole role="platform_admin"><AdminTesting /></RequireRole>,
+      },
+      {
+        path: '/admin/cefr-review',
+        element: <RequireRole role="platform_admin"><CefrReview /></RequireRole>,
       },
       // Professor routes
       {

@@ -214,6 +214,12 @@ def migrate() -> None:
             print(f"applying {migration_030.name} ...")
             cur.execute(migration_030.read_text())
 
+        # Always apply migration_031 (cefr_calibration review-rating columns + grant; idempotent)
+        migration_031 = db_dir / "migration_031_cefr_review_rating.sql"
+        if migration_031.exists():
+            print(f"applying {migration_031.name} ...")
+            cur.execute(migration_031.read_text())
+
     conn.commit()
     print("all schemas applied")
 

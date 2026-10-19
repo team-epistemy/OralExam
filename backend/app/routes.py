@@ -60,6 +60,10 @@ TTS = "/api/tts"
 SPEECH_TOKEN = "/api/speech/token"   # POST: mint a short-lived Azure Speech token (CEFR speaking)
 CEFR_CALIBRATION = "/api/cefr/calibration"   # POST upsert / GET list: human per-dimension band overrides
 CEFR_RELIABILITY = "/api/cefr/reliability"   # POST upsert: per-attempt transcription-reliability metadata (never affects the band)
+# CEFR speaking labeling + examiner review (professor / platform_admin only).
+CEFR_REVIEW_ATTEMPTS = "/api/cefr/review/attempts"                                    # GET: speaking attempts to rate (needs_review first) + rating counts
+CEFR_REVIEW_ATTEMPT = "/api/cefr/review/attempts/{session_id}/{turn_number}"          # GET: one attempt's detail (transcript, metrics, reliability, auto band, ratings)
+CEFR_REVIEW_RATING = "/api/cefr/review/attempts/{session_id}/{turn_number}/rating"    # POST: upsert this rater's full CEFR rating for the attempt
 
 # ── M6 Delivery routes ──────────────────────────────────────────────────────
 ASSIGNMENTS_LIST = "/api/courses/{course_id}/assignments"

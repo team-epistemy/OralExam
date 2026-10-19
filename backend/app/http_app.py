@@ -6192,6 +6192,30 @@ class SpeakingReliabilityRequest(BaseModel):
     rescored_bands: Optional[Any] = None           # examiner's re-scored bands (dict)
 
 
+# The four CEFR speaking feature dimensions (CEFR Table 3) a human rates per
+# attempt, plus the holistic "overall". These are a strict subset of
+# _CEFR_DIMENSIONS; "interaction" is excluded from the review form by design (the
+# review rates from a transcript, not a live interaction). Each is stored as its
+# own dimension row in cefr_calibration, keyed by rater, so inter-rater agreement
+# is just a comparison across rater_ids for the same (session, turn, dimension).
+_CEFR_REVIEW_DIMENSIONS = ("fluency", "range", "accuracy", "coherence")
+
+
+class CefrReviewRatingRequest(BaseModel):
+    """One rater's complete human CEFR rating of a speaking attempt (session +
+    turn). Per-dimension bands + an overall band + optional transcript correction
+    + notes. Upserted per (attempt, rater): re-submitting overwrites this rater's
+    prior rating but never another rater's, so multiple raters coexist for
+    inter-rater agreement."""
+    fluency: str
+    range: str
+    accuracy: str
+    coherence: str
+    overall: str
+    corrected_transcript: Optional[str] = Field(default=None, max_length=20000)
+    notes: Optional[str] = Field(default=None, max_length=5000)
+
+
 def _register_evaluation(app: FastAPI, deps) -> None:
     """Evaluation and grading endpoints with real DB and Bedrock implementations."""
     import json as _json, uuid as _uuid
@@ -6321,6 +6345,296 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                     )
                 repo.conn.commit()
                 return {"status": "ok"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── CEFR speaking labeling + examiner review ──────────────────────────
+    # Review surface for the CEFR speaking exam: an examiner lists the speaking
+    # attempts that have a reliability row (needs_review first), opens one to see
+    # its transcript + acoustic metrics + reliability signals + the machine
+    # (auto) band, and records a full multi-rater human CEFR rating. Reuses
+    # speaking_reliability (metadata) + cefr_calibration (per-rater band rows); no
+    # new tables. Professor / platform_admin only.
+    #
+    # CONSTRAINT — NO AUDIO: exam audio is NOT persisted (only the Azure NBest
+    # JSON + transcript), so the review rates from the transcript + displayed
+    # acoustic metrics + reliability signals, never from audio playback.
+    # TODO(audio-playback): when/if raw attempt audio is stored (e.g. a
+    # session_media 'audio' row with a storage_key — see R.PROCTOR_* media), add a
+    # presigned-URL field here and a <audio> player in the review UI. Do NOT
+    # invent audio storage to satisfy this; it is deliberately out of scope now.
+    def _cefr_review_guard(caller):
+        if caller.role not in (Role.PROFESSOR, Role.PLATFORM_ADMIN):
+            raise AuthorizationError("professor or platform_admin role required")
+
+    @app.get(R.CEFR_REVIEW_ATTEMPTS)
+    def list_cefr_review_attempts(
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """List this org's speaking attempts available to rate. Driven off
+        speaking_reliability (needs_review first), joined to the transcript +
+        machine band, with each attempt's current rating count."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                _cefr_review_guard(caller)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.speaking_reliability')")
+                    if cur.fetchone()[0] is None:
+                        return {"attempts": []}
+                    cur.execute(
+                        """SELECT sr.session_id, sr.turn_number,
+                                  sr.confidence_mean, sr.transcript_reliability,
+                                  sr.needs_review, sr.needs_review_reason,
+                                  sr.corrected_transcript IS NOT NULL AS has_correction,
+                                  es.student_id, es.course_id, es.status,
+                                  t.answer_preview, t.cefr_band,
+                                  (SELECT COUNT(DISTINCT c.rater_id) FROM cefr_calibration c
+                                     WHERE c.session_id = sr.session_id
+                                       AND c.turn_number = sr.turn_number) AS rater_count,
+                                  (SELECT COUNT(*) FROM cefr_calibration c
+                                     WHERE c.session_id = sr.session_id
+                                       AND c.turn_number = sr.turn_number
+                                       AND c.rater_id = %s AND c.dimension = 'overall') AS mine
+                           FROM speaking_reliability sr
+                           LEFT JOIN exam_session es ON es.session_id = sr.session_id
+                           LEFT JOIN LATERAL (
+                               SELECT LEFT(st.student_answer, 280) AS answer_preview,
+                                      (e.raw_llm_output->'cefr'->>'overall_band') AS cefr_band
+                               FROM evaluation e
+                               JOIN session_turn st ON st.turn_id = e.turn_id
+                               WHERE st.session_id = sr.session_id
+                                 AND (e.raw_llm_output->'cefr'->>'turn_number')::int = sr.turn_number
+                               LIMIT 1
+                           ) t ON TRUE
+                           WHERE sr.org_id = %s::uuid
+                           ORDER BY sr.needs_review DESC, sr.updated_at DESC""",
+                        (caller.user_id, caller.org_id),
+                    )
+                    rows = cur.fetchall()
+                return {"attempts": [
+                    {
+                        "session_id": str(r[0]),
+                        "turn_number": r[1],
+                        "confidence_mean": r[2],
+                        "transcript_reliability": r[3],
+                        "needs_review": r[4],
+                        "needs_review_reason": r[5],
+                        "has_correction": r[6],
+                        "student_id": r[7],
+                        "course_id": str(r[8]) if r[8] else None,
+                        "session_status": r[9],
+                        "transcript_preview": r[10] or "",
+                        "auto_band": r[11],
+                        "rater_count": r[12] or 0,
+                        "rated_by_me": bool(r[13]),
+                    }
+                    for r in rows]}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.get(R.CEFR_REVIEW_ATTEMPT)
+    def get_cefr_review_attempt(
+        session_id: str,
+        turn_number: int,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """One attempt's full detail: transcript, acoustic metrics + reliability
+        signals, the machine (auto) CEFR band block, and every rater's existing
+        human rating (for inter-rater comparison)."""
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                _cefr_review_guard(caller)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.speaking_reliability')")
+                    if cur.fetchone()[0] is None:
+                        raise HTTPException(status_code=503, detail="reliability not available — run migration_030")
+                    cur.execute(
+                        """SELECT raw_nbest_json, confidence_mean, transcript_reliability,
+                                  intelligibility, needs_review, needs_review_reason,
+                                  corrected_transcript, reviewed_by, rescored_bands
+                           FROM speaking_reliability
+                           WHERE session_id = %s::uuid AND turn_number = %s AND org_id = %s::uuid""",
+                        (session_id, turn_number, caller.org_id),
+                    )
+                    rrow = cur.fetchone()
+                    if not rrow:
+                        raise AuthorizationError("attempt not found")
+
+                    # Transcript + machine band block, matched on the cefr block's
+                    # own turn_number (robust to the session_turn index mapping).
+                    cur.execute(
+                        """SELECT st.student_answer, e.raw_llm_output
+                           FROM evaluation e
+                           JOIN session_turn st ON st.turn_id = e.turn_id
+                           WHERE st.session_id = %s::uuid
+                             AND (e.raw_llm_output->'cefr'->>'turn_number')::int = %s
+                           LIMIT 1""",
+                        (session_id, turn_number),
+                    )
+                    trow = cur.fetchone()
+
+                    # Every rater's rating for this attempt, grouped by rater.
+                    cur.execute(
+                        """SELECT rater_id, dimension, human_band, machine_band,
+                                  notes, corrected_transcript, created_at, updated_at
+                           FROM cefr_calibration
+                           WHERE session_id = %s::uuid AND turn_number = %s AND org_id = %s::uuid
+                           ORDER BY rater_id, dimension""",
+                        (session_id, turn_number, caller.org_id),
+                    )
+                    crows = cur.fetchall()
+
+                raw_nbest = rrow[0]
+                if isinstance(raw_nbest, str):
+                    try: raw_nbest = _json.loads(raw_nbest)
+                    except Exception: raw_nbest = None
+                rescored = rrow[8]
+                if isinstance(rescored, str):
+                    try: rescored = _json.loads(rescored)
+                    except Exception: rescored = None
+
+                auto_cefr = None
+                student_answer = None
+                if trow:
+                    student_answer = trow[0]
+                    raw = trow[1] if isinstance(trow[1], dict) else (_json.loads(trow[1]) if trow[1] else {})
+                    auto_cefr = raw.get("cefr")
+
+                # Collapse the per-dimension rows into one object per rater.
+                raters: dict = {}
+                for rid, dim, hband, mband, notes, corr, created, updated in crows:
+                    entry = raters.setdefault(rid, {
+                        "rater_id": rid, "bands": {}, "machine_bands": {},
+                        "notes": None, "corrected_transcript": None,
+                        "created_at": None, "updated_at": None,
+                        "is_me": rid == caller.user_id,
+                    })
+                    entry["bands"][dim] = hband
+                    if mband is not None:
+                        entry["machine_bands"][dim] = mband
+                    # notes / corrected_transcript are rating-level (denormalised
+                    # onto every dimension row) — take the first non-null.
+                    if notes and not entry["notes"]:
+                        entry["notes"] = notes
+                    if corr and not entry["corrected_transcript"]:
+                        entry["corrected_transcript"] = corr
+                    if created and (entry["created_at"] is None or created.isoformat() < entry["created_at"]):
+                        entry["created_at"] = created.isoformat()
+                    if updated and (entry["updated_at"] is None or updated.isoformat() > entry["updated_at"]):
+                        entry["updated_at"] = updated.isoformat()
+
+                return {
+                    "session_id": session_id,
+                    "turn_number": turn_number,
+                    "transcript": student_answer or "",
+                    # Acoustic metrics / reliability signals (METADATA ONLY — never
+                    # feed the band; shown to the rater as recognizer-confidence).
+                    "confidence_mean": rrow[1],
+                    "transcript_reliability": rrow[2],
+                    "intelligibility": rrow[3],
+                    "needs_review": rrow[4],
+                    "needs_review_reason": rrow[5],
+                    "attempt_corrected_transcript": rrow[6],  # single per-attempt field on speaking_reliability
+                    "reviewed_by": rrow[7],
+                    "rescored_bands": rescored,
+                    "raw_nbest_json": raw_nbest,
+                    # Machine (auto) CEFR band block from the grader, if any.
+                    "auto_cefr": auto_cefr,
+                    # Existing human ratings (multi-rater).
+                    "ratings": list(raters.values()),
+                    # No audio: this attempt has no playable media (see TODO above).
+                    "audio_url": None,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.CEFR_REVIEW_RATING)
+    def save_cefr_review_rating(
+        session_id: str,
+        turn_number: int,
+        req: CefrReviewRatingRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        """Upsert the caller's full human CEFR rating for a speaking attempt. One
+        cefr_calibration row per dimension (fluency/range/accuracy/coherence +
+        overall), all keyed by this rater, so re-submitting replaces only this
+        rater's rating and never another's (multi-rater)."""
+        bands = {
+            "fluency": req.fluency, "range": req.range, "accuracy": req.accuracy,
+            "coherence": req.coherence, "overall": req.overall,
+        }
+        for dim, band in bands.items():
+            if band not in _CEFR_BANDS:
+                raise HTTPException(status_code=400, detail=f"{dim} band must be one of {sorted(_CEFR_BANDS)}")
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                _cefr_review_guard(caller)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.cefr_calibration')")
+                    if cur.fetchone()[0] is None:
+                        raise HTTPException(status_code=503, detail="calibration not available — run migration_027")
+
+                    # Machine comparison band: the grader's holistic overall_band
+                    # (stored as machine_band on the 'overall' row). Per-dimension
+                    # machine bands aren't emitted as letters by the grader, so the
+                    # other rows carry no machine_band.
+                    cur.execute(
+                        """SELECT (e.raw_llm_output->'cefr'->>'overall_band')
+                           FROM evaluation e
+                           JOIN session_turn st ON st.turn_id = e.turn_id
+                           WHERE st.session_id = %s::uuid
+                             AND (e.raw_llm_output->'cefr'->>'turn_number')::int = %s
+                           LIMIT 1""",
+                        (session_id, turn_number),
+                    )
+                    mrow = cur.fetchone()
+                    machine_overall = mrow[0] if mrow else None
+
+                    corr = req.corrected_transcript
+                    notes = req.notes
+                    for dim, band in bands.items():
+                        machine_band = machine_overall if dim == "overall" else None
+                        cur.execute(
+                            """INSERT INTO cefr_calibration
+                                   (org_id, session_id, turn_number, dimension, machine_band,
+                                    human_band, rater_id, notes, corrected_transcript)
+                               VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, %s)
+                               ON CONFLICT (session_id, turn_number, dimension, rater_id)
+                               DO UPDATE SET human_band = EXCLUDED.human_band,
+                                             machine_band = EXCLUDED.machine_band,
+                                             notes = EXCLUDED.notes,
+                                             corrected_transcript = EXCLUDED.corrected_transcript,
+                                             updated_at = NOW()""",
+                            (caller.org_id, session_id, turn_number, dim, machine_band,
+                             band, caller.user_id, notes, corr),
+                        )
+                repo.conn.commit()
+                return {"status": "ok", "rater_id": caller.user_id}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
