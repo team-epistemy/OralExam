@@ -1,18 +1,27 @@
 @import "tailwindcss";
 
 @theme {
-  --color-parchment: #F5F0E8;
-  --color-parchment-dark: #EDE5D0;
-  --color-navy: #1B2A4A;
-  --color-navy-light: #243557;
-  --color-gold: #9B7530;
+  /* Epistemy brand — forest-green / parchment / gold + serif (per the Figma
+     professor-dashboard design). The primary brand colour moved navy → green;
+     token NAMES are kept (e.g. `navy` is now the green primary) so the whole app
+     reskins from here without touching every component. Values sampled from the
+     rendered Figma. */
+  --color-parchment: #F5F1E9;
+  --color-parchment-dark: #ECE4D4;
+  --color-navy: #214C3B;       /* primary green — nav, icons, primary buttons, headings */
+  --color-navy-light: #2C5E47; /* hover / lighter green */
+  --color-gold: #9A7636;
   --color-gold-light: #C4933F;
-  --color-ink: #2C2416;
-  --color-ink-light: #5A4F3C;
-  --color-muted: #6B6355;
-  --color-border: #D4C9B0;
-  --color-success: #2D6A4F;
-  --color-success-bg: #D8F3DC;
+  --color-ink: #20372D;        /* primary text (green-tinted near-black) */
+  --color-ink-light: #4F5A50;
+  --color-muted: #706F6B;
+  --color-border: #E0D8C6;
+  --color-success: #2F6A4F;    /* Active / Ready pill text */
+  --color-success-bg: #E2EEE7; /* Active / Ready pill bg */
+  --color-rust: #9A563F;       /* warnings / Failed */
+  --color-rust-bg: #F7E9E3;
+  --color-info: #3F5F7A;       /* Processing */
+  --color-info-bg: #DEE7EF;
   --font-heading: 'DM Serif Display', serif;
   --font-body: 'Inter', sans-serif;
 }
@@ -20,8 +29,8 @@
 body {
   margin: 0;
   font-family: 'Inter', sans-serif;
-  background: #F5F0E8;
-  color: #2C2416;
+  background: #F5F1E9;
+  color: #20372D;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
