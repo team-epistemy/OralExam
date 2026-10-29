@@ -109,3 +109,44 @@ export async function demoSaveCefrCalibration(token: string, body: {
 export async function demoSaveCefrReliability(token: string, body: ReliabilityPayload): Promise<void> {
   await demoJson('POST', `/api/demo/${token}/cefr-reliability`, body);
 }
+
+// Anonymous demo-engagement telemetry. Fire-and-forget: we NEVER await this in a
+// critical path and swallow every error, so a telemetry failure can't affect the
+// demo exam. ANONYMOUS — no PII, no identity; meta carries only {ua, lang, ref}
+// on the `opened` event. `keepalive` lets late events (e.g. on page hide) still
+// flush; for the hard unload path use demoEventBeacon instead.
+export type DemoEventType =
+  | 'opened' | 'started' | 'mic_granted' | 'mic_denied' | 'question_shown'
+  | 'answer_submitted' | 'completed' | 'abandoned' | 'results_viewed' | 'error';
+export interface DemoEventPayload {
+  session_id?: string;
+  turn_index?: number;
+  value_ms?: number;
+  meta?: Record<string, unknown>;
+}
+export function demoEvent(token: string, event_type: DemoEventType, payload?: DemoEventPayload): void {
+  try {
+    void fetch(`${API_BASE_URL}/api/demo/${token}/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event_type, ...(payload || {}) }),
+      keepalive: true,
+    }).catch(() => { /* best-effort: ignore */ });
+  } catch { /* ignore */ }
+}
+
+// Unload-safe variant for `abandoned`: navigator.sendBeacon survives page hide /
+// unload where fetch may be cancelled. Falls back to demoEvent if unavailable.
+export function demoEventBeacon(token: string, event_type: DemoEventType, payload?: DemoEventPayload): void {
+  try {
+    const body = JSON.stringify({ event_type, ...(payload || {}) });
+    if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+      const ok = navigator.sendBeacon(
+        `${API_BASE_URL}/api/demo/${token}/event`,
+        new Blob([body], { type: 'application/json' }),
+      );
+      if (ok) return;
+    }
+    demoEvent(token, event_type, payload);
+  } catch { /* ignore */ }
+}

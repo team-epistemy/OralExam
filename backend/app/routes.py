@@ -126,6 +126,7 @@ ADMIN_EXAMINER_TEXT_FIRST = "/api/admin/examiner/text-first"   # PUT set text-fi
 
 # ── Admin: create credential-free demo links ────────────────────────────────
 ADMIN_DEMO_LINKS = "/api/admin/demo-links"                    # POST mint a demo link, GET list
+ADMIN_DEMO_METRICS = "/api/admin/demo-metrics"                # GET anonymous demo-engagement rollup (professor/platform_admin)
 ASSIGNMENT_DEMO_LINK = "/api/assignments/{assignment_id}/demo-link"  # POST: professor mints a demo link for own assignment
 
 # ── Public demo (credential-free, token-scoped, self-authenticating) ─────────
@@ -140,6 +141,7 @@ DEMO_SPEECH_TOKEN = "/api/demo/{token}/speech-token"           # POST public Azu
 DEMO_TRANSCRIBE = "/api/demo/{token}/transcribe"               # POST audio -> Google STT transcript (subject-exam dictation)
 DEMO_CEFR_CALIBRATION = "/api/demo/{token}/cefr-calibration"   # POST/GET demo reviewer band overrides
 DEMO_CEFR_RELIABILITY = "/api/demo/{token}/cefr-reliability"    # POST per-attempt transcription-reliability metadata (demo)
+DEMO_EVENT = "/api/demo/{token}/event"                         # POST anonymous engagement event (best-effort telemetry)
 
 
 def frontend_config() -> dict:

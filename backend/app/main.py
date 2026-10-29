@@ -220,6 +220,12 @@ def migrate() -> None:
             print(f"applying {migration_031.name} ...")
             cur.execute(migration_031.read_text())
 
+        # Always apply migration_032 (demo_event engagement telemetry + RLS + grant; idempotent)
+        migration_032 = db_dir / "migration_032_demo_event.sql"
+        if migration_032.exists():
+            print(f"applying {migration_032.name} ...")
+            cur.execute(migration_032.read_text())
+
     conn.commit()
     print("all schemas applied")
 

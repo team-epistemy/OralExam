@@ -1112,6 +1112,32 @@ class DemoTTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
 
 
+# Anonymous demo-engagement event types the public telemetry endpoint accepts.
+# Anything outside this set is dropped (best-effort: never throws into the user
+# flow). Keep in sync with the frontend demoEvent call sites.
+_DEMO_EVENT_TYPES = frozenset({
+    "opened", "started", "mic_granted", "mic_denied", "question_shown",
+    "answer_submitted", "completed", "abandoned", "results_viewed", "error",
+})
+# Hard caps so a hostile/buggy client can't bloat a row. meta is serialized and
+# dropped (not rejected) past the cap; turn_index / value_ms are clamped to None
+# when out of a sane range.
+_DEMO_EVENT_META_MAX = 4096          # chars of JSON-serialized meta
+_DEMO_EVENT_TURN_MAX = 100
+_DEMO_EVENT_VALUE_MS_MAX = 36_000_000  # 10h; anything larger is noise
+
+
+class DemoEventRequest(BaseModel):
+    """Public, anonymous engagement event for a demo speaking test. Best-effort
+    telemetry — NO PII, NO identity. session_id is the throwaway demo session (if
+    one has started); meta carries only {ua, lang, ref} on the `opened` event."""
+    event_type: str = Field(min_length=1, max_length=40)
+    session_id: Optional[str] = None
+    turn_index: Optional[int] = None
+    value_ms: Optional[int] = None
+    meta: Optional[dict] = None
+
+
 def _demo_link_or_error(cur, token: str):
     """Fetch + validate a demo link. Returns the row or a dict error the caller returns.
     Row: (token, org_id, assignment_id, max_attempts, attempts_used, expires_at)."""
@@ -1624,6 +1650,191 @@ def _register_demo(app: FastAPI, deps) -> None:
             repo.conn.commit()
             return {"status": "ok"}
         return _with_demo(token, _fn)
+
+    @app.post(R.DEMO_EVENT)
+    def demo_event(token: str, req: DemoEventRequest):
+        """Record ONE anonymous engagement event for a demo speaking test.
+        Best-effort telemetry: a bad body / unknown event type / missing table
+        returns a cheap 2xx and NEVER throws into the user's exam flow. The demo
+        token in the path is the auth (via _with_demo); org_id comes from the link.
+        ANONYMOUS — no PII; meta carries only {ua, lang, ref} on `opened`."""
+        etype = (req.event_type or "").strip().lower()
+        if etype not in _DEMO_EVENT_TYPES:
+            # Drop silently (cheap 200): don't 4xx a throwaway beacon.
+            return {"status": "ignored"}
+
+        # Clamp/validate the numeric fields to sane ranges (drop, don't reject).
+        turn_index = req.turn_index
+        if turn_index is not None and not (0 <= turn_index <= _DEMO_EVENT_TURN_MAX):
+            turn_index = None
+        value_ms = req.value_ms
+        if value_ms is not None and not (0 <= value_ms <= _DEMO_EVENT_VALUE_MS_MAX):
+            value_ms = None
+        # Cap meta: serialize once; drop it entirely past the cap rather than fail
+        # (never store invalid/truncated JSON — the column is jsonb).
+        meta_json = None
+        if isinstance(req.meta, dict) and req.meta:
+            try:
+                dump = _json.dumps(req.meta)
+                meta_json = dump if len(dump) <= _DEMO_EVENT_META_MAX else None
+            except Exception:
+                meta_json = None
+        # session_id must look like a uuid or we store NULL (never let a bad value
+        # raise on the ::uuid cast).
+        sid = None
+        if req.session_id:
+            try:
+                sid = str(_uuid.UUID(str(req.session_id)))
+            except Exception:
+                sid = None
+
+        def _fn(d, repo, link):
+            try:
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.demo_event')")
+                    if cur.fetchone()[0] is None:
+                        # Table not migrated yet — accept-and-drop, never error the flow.
+                        return {"status": "ok"}
+                    cur.execute(
+                        """INSERT INTO demo_event
+                               (org_id, demo_token, session_id, event_type, turn_index, value_ms, meta)
+                           VALUES (%s::uuid, %s, %s::uuid, %s, %s, %s, %s::jsonb)""",
+                        (link[1], link[0], sid, etype, turn_index, value_ms, meta_json))
+                repo.conn.commit()
+            except Exception:
+                # Best-effort: swallow any persist error so telemetry can never
+                # break a demo exam. _guard would 500 otherwise.
+                try:
+                    repo.conn.rollback()
+                except Exception:
+                    pass
+            return {"status": "ok"}
+        return _with_demo(token, _fn)
+
+    @app.get(R.ADMIN_DEMO_METRICS)
+    def demo_metrics(token: Optional[str] = None, since: Optional[str] = None,
+                     x_org_name: str = Header(...),
+                     x_user_id: str = Header("operator"),
+                     x_role: str = Header("professor")):
+        """Anonymous demo-engagement rollup for the caller's org (professor /
+        platform_admin). Optional ?token= (one demo link) and ?since= (ISO ts or
+        'NNd' lookback) filters. Degrades to zeroed counts when there's no data."""
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role not in (Role.PROFESSOR, Role.PLATFORM_ADMIN):
+                    raise AuthorizationError("professor or platform_admin role required")
+                repo.set_tenant(caller.org_id)  # RLS scopes demo_event to the caller's org
+
+                empty = {"funnel": {k: 0 for k in
+                                    ("opened", "started", "mic_granted", "mic_denied", "completed")},
+                         "rates": {"start_rate": None, "mic_grant_rate": None,
+                                   "completion_rate": None, "pct_reached_completion": None},
+                         "medians": {"session_duration_ms": None, "active_speaking_ms": None,
+                                     "questions_answered": None},
+                         "event_counts": {}, "sessions": 0, "token": token, "since": since}
+
+                with repo.conn.cursor() as cur:
+                    cur.execute("SELECT to_regclass('public.demo_event')")
+                    if cur.fetchone()[0] is None:
+                        return {**empty, "status": "no_data",
+                                "message": "demo_event table not present — run migration_032."}
+
+                    # ?since= accepts an ISO timestamp or a short 'NNd' / 'NNh' lookback.
+                    since_clause, params = "", []
+                    if since:
+                        iv = _parse_since(since)
+                        if iv is not None:
+                            since_clause = " AND created_at >= NOW() - %s::interval"
+                            params.append(iv)
+                        else:
+                            since_clause = " AND created_at >= %s::timestamptz"
+                            params.append(since)
+                    token_clause = ""
+                    if token:
+                        token_clause = " AND demo_token = %s"
+                        params.append(token)
+                    where = "WHERE TRUE" + token_clause + since_clause
+
+                    # Per-event_type counts.
+                    cur.execute(f"SELECT event_type, COUNT(*) FROM demo_event {where} GROUP BY event_type", params)
+                    event_counts = {r[0]: int(r[1]) for r in cur.fetchall()}
+                    if not event_counts:
+                        return {**empty, "status": "ok"}
+
+                    # Funnel counts by DISTINCT session where a session exists, else
+                    # by event count (opened fires before a session_id is minted, so
+                    # it is always counted by event).
+                    cur.execute(
+                        f"""SELECT
+                               COUNT(*) FILTER (WHERE event_type='opened') AS opened,
+                               COUNT(DISTINCT session_id) FILTER (WHERE event_type='started') AS started,
+                               COUNT(DISTINCT session_id) FILTER (WHERE event_type='mic_granted') AS mic_granted,
+                               COUNT(DISTINCT session_id) FILTER (WHERE event_type='mic_denied') AS mic_denied,
+                               COUNT(DISTINCT session_id) FILTER (WHERE event_type='completed') AS completed
+                           FROM demo_event {where}""", params)
+                    fr = cur.fetchone()
+                    funnel = {"opened": int(fr[0] or 0), "started": int(fr[1] or 0),
+                              "mic_granted": int(fr[2] or 0), "mic_denied": int(fr[3] or 0),
+                              "completed": int(fr[4] or 0)}
+
+                    # Per-session aggregates → medians (computed in SQL).
+                    cur.execute(
+                        f"""WITH per_session AS (
+                               SELECT session_id,
+                                      EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at))) * 1000 AS duration_ms,
+                                      COALESCE(SUM(value_ms) FILTER (WHERE event_type='answer_submitted'), 0) AS active_ms,
+                                      COUNT(*) FILTER (WHERE event_type='answer_submitted') AS answered,
+                                      BOOL_OR(event_type='completed') AS completed
+                               FROM demo_event {where} AND session_id IS NOT NULL
+                               GROUP BY session_id)
+                           SELECT COUNT(*) AS sessions,
+                                  PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms) AS med_duration,
+                                  PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY active_ms) AS med_active,
+                                  PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY answered) AS med_answered,
+                                  COUNT(*) FILTER (WHERE completed) AS completed_sessions
+                           FROM per_session""", params)
+                    sr = cur.fetchone()
+                    sessions = int(sr[0] or 0)
+                    med_duration = float(sr[1]) if sr[1] is not None else None
+                    med_active = float(sr[2]) if sr[2] is not None else None
+                    med_answered = float(sr[3]) if sr[3] is not None else None
+                    completed_sessions = int(sr[4] or 0)
+
+                def _rate(num, den):
+                    return round(num / den, 4) if den else None
+                rates = {
+                    "start_rate": _rate(funnel["started"], funnel["opened"]),
+                    "mic_grant_rate": _rate(funnel["mic_granted"],
+                                            funnel["mic_granted"] + funnel["mic_denied"]),
+                    "completion_rate": _rate(funnel["completed"], funnel["started"]),
+                    "pct_reached_completion": _rate(completed_sessions, sessions),
+                }
+                return {
+                    "status": "ok", "token": token, "since": since, "sessions": sessions,
+                    "funnel": funnel, "rates": rates,
+                    "medians": {"session_duration_ms": med_duration,
+                                "active_speaking_ms": med_active,
+                                "questions_answered": med_answered},
+                    "event_counts": event_counts,
+                }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+
+def _parse_since(since: str):
+    """Return an interval STRING for a 'NNd'/'NNh' lookback, or None if `since`
+    looks like an absolute timestamp (handled by the caller as ::timestamptz)."""
+    s = (since or "").strip().lower()
+    import re as _re
+    m = _re.fullmatch(r"(\d+)\s*([dh])", s)
+    if not m:
+        return None
+    n, unit = m.group(1), m.group(2)
+    return f"{n} days" if unit == "d" else f"{n} hours"
 
 
 def _register_routes(app: FastAPI, deps) -> None:

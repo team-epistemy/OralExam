@@ -5,7 +5,8 @@ import { API_BASE_URL } from '../../config';
 import { post } from '../../api/client';
 import { startExamSession, submitAnswer, completeSession, getCefrCalibration, saveCefrCalibration, saveCefrReliability } from '../../api/exam';
 import type { CefrTurn, CefrBandName, SpeechEvidence, ReliabilityPayload } from '../../api/exam';
-import { demoStart, demoAnswer, demoComplete, demoSpeechToken, demoTts, demoGetCefrCalibration, demoSaveCefrCalibration, demoSaveCefrReliability } from '../../api/demo';
+import { demoStart, demoAnswer, demoComplete, demoSpeechToken, demoTts, demoGetCefrCalibration, demoSaveCefrCalibration, demoSaveCefrReliability, demoEvent, demoEventBeacon } from '../../api/demo';
+import type { DemoEventType, DemoEventPayload } from '../../api/demo';
 import { createAssessor } from '../../speech/azureAssessor';
 import type { Assessor, AssessResult } from '../../speech/azureAssessor';
 // Pre-recorded examiner intro (static instructions). Bundled so it plays
@@ -172,6 +173,19 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
   const audioCtxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number>(0);
 
+  // ── Anonymous demo engagement telemetry (demo path only) ───────────────────
+  // Fire-and-forget. These refs let the fire-and-forget emitters and the unload
+  // beacon read the live session state without stale closures. NO PII.
+  const sessionIdRef = useRef('');
+  const startedRef = useRef(false);     // a demo session was started
+  const completedRef = useRef(false);   // the demo session reached `completed`
+  const abandonSentRef = useRef(false); // the `abandoned` beacon was already sent
+  const micTrackedRef = useRef(false);  // mic_granted emitted once per load
+  const track = useCallback((type: DemoEventType, payload?: DemoEventPayload) => {
+    if (!demoToken) return;             // authed (non-demo) path emits nothing
+    demoEvent(demoToken, type, { session_id: sessionIdRef.current || undefined, ...payload });
+  }, [demoToken]);
+
   // Route every backend call to the demo endpoints when a demoToken is present,
   // else the authenticated ones. One UI drives both the real exam and the
   // credential-free demo; the scoring engine behind both is identical.
@@ -248,13 +262,18 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
     recChunksRef.current = [];
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Mic permission granted — emit once per load (demo telemetry).
+      if (!micTrackedRef.current) { micTrackedRef.current = true; track('mic_granted'); }
       recStreamRef.current = stream;
       const mr = new MediaRecorder(stream);
       mr.ondataavailable = (e) => { if (e.data?.size) recChunksRef.current.push(e.data); };
       mr.start();
       mediaRecRef.current = mr;
-    } catch { mediaRecRef.current = null; }
-  }, []);
+    } catch {
+      track('mic_denied');   // getUserMedia rejected (denied / no device)
+      mediaRecRef.current = null;
+    }
+  }, [track]);
   const stopLocalRecorder = useCallback((): Promise<string | null> => new Promise((resolve) => {
     const mr = mediaRecRef.current;
     const cleanup = () => { recStreamRef.current?.getTracks().forEach((t) => t.stop()); recStreamRef.current = null; };
@@ -393,13 +412,52 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
           return;
         }
         setSessionId(res.session_id);
+        sessionIdRef.current = res.session_id;
+        startedRef.current = true;
+        track('started', { session_id: res.session_id });  // demo session began
         setPrompt(res.questions[0]?.text || 'Please speak on the topic.');
         setPhase('ready');
       })
-      .catch((e) => { if (!cancelled) { setError(e?.message || 'Could not start the exam.'); setPhase('error'); } });
+      .catch((e) => { if (!cancelled) { track('error', { meta: { where: 'start' } }); setError(e?.message || 'Could not start the exam.'); setPhase('error'); } });
     return () => { cancelled = true; };
-  }, [assignmentId, demoToken, api]);
+  }, [assignmentId, demoToken, api, track]);
   useEffect(() => () => { stopSpeech(); recStreamRef.current?.getTracks().forEach((t) => t.stop()); }, [stopSpeech]);
+
+  // ── Demo telemetry: opened (once), abandoned beacon, results_viewed ─────────
+  // `opened` fires as the demo speaking UI mounts (right after demoMeta resolved
+  // in DemoExam). meta carries ONLY {ua, lang, ref} — no PII — and only here.
+  useEffect(() => {
+    if (!demoToken) return;
+    demoEvent(demoToken, 'opened', {
+      meta: { ua: navigator.userAgent, lang: navigator.language, ref: document.referrer },
+    });
+  }, [demoToken]);
+
+  // `abandoned`: a demo session was started but never completed when the page is
+  // hidden/unloaded. sendBeacon survives unload where a fetch would be cancelled.
+  useEffect(() => {
+    if (!demoToken) return;
+    const maybeAbandon = () => {
+      if (startedRef.current && !completedRef.current && !abandonSentRef.current) {
+        abandonSentRef.current = true;
+        demoEventBeacon(demoToken, 'abandoned', { session_id: sessionIdRef.current || undefined });
+      }
+    };
+    const onVis = () => { if (document.visibilityState === 'hidden') maybeAbandon(); };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', maybeAbandon);
+    window.addEventListener('beforeunload', maybeAbandon);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', maybeAbandon);
+      window.removeEventListener('beforeunload', maybeAbandon);
+    };
+  }, [demoToken]);
+
+  // `results_viewed`: the done / examiner hand-off screen is shown.
+  useEffect(() => {
+    if (demoToken && phase === 'done') track('results_viewed');
+  }, [demoToken, phase, track]);
 
   // Read the welcome aloud once the session is ready. Spoken by the same voice
   // that asks the questions, so the examiner is established before turn 1.
@@ -416,6 +474,7 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
     stopSpeech();
     try { await api.speechToken(); setAzureMode(true); } catch { setAzureMode(false); }
     setPhase('taking');
+    track('question_shown', { turn_index: 0 });  // first prompt is now on screen
     speak(prompt);
   };
 
@@ -435,6 +494,15 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
                                     pron?.words?.map((w) => ({ w: w.word, g: w.gapBefore })));
       if (resp.cefr) setHistory((h) => [...h, resp.cefr!]);
       const turnNumber = resp.cefr?.turn_number ?? answers.length + 1;
+      // answer_submitted: this turn's 0-based index + measured speaking duration.
+      // durationSec is real in Azure mode (span of recognized word timings); it is
+      // null in the Web-Speech text fallback, in which case value_ms is omitted
+      // (we never fabricate it).
+      const durSec = pron?.metrics?.durationSec;
+      track('answer_submitted', {
+        turn_index: answers.length,
+        ...(durSec != null ? { value_ms: Math.round(durSec * 1000) } : {}),
+      });
       setAnswers((a) => [...a, {
         turnNumber, prompt: thisPrompt, pron, cefr: resp.cefr ?? null, feedback: resp.feedback || '', audioUrl,
       }]);
@@ -452,13 +520,16 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
       }
       if (!resp.probe) {
         try { await api.complete(sessionId); } catch { /* best-effort */ }
+        completedRef.current = true;
+        track('completed');  // the demo session finished (no further probe)
         try { const ov = await api.getCalibration(sessionId); setOverrides(Object.fromEntries(ov.map((o) => [`${o.turn_number}:${o.dimension}`, o.human_band]))); } catch { /* ignore */ }
         setPhase('done');
       } else {
+        track('question_shown', { turn_index: answers.length + 1 });  // next probe on screen
         setPrompt(resp.probe);
         speak(resp.probe);
       }
-    } catch (e: any) { setError(e?.message || 'Could not submit your answer.'); setPhase('error'); }
+    } catch (e: any) { track('error', { turn_index: answers.length, meta: { where: 'submit' } }); setError(e?.message || 'Could not submit your answer.'); setPhase('error'); }
     finally { setSubmitting(false); }
   };
 
