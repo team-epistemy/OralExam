@@ -40,6 +40,7 @@ function AdminNav() {
     { to: '/admin/simulations', label: 'Simulations' },
     { to: '/admin/testing', label: 'Testing' },
     { to: '/admin/cefr-review', label: 'CEFR Review' },
+    { to: '/admin/demo-metrics', label: 'Demo Metrics' },
     { to: '/admin/performance', label: 'Performance' },
     { to: '/admin/tone-lab', label: 'Tone Lab' },
     { to: '/admin/tasks', label: 'Tasks' },

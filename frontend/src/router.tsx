@@ -23,6 +23,7 @@ import AdminDirectory from './pages/admin/AdminDirectory';
 import AdminPerformance from './pages/admin/AdminPerformance';
 import AdminToneLab from './pages/admin/AdminToneLab';
 import CefrReview from './pages/admin/CefrReview';
+import DemoMetrics from './pages/admin/DemoMetrics';
 import DemoExam from './pages/student/DemoExam';
 
 function getUser() {
@@ -114,6 +115,10 @@ export const router = createBrowserRouter([
       {
         path: '/admin/cefr-review',
         element: <RequireRole role="platform_admin"><CefrReview /></RequireRole>,
+      },
+      {
+        path: '/admin/demo-metrics',
+        element: <RequireRole role="platform_admin"><DemoMetrics /></RequireRole>,
       },
       // Professor routes
       {
