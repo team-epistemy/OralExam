@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Mic, Square, PlayCircle, Send, Volume2, VolumeX, Loader2, RotateCcw } from 'lucide-react';
+import { Mic, Square, PlayCircle, Send, Volume2, VolumeX, Loader2, RotateCcw, MessageSquare } from 'lucide-react';
 import { API_BASE_URL } from '../../config';
 import { post } from '../../api/client';
 import { startExamSession, submitAnswer, completeSession, getCefrCalibration, saveCefrCalibration, saveCefrReliability } from '../../api/exam';
@@ -567,6 +567,12 @@ export default function CefrSpeakingExam({ demoToken }: { demoToken?: string } =
   if (phase === 'ready') return (
     <div className="max-w-2xl mx-auto p-6 space-y-5">
       <h1 className="text-2xl font-bold text-gray-900">CEFR Speaking Test</h1>
+
+      {/* Follow-up explainer — one longer question, then adaptive follow-ups. */}
+      <div className="flex items-start gap-2.5 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-sm text-blue-900">
+        <MessageSquare className="w-4 h-4 mt-0.5 flex-shrink-0 text-blue-600" />
+        <span>Each question is a short conversation — the examiner may ask a few follow-up questions before moving on.</span>
+      </div>
 
       {/* The examiner's welcome, displayed and spoken together. */}
       <div className="bg-white rounded-xl border-2 border-blue-200 p-6 space-y-3">

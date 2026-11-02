@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen } from 'lucide-react';
+import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen, MessageSquare } from 'lucide-react';
 import { downloadTranscriptPdf, examTranscript } from '../../transcript';
 import { typeNoun, typeNounLower } from '../../assignmentType';
 import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft, transcribeAudio } from '../../api/exam';
@@ -1070,6 +1070,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           </p>
         </div>
 
+        {/* Follow-up explainer — sets the expectation that each question is a
+            short back-and-forth, not a one-shot answer. */}
+        <div className="flex items-start gap-2.5 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 mb-5 text-sm text-blue-900">
+          <MessageSquare className="w-4 h-4 mt-0.5 flex-shrink-0 text-blue-600" />
+          <span>Each question is a short conversation — the examiner may ask a few follow-up questions before moving on.</span>
+        </div>
+
         {/* At a glance */}
         <div className="grid grid-cols-2 gap-3 mb-5">
           <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center gap-3">
@@ -1466,8 +1473,17 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
 
       {/* Question navigation grid */}
       <div className="bg-white border-x border-gray-200 px-5 py-3">
-        <div className="flex justify-between text-xs text-gray-400 mb-2">
-          <span>Question {current + 1} of {N}</span>
+        {/* Two distinct progress counters, kept visually separate so they aren't
+            confused: the assignment-level question position (left) vs. the
+            follow-up turn within THIS question's conversation (middle). */}
+        <div className="flex items-center justify-between gap-2 text-xs text-gray-400 mb-2">
+          <span className="font-medium text-gray-500">Question {current + 1} of {N}</span>
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium"
+            title="Follow-up turns within this question's conversation"
+          >
+            <MessageSquare className="w-3 h-3" /> Turn {Math.min((cur?.attempts || 0) + 1, MAX_TURNS)} of {MAX_TURNS}
+          </span>
           <span>{attemptedCount} answered &middot; {N - attemptedCount} remaining</span>
         </div>
         <div className="flex gap-1.5 flex-wrap">
@@ -1687,7 +1703,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 {questions[current]?.topic || `Question ${current + 1}`}
               </p>
               <p className="text-xs text-gray-400 mt-1">
-                {cur?.attempts || 0} / {MAX_TURNS} turns used
+                Turn {Math.min((cur?.attempts || 0) + 1, MAX_TURNS)} of {MAX_TURNS} in this conversation
               </p>
             </div>
           </div>
