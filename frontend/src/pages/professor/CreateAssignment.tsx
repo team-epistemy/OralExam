@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, CheckCircle, GraduationCap, Copy, Check, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network } from 'lucide-react';
+import { Loader2, CheckCircle, GraduationCap, Copy, Check, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network, Plus, ArrowUp, ArrowDown, Search } from 'lucide-react';
 import { get, post } from '../../api/client';
 import { buildExam, regenerateExam, assignExam, discardDraft, getAssignmentPreview, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
 import { Breadcrumbs } from '../../components/Breadcrumbs';
@@ -24,6 +24,25 @@ const DIFFICULTY_LABEL: Record<Difficulty, string> = {
   deep: 'Deep Reasoning',
 };
 
+// A labeled, numbered section card used to group the create-assignment form into
+// clear steps (S1). Purely presentational — no state of its own.
+function FormSection({ step, title, desc, children }: {
+  step: number; title: string; desc?: string; children: ReactNode;
+}) {
+  return (
+    <section className="bg-white rounded-xl border border-border p-6 space-y-4">
+      <div className="flex items-start gap-3">
+        <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-navy text-white text-xs font-bold flex-shrink-0 mt-0.5">{step}</span>
+        <div>
+          <h2 className="text-base font-heading text-navy leading-tight">{title}</h2>
+          {desc && <p className="text-xs text-muted mt-0.5">{desc}</p>}
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
+
 export default function CreateAssignment() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -44,8 +63,11 @@ export default function CreateAssignment() {
   // course (all topics). This is the ONLY scoping control — class sessions/weeks
   // are no longer part of assignment creation.
   const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
-  // Topics list is expanded by default; the professor can collapse it.
-  const [scopeOpen, setScopeOpen] = useState(true);
+  // Topic scope mode (S2): 'whole' course (default) vs 'specific' topics. The
+  // topic picker only appears in 'specific' mode; 'whole' keeps selectedTopics
+  // empty (empty ⇒ whole course — the existing semantics are preserved).
+  const [scopeMode, setScopeMode] = useState<'whole' | 'specific'>('whole');
+  const [topicSearch, setTopicSearch] = useState('');
   const [includeCase, setIncludeCase] = useState(false);
   const [building, setBuilding] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -62,6 +84,8 @@ export default function CreateAssignment() {
   const [regenerating, setRegenerating] = useState(false);
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState('');
+  // Index of the single question currently being re-authored (per-row regenerate).
+  const [regenIdx, setRegenIdx] = useState<number | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   const [draftAssignmentId, setDraftAssignmentId] = useState<string | null>(null);
   const [dryRunOpen, setDryRunOpen] = useState(false);
@@ -116,9 +140,13 @@ export default function CreateAssignment() {
   // Effective scope for THIS assignment: the selected topics. Empty ⇒ whole graph.
   const effectiveConcepts = selectedTopics;
   const hasScope = effectiveConcepts.length > 0;
+  // Topics filtered by the search box (S2). Case-insensitive label match.
+  const filteredConcepts = allConcepts.filter((c) =>
+    c.label.toLowerCase().includes(topicSearch.trim().toLowerCase()),
+  );
 
-  // Reset the topic selection when the course changes (its topics differ).
-  useEffect(() => { setSelectedTopics([]); }, [courseId]);
+  // Reset the topic selection + scope mode when the course changes (its topics differ).
+  useEffect(() => { setSelectedTopics([]); setScopeMode('whole'); setTopicSearch(''); }, [courseId]);
 
   const toggleConcept = (id: string) => {
     const next = new Set(effectiveConcepts);
@@ -308,6 +336,54 @@ export default function CreateAssignment() {
     setPreviewQuestions((qs) => qs.map((q, idx) => (idx === editIdx ? { ...q, q: text } : q)));
     setEditIdx(null);
   };
+  // Cancel the editor. A freshly-added, still-blank question is dropped so an
+  // empty row can't survive into the published set.
+  const cancelEdit = () => {
+    setPreviewQuestions((qs) =>
+      editIdx !== null && !qs[editIdx]?.q?.trim() ? qs.filter((_, idx) => idx !== editIdx) : qs,
+    );
+    setEditIdx(null);
+  };
+  // Reorder with up/down (no drag-and-drop dependency).
+  const moveQuestion = (i: number, dir: -1 | 1) => {
+    setPreviewQuestions((qs) => {
+      const j = i + dir;
+      if (j < 0 || j >= qs.length) return qs;
+      const next = qs.slice();
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+    setEditIdx(null);
+  };
+  // Add a manual question: append a blank row and open it for editing.
+  const addQuestion = () => {
+    setEditIdx(previewQuestions.length);
+    setEditDraft('');
+    setPreviewQuestions((qs) => [...qs, { topic: 'General', concept_id: '', q: '' }]);
+  };
+  // Regenerate a SINGLE question (distinct from "Regenerate whole assessment").
+  // Reuses regenerateExam scoped to this row's concept (q_count 1) and swaps in
+  // the fresh question — the rest of the set is untouched.
+  const regenerateOne = async (i: number) => {
+    setRegenIdx(i);
+    setError('');
+    try {
+      const target = previewQuestions[i];
+      const res = await regenerateExam(courseId, {
+        q_count: 1, exam_len: duration, difficulty,
+        concept_ids: target.concept_id ? [target.concept_id] : (hasScope ? effectiveConcepts : undefined),
+      });
+      const fresh = res.variants?.[0]?.questions?.[0];
+      if (res.status !== 'completed' || !fresh) {
+        throw new Error(res.message || 'Could not regenerate this question.');
+      }
+      setPreviewQuestions((qs) => qs.map((old, idx) => (idx === i ? { ...fresh } : old)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not regenerate this question.');
+    } finally {
+      setRegenIdx(null);
+    }
+  };
 
   const resetForm = () => {
     setCreated(false);
@@ -453,12 +529,12 @@ export default function CreateAssignment() {
           </div>
           <button
             onClick={handleRegenerate}
-            disabled={regenerating || building}
-            title="Author a fresh set of questions with AI"
-            className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 disabled:opacity-50"
+            disabled={regenerating || building || regenIdx !== null}
+            title="Re-author every question in this assessment with AI"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm text-ink hover:bg-parchment disabled:opacity-50"
           >
             {regenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            {regenerating ? 'Authoring fresh questions…' : 'Regenerate'}
+            {regenerating ? 'Authoring fresh questions…' : 'Regenerate whole assessment'}
           </button>
         </div>
 
@@ -512,11 +588,23 @@ export default function CreateAssignment() {
                   </div>
                 </div>
                 {editIdx !== i && (
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <button onClick={() => startEdit(i)} title="Edit question" className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors">
+                  <div className="flex items-center gap-0.5 flex-shrink-0">
+                    {/* Reorder — up/down buttons (no drag-and-drop dependency) */}
+                    <div className="flex flex-col">
+                      <button onClick={() => moveQuestion(i, -1)} disabled={i === 0} title="Move up" className="p-0.5 text-muted hover:text-navy disabled:opacity-25 disabled:cursor-not-allowed rounded transition-colors">
+                        <ArrowUp className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => moveQuestion(i, 1)} disabled={i === previewQuestions.length - 1} title="Move down" className="p-0.5 text-muted hover:text-navy disabled:opacity-25 disabled:cursor-not-allowed rounded transition-colors">
+                        <ArrowDown className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <button onClick={() => startEdit(i)} title="Edit question" className="p-1.5 text-muted hover:text-navy hover:bg-parchment rounded transition-colors">
                       <Pencil className="w-4 h-4" />
                     </button>
-                    <button onClick={() => removeQuestion(i)} title="Remove question" className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors">
+                    <button onClick={() => regenerateOne(i)} disabled={regenIdx !== null || regenerating} title="Regenerate this question" className="p-1.5 text-muted hover:text-gold hover:bg-parchment rounded transition-colors disabled:opacity-50">
+                      {regenIdx === i ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                    </button>
+                    <button onClick={() => removeQuestion(i)} title="Delete question" className="p-1.5 text-muted hover:text-red-600 hover:bg-red-50 rounded transition-colors">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -524,17 +612,25 @@ export default function CreateAssignment() {
               </div>
               {editIdx === i && (
                 <div className="flex items-center gap-2 mt-2 pl-9">
-                  <button onClick={saveEdit} className="px-3 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700">Save</button>
-                  <button onClick={() => setEditIdx(null)} className="px-3 py-1 border border-gray-300 text-gray-700 rounded text-xs font-medium hover:bg-gray-50">Cancel</button>
+                  <button onClick={saveEdit} disabled={!editDraft.trim()} className="px-3 py-1 bg-navy text-white rounded text-xs font-medium hover:bg-navy-light disabled:opacity-40 disabled:cursor-not-allowed">Save</button>
+                  <button onClick={cancelEdit} className="px-3 py-1 border border-border text-ink rounded text-xs font-medium hover:bg-parchment">Cancel</button>
                 </div>
               )}
             </div>
           ))}
           {previewQuestions.length === 0 && (
-            <div className="bg-white rounded-xl border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500">
-              All questions removed. Regenerate to build a fresh set, or go back to change the settings.
+            <div className="bg-white rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted">
+              All questions removed. Add one manually below, regenerate to build a fresh set, or go back to change the settings.
             </div>
           )}
+          {/* Add a manual question (S3) */}
+          <button
+            onClick={addQuestion}
+            disabled={editIdx !== null}
+            className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-dashed border-border py-3 text-sm font-medium text-muted hover:text-navy hover:border-navy/40 hover:bg-parchment transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Plus className="w-4 h-4" /> Add a question
+          </button>
         </div>
 
         {error && (
@@ -575,27 +671,32 @@ export default function CreateAssignment() {
   }
 
   // ── Config form ─────────────────────────────────────────────────────────────
+  // The form is grouped into clear, numbered sections (S1): Assignment Details →
+  // Choose Content → Settings → Preview. All state + build/publish logic below is
+  // unchanged — this is layout + progressive disclosure only.
+  const inputCls = 'w-full px-3 py-2 border border-border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-navy/25';
   return (
     <div className="max-w-3xl mx-auto space-y-4">
       <Breadcrumb />
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Create Assignment</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Pick how many questions you want — they're assembled from this course's concept graph and turned into an oral exam.
+        <h1 className="text-2xl font-heading text-navy">Create Assignment</h1>
+        <p className="text-sm text-muted mt-1">
+          Questions are assembled from this course's concept graph and turned into an oral exam. Work through the steps below, then preview before publishing.
         </p>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-6">
+      {/* ── Step 1 — Assignment Details ─────────────────────────────────────── */}
+      <FormSection step={1} title="Assignment Details">
         {/* Assignment Title — first field. The course is fixed (this page is
             reached from a course), so no course picker is shown; only when
             there's no course context do we fall back to a selector below. */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Assignment Title</label>
+          <label className="block text-sm font-medium text-ink mb-1">Assignment Title</label>
           <input
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className={inputCls}
             placeholder="e.g., Operations Midterm — Oral Exam"
           />
         </div>
@@ -603,11 +704,11 @@ export default function CreateAssignment() {
         {/* Course — only when arrived without a course context (fallback). */}
         {!preselectedCourse && (
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Course</label>
+            <label className="block text-sm font-medium text-ink mb-1">Course</label>
             <select
               value={courseId}
               onChange={(e) => setCourseId(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className={inputCls}
             >
               <option value="">Select a course...</option>
               {courses.map((c) => (
@@ -617,66 +718,9 @@ export default function CreateAssignment() {
           </div>
         )}
 
-        {/* Topics — the only scoping control. Pick which topics (concept-graph
-            labels from the uploaded documents) this assignment draws from;
-            selecting none uses the whole course. */}
-        {courseId && graphReady && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Topics <span className="text-gray-400 font-normal">— optional; leave empty for the whole course</span>
-            </label>
-            <button
-              type="button"
-              onClick={() => setScopeOpen((v) => !v)}
-              className="inline-flex items-center gap-1.5 text-sm text-gray-700 hover:text-gray-900 font-medium"
-            >
-              <Network className="w-4 h-4" />
-              {hasScope ? `${effectiveConcepts.length} topic${effectiveConcepts.length !== 1 ? 's' : ''} selected` : 'Whole course — all topics'}
-              <span className="text-xs text-blue-600">{scopeOpen ? 'Hide' : 'Choose topics'}</span>
-            </button>
-            {scopeOpen && (
-              <div className="mt-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
-                {allConcepts.length === 0 ? (
-                  <p className="text-xs text-gray-400">No topics yet — upload materials and let the concept graph build first.</p>
-                ) : (
-                  <>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs text-gray-500">
-                        {effectiveConcepts.length === 0
-                          ? `Whole course — all ${allConcepts.length} topics`
-                          : `${effectiveConcepts.length} of ${allConcepts.length} topics selected`}
-                      </span>
-                      <div className="flex gap-2">
-                        <button type="button" onClick={() => setSelectedTopics(allConcepts.map((c) => c.id))} className="text-xs text-blue-600 hover:underline">All</button>
-                        <button type="button" onClick={() => setSelectedTopics([])} className="text-xs text-blue-600 hover:underline">None</button>
-                      </div>
-                    </div>
-                    <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1 pr-1">
-                      {allConcepts.map((c) => (
-                        <label key={c.id} className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer py-0.5">
-                          <input
-                            type="checkbox"
-                            checked={effectiveConcepts.includes(c.id)}
-                            onChange={() => toggleConcept(c.id)}
-                            className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                          />
-                          <span className="truncate">{c.label}</span>
-                        </label>
-                      ))}
-                    </div>
-                    <p className="text-[11px] text-gray-400 mt-2">
-                      Selecting none draws questions from the whole course's topics.
-                    </p>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
         {/* Type — determines which section students see it under */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+          <label className="block text-sm font-medium text-ink mb-1">Type</label>
           <div className="grid grid-cols-3 gap-2">
             {([
               ['practice', 'Practice Test', 'Ungraded, retryable'],
@@ -688,13 +732,126 @@ export default function CreateAssignment() {
                 type="button"
                 onClick={() => setAssignmentType(val)}
                 className={`rounded-lg border px-3 py-2 text-left transition-colors ${
-                  assignmentType === val ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500' : 'border-gray-300 hover:bg-gray-50'
+                  assignmentType === val ? 'border-navy bg-parchment ring-1 ring-navy' : 'border-border hover:bg-parchment'
                 }`}
               >
-                <div className="text-sm font-semibold text-gray-900">{label}</div>
-                <div className="text-xs text-gray-500">{desc}</div>
+                <div className="text-sm font-semibold text-navy">{label}</div>
+                <div className="text-xs text-muted">{desc}</div>
               </button>
             ))}
+          </div>
+        </div>
+      </FormSection>
+
+      {/* ── Step 2 — Choose Content (topic scope, S2) ───────────────────────── */}
+      <FormSection step={2} title="Choose Content" desc="Draw questions from the whole course, or scope this assignment to specific topics.">
+        {!courseId ? (
+          <p className="text-sm text-muted">Select a course first to choose its topics.</p>
+        ) : !graphReady ? (
+          <p className="text-sm text-muted">Topics appear once this course's concept graph has finished building.</p>
+        ) : (
+          <div className="space-y-3">
+            {/* Explicit Whole course vs Specific topics choice (segmented control) */}
+            <div className="inline-flex rounded-lg border border-border p-0.5 bg-parchment">
+              {([['whole', 'Whole course'], ['specific', 'Specific topics']] as const).map(([val, label]) => (
+                <button
+                  key={val}
+                  type="button"
+                  onClick={() => { setScopeMode(val); if (val === 'whole') setSelectedTopics([]); }}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    scopeMode === val ? 'bg-white text-navy shadow-sm' : 'text-muted hover:text-navy'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {scopeMode === 'whole' ? (
+              <p className="text-xs text-muted inline-flex items-center gap-1.5">
+                <Network className="w-3.5 h-3.5" />
+                Questions will be drawn from all {allConcepts.length} topic{allConcepts.length !== 1 ? 's' : ''} in this course.
+              </p>
+            ) : (
+              <div className="border border-border rounded-lg p-3 bg-parchment/40">
+                {allConcepts.length === 0 ? (
+                  <p className="text-xs text-muted">No topics yet — upload materials and let the concept graph build first.</p>
+                ) : (
+                  <>
+                    {/* Search box filters the topic list by label (S2) */}
+                    <div className="relative mb-2">
+                      <Search className="w-4 h-4 text-muted absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={topicSearch}
+                        onChange={(e) => setTopicSearch(e.target.value)}
+                        placeholder="Search topics…"
+                        className="w-full pl-8 pr-3 py-1.5 border border-border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-navy/25"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-muted">
+                        {effectiveConcepts.length === 0
+                          ? 'No topics selected — defaults to the whole course'
+                          : `${effectiveConcepts.length} of ${allConcepts.length} topics selected`}
+                      </span>
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => setSelectedTopics(allConcepts.map((c) => c.id))} className="text-xs text-gold hover:underline">Select all</button>
+                        <button type="button" onClick={() => setSelectedTopics([])} className="text-xs text-gold hover:underline">Clear</button>
+                      </div>
+                    </div>
+                    <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1 pr-1">
+                      {filteredConcepts.map((c) => (
+                        <label key={c.id} className="flex items-center gap-2 text-xs text-ink cursor-pointer py-0.5">
+                          <input
+                            type="checkbox"
+                            checked={effectiveConcepts.includes(c.id)}
+                            onChange={() => toggleConcept(c.id)}
+                            className="h-3.5 w-3.5 rounded border-border text-navy focus:ring-navy/30"
+                          />
+                          <span className="truncate">{c.label}</span>
+                        </label>
+                      ))}
+                      {filteredConcepts.length === 0 && (
+                        <p className="text-xs text-muted col-span-full py-1">No topics match "{topicSearch}".</p>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted mt-2">
+                      Selecting none draws questions from the whole course's topics.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </FormSection>
+
+      {/* ── Step 3 — Settings ───────────────────────────────────────────────── */}
+      <FormSection step={3} title="Settings">
+        {/* Number of questions + Duration. Difficulty is hard-coded to
+            "balanced" (recall + reasoning) for now — no picker. */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-ink mb-1">Number of Questions</label>
+            <input
+              type="number"
+              value={qCount}
+              onChange={(e) => setQCount(Math.max(1, Math.min(50, +e.target.value || 1)))}
+              min={1} max={50}
+              className={inputCls}
+            />
+            <p className="text-xs text-muted mt-1">Assembled from the concept graph (max 50).</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-ink mb-1">Duration (minutes)</label>
+            <input
+              type="number"
+              value={duration}
+              onChange={(e) => setDuration(Math.max(5, Math.min(180, +e.target.value || 5)))}
+              min={5} max={180}
+              className={inputCls}
+            />
           </div>
         </div>
 
@@ -704,40 +861,17 @@ export default function CreateAssignment() {
             type="checkbox"
             checked={includeCase}
             onChange={(e) => setIncludeCase(e.target.checked)}
-            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            className="mt-0.5 h-4 w-4 rounded border-border text-navy focus:ring-navy/30"
           />
           <span>
-            <span className="block text-sm font-medium text-gray-700">Case-based assessment</span>
-            <span className="block text-xs text-gray-500">Let students open the course reference materials ("View Case") during the exam. Leave off for standard tests.</span>
+            <span className="block text-sm font-medium text-ink">Case-based assessment</span>
+            <span className="block text-xs text-muted">Let students open the course reference materials ("View Case") during the exam. Leave off for standard tests.</span>
           </span>
         </label>
+      </FormSection>
 
-        {/* Number of questions + Duration. Difficulty is hard-coded to
-            "balanced" (recall + reasoning) for now — no picker. */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Number of Questions</label>
-            <input
-              type="number"
-              value={qCount}
-              onChange={(e) => setQCount(Math.max(1, Math.min(50, +e.target.value || 1)))}
-              min={1} max={50}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <p className="text-xs text-gray-400 mt-1">Assembled from the concept graph (max 50).</p>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Duration (minutes)</label>
-            <input
-              type="number"
-              value={duration}
-              onChange={(e) => setDuration(Math.max(5, Math.min(180, +e.target.value || 5)))}
-              min={5} max={180}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-        </div>
-
+      {/* ── Step 4 — Preview ────────────────────────────────────────────────── */}
+      <FormSection step={4} title="Preview" desc="Build the questions and review them before anything is published to students.">
         {/* No material → can't generate. Distinct, explicit message. */}
         {courseId && noMaterials && (
           <div className="flex items-start gap-3 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
@@ -766,7 +900,7 @@ export default function CreateAssignment() {
         <button
           onClick={handleBuild}
           disabled={!canSubmit || building}
-          className="w-full flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="w-full flex items-center justify-center gap-2 py-2.5 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           {building && <Loader2 className="w-4 h-4 animate-spin" />}
           {building ? 'Generating preview…'
@@ -774,8 +908,8 @@ export default function CreateAssignment() {
             : courseId && !graphReady ? 'Waiting for concept graph…'
             : 'Generate Preview'}
         </button>
-        <p className="text-xs text-gray-400 text-center -mt-2">You'll review and can edit the questions before anything is published to students.</p>
-      </div>
+        <p className="text-xs text-muted text-center">You'll review and can edit the questions before anything is published to students.</p>
+      </FormSection>
     </div>
   );
 }

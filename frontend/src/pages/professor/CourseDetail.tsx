@@ -367,6 +367,13 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
           <FileText className="w-8 h-8 text-gray-300 mx-auto mb-3" />
           <p className="text-sm text-gray-500">No materials uploaded yet</p>
+          <p className="text-xs text-gray-400 mt-1 mb-4">Upload course materials to build the concept graph that questions come from.</p>
+          <Link
+            to={`/professor/upload?course=${encodeURIComponent(courseName)}&courseId=${courseId}`}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+          >
+            <Upload className="w-4 h-4" /> Upload materials
+          </Link>
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200">
@@ -759,6 +766,12 @@ function AssignmentsTab({ assignments, courseId, courseName, materials, syllabus
               )}
               <Link
                 to={`/professor/assignments/${a.assignment_id || a.id}/preview`}
+                // Pass the course context so the preview's "Exit preview" returns
+                // here and "Edit assignment" opens the editor with the course set.
+                state={{
+                  backTo: `/professor/courses/${courseId}?tab=assignments`,
+                  editTo: `/professor/assignments/new?course=${courseId}&draft=${a.assignment_id || a.id}`,
+                }}
                 className="inline-flex items-center gap-1 text-xs px-3 py-1 border border-purple-200 text-purple-600 rounded-lg hover:bg-purple-50 transition-colors"
                 title="See exactly what the student sees"
               >
