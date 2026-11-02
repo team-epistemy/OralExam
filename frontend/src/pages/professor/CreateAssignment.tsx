@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
-import { useSearchParams, useNavigate, Link } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Loader2, CheckCircle, GraduationCap, Copy, Check, ChevronLeft, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network } from 'lucide-react';
+import { Loader2, CheckCircle, GraduationCap, Copy, Check, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network } from 'lucide-react';
 import { get, post } from '../../api/client';
-import { buildExam, regenerateExam, assignExam, discardDraft, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
+import { buildExam, regenerateExam, assignExam, discardDraft, getAssignmentPreview, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
+import { Breadcrumbs } from '../../components/Breadcrumbs';
+import { useToast } from '../../components/Toast';
 import { listMaterials } from '../../api/materials';
 import { getSyllabus } from '../../api/courses';
 import { DEFAULT_ORG } from '../../config';
@@ -25,7 +27,11 @@ const DIFFICULTY_LABEL: Record<Difficulty, string> = {
 export default function CreateAssignment() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const toast = useToast();
   const preselectedCourse = searchParams.get('course') || '';
+  // When present, we're continuing an existing Draft assignment (U6): its stored
+  // questions are loaded into the preview, and publishing replaces the draft.
+  const draftParam = searchParams.get('draft') || '';
 
   const [courseId, setCourseId] = useState(preselectedCourse);
   const [title, setTitle] = useState('');
@@ -60,11 +66,36 @@ export default function CreateAssignment() {
   const [draftAssignmentId, setDraftAssignmentId] = useState<string | null>(null);
   const [dryRunOpen, setDryRunOpen] = useState(false);
   const [error, setError] = useState('');
+  // The existing Draft being continued (U6). Null for a fresh assignment. Its
+  // stored questions are loaded into the preview; on publish it's discarded and
+  // replaced by the newly-curated assignment.
+  const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
 
   const { data: courses = [] } = useQuery({
     queryKey: ['professor-courses'],
     queryFn: () => get<Course[]>('/api/professor/courses'),
   });
+
+  // U6 — continuing a Draft: load its stored questions + settings into the
+  // preview once, so the professor resumes exactly where they left off.
+  const { data: draftData } = useQuery({
+    queryKey: ['assignment-preview', draftParam],
+    queryFn: () => getAssignmentPreview(draftParam),
+    enabled: !!draftParam && !editingDraftId && !created,
+    retry: false,
+  });
+  useEffect(() => {
+    if (!draftData || editingDraftId) return;
+    setTitle(draftData.title || '');
+    if (draftData.duration_minutes) setDuration(draftData.duration_minutes);
+    setAssignmentType(draftData.assignment_type || 'assignment');
+    setIncludeCase(!!draftData.include_case);
+    setPreviewQuestions(
+      (draftData.questions || []).map((q) => ({ topic: q.topic || 'General', concept_id: '', q: q.text })),
+    );
+    setEditingDraftId(draftParam);
+    setInPreview(true);
+  }, [draftData, editingDraftId, draftParam]);
 
   // Questions are assembled from the concept graph, which builds automatically
   // (and asynchronously) after materials are uploaded. Poll until it's ready so
@@ -179,10 +210,14 @@ export default function CreateAssignment() {
       if (res.status !== 'completed' || !res.assignment_id) {
         throw new Error(res.message || 'Failed to create assignment.');
       }
+      // Continuing a draft: the curated set is now published as a fresh
+      // assignment, so discard the original draft (best-effort).
+      if (editingDraftId) { await discardDraft(editingDraftId).catch(() => {}); setEditingDraftId(null); }
       setBuiltQuestions(previewQuestions);
       setCreatedData({ assignment_id: res.assignment_id, question_count: res.question_count ?? previewQuestions.length });
       setCreated(true);
       setInPreview(false);
+      toast.success('Assignment published');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to publish assignment');
     } finally {
@@ -293,10 +328,13 @@ export default function CreateAssignment() {
   };
 
   const Breadcrumb = () => (
-    <Link to={backTo} className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 transition-colors">
-      <ChevronLeft className="w-4 h-4" />
-      {courseName ? `${courseName} · Assignments` : 'Back to dashboard'}
-    </Link>
+    <Breadcrumbs
+      items={[
+        { label: 'Courses', to: '/professor/dashboard' },
+        ...(courseName ? [{ label: courseName, to: backTo }] : []),
+        { label: editingDraftId ? (title || 'Edit draft') : (title || 'New assignment') },
+      ]}
+    />
   );
 
   // ── Success screen ──────────────────────────────────────────────────────────
