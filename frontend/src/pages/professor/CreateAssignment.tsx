@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, CheckCircle, GraduationCap, Copy, Check, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network, Plus, ArrowUp, ArrowDown, Search } from 'lucide-react';
 import { get, post } from '../../api/client';
-import { buildExam, regenerateExam, assignExam, discardDraft, getAssignmentPreview, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
+import { buildExam, regenerateExam, assignExam, updateAssignment, publishAssignment, discardDraft, getAssignmentPreview, type ExamVariantQuestion, type AssignmentType } from '../../api/exam';
 import { Breadcrumbs } from '../../components/Breadcrumbs';
 import { useToast } from '../../components/Toast';
 import { listMaterials } from '../../api/materials';
@@ -224,7 +224,7 @@ export default function CreateAssignment() {
     setPublishing(true);
     setError('');
     try {
-      const res = await assignExam(courseId, {
+      const body = {
         title: title.trim(),
         questions: previewQuestions,
         difficulty,
@@ -234,15 +234,30 @@ export default function CreateAssignment() {
         // Snapshot the selected topics so the exam stays attributed to the scope
         // chosen now. Empty ⇒ whole course.
         scope_concepts: hasScope ? effectiveConcepts : undefined,
-      });
-      if (res.status !== 'completed' || !res.assignment_id) {
-        throw new Error(res.message || 'Failed to create assignment.');
+      };
+      let resultId: string;
+      let resultCount: number;
+      if (editingDraftId) {
+        // Continuing an existing assignment: edit it IN PLACE so the id (and any
+        // links to it) survive, then flip to active. No fresh id, no orphan.
+        const upd = await updateAssignment(editingDraftId, body);
+        if (upd.status !== 'completed') {
+          throw new Error(upd.message || 'Failed to update assignment.');
+        }
+        await publishAssignment(editingDraftId);
+        resultId = editingDraftId;
+        resultCount = upd.question_count ?? previewQuestions.length;
+        setEditingDraftId(null);
+      } else {
+        const res = await assignExam(courseId, body);
+        if (res.status !== 'completed' || !res.assignment_id) {
+          throw new Error(res.message || 'Failed to create assignment.');
+        }
+        resultId = res.assignment_id;
+        resultCount = res.question_count ?? previewQuestions.length;
       }
-      // Continuing a draft: the curated set is now published as a fresh
-      // assignment, so discard the original draft (best-effort).
-      if (editingDraftId) { await discardDraft(editingDraftId).catch(() => {}); setEditingDraftId(null); }
       setBuiltQuestions(previewQuestions);
-      setCreatedData({ assignment_id: res.assignment_id, question_count: res.question_count ?? previewQuestions.length });
+      setCreatedData({ assignment_id: resultId, question_count: resultCount });
       setCreated(true);
       setInPreview(false);
       toast.success('Assignment published');
