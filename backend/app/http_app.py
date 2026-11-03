@@ -541,6 +541,11 @@ _EXPECTED_PATH_TIMEOUT_S = 40
 # without one. This one IS inside a request, so it stays far under the 60s
 # CloudFront origin timeout.
 _EXPECTED_PATH_WAIT_S = 6.0
+# A professor's dry-run (is_preview) answers seconds after the draft was built, so
+# the queued paths usually haven't landed inside the student budget — which left
+# preview EDS on the no-path rubric. Previews aren't latency-critical and exist to
+# verify scoring, so they wait longer (still well under the 60s origin timeout).
+_PREVIEW_EXPECTED_PATH_WAIT_S = 25.0
 # The per-turn evaluation call, which every answer pays. A healthy one is ~2-4s
 # (max_tokens is only 500), so 20s is well clear of normal variance while keeping a
 # stalled call from riding to CloudFront's 60s cut-off and 504ing mid-exam.
@@ -5261,7 +5266,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 with repo.conn.cursor() as cur:
                     cur.execute(
                         """SELECT session_id, assignment_id, student_id, course_id,
-                                  status, current_turn_index, org_id
+                                  status, current_turn_index, org_id, is_preview
                            FROM exam_session WHERE session_id = %s::uuid""",
                         (session_id,),
                     )
@@ -5277,6 +5282,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 assignment_id = str(srow[1])
                 course_id = str(srow[3])
                 org_id = str(srow[6])
+                is_preview = bool(srow[7])
                 question_index = req.question_index
 
                 with repo.conn.cursor() as cur:
@@ -5335,13 +5341,20 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     # blind: without the path no eds_components is written, so the
                     # next probe can't see what this answer covered and the question's
                     # EDS union drops the turn. Past the budget, degrade and move on.
-                    with _timed("rubric_wait", qid=question_id[:8]):
+                    #
+                    # A professor's dry-run (is_preview) answers seconds after the draft
+                    # is created, so the just-queued paths often haven't landed inside
+                    # the student budget — which left preview EDS stuck on the no-path
+                    # rubric. Previews aren't latency-critical and exist precisely to
+                    # verify scoring, so wait longer for them to get real EDS from turn 1.
+                    path_budget = _PREVIEW_EXPECTED_PATH_WAIT_S if is_preview else _EXPECTED_PATH_WAIT_S
+                    with _timed("rubric_wait", qid=question_id[:8], preview=is_preview):
                         expected_path = _await_expected_path(
-                            repo, question_id, _EXPECTED_PATH_WAIT_S)
+                            repo, question_id, path_budget)
                     if not expected_path.get("nodes"):
                         logger.warning("No expected_path for question %s after %.0fs — "
                                        "grading this turn on the no-path rubric",
-                                       question_id[:8], _EXPECTED_PATH_WAIT_S)
+                                       question_id[:8], path_budget)
                         expected_path = {}
 
                 # ── Multi-turn: insert new sub-turn row ──────────────────
