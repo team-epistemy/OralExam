@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2 } from 'lucide-react';
+import { Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2 } from 'lucide-react';
 import { get, post } from '../../api/client';
+import { Breadcrumbs } from '../../components/Breadcrumbs';
+import { useToast } from '../../components/Toast';
 
 interface SessionSummary {
   session_id: string;
@@ -124,6 +126,7 @@ function statusBadge(status: string) {
 export default function GradeView() {
   const { assignmentId } = useParams<{ assignmentId: string }>();
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const [showReleasePreview, setShowReleasePreview] = useState(false);
 
@@ -131,6 +134,13 @@ export default function GradeView() {
     queryKey: ['assignment', assignmentId],
     queryFn: () => get<AssignmentDetail>(`/api/assignments/${assignmentId}`),
     enabled: !!assignmentId,
+  });
+
+  // Course name for the breadcrumb trail (assignment detail carries only the id).
+  const { data: course } = useQuery({
+    queryKey: ['course', assignment?.course_id],
+    queryFn: () => get<{ name: string }>(`/api/courses/${assignment!.course_id}`),
+    enabled: !!assignment?.course_id,
   });
 
   const { data: sessions = [], isLoading: loadingSessions } = useQuery({
@@ -141,10 +151,12 @@ export default function GradeView() {
 
   const releaseMutation = useMutation({
     mutationFn: () => post<GradeReleaseResponse>(`/api/assignments/${assignmentId}/grades/release`, {}),
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['assignment-sessions', assignmentId] });
       setShowReleasePreview(false);
+      toast.success(`Grades released for ${data.grades_released} session${data.grades_released === 1 ? '' : 's'}`);
     },
+    onError: () => toast.error('Could not release grades. Please try again.'),
   });
 
   const completedSessions = sessions.filter((s) => s.status === 'completed');
@@ -167,13 +179,17 @@ export default function GradeView() {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <Link
-            to={assignment ? `/professor/courses/${assignment.course_id}` : '/professor/dashboard'}
-            className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 mb-2 transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Back to Course
-          </Link>
+          <Breadcrumbs
+            className="mb-2"
+            items={[
+              { label: 'Courses', to: '/professor/dashboard' },
+              ...(assignment?.course_id
+                ? [{ label: course?.name || 'Course', to: `/professor/courses/${assignment.course_id}` }]
+                : []),
+              { label: assignment?.title || 'Assignment' },
+              { label: 'Results' },
+            ]}
+          />
           <h1 className="text-xl font-bold text-gray-900">{assignment?.title || 'Assignment Grades'}</h1>
           <p className="text-sm text-gray-500 mt-1">Review responses, adjust grades &amp; comments, then release.</p>
         </div>
@@ -394,6 +410,7 @@ function GradeEditor({
   assignmentId: string;
   queryClient: ReturnType<typeof useQueryClient>;
 }) {
+  const toast = useToast();
   const [score, setScore] = useState('');
   const [comment, setComment] = useState('');
   const [error, setError] = useState('');
@@ -416,7 +433,9 @@ function GradeEditor({
       queryClient.invalidateQueries({ queryKey: ['session-grade', sessionId] });
       queryClient.invalidateQueries({ queryKey: ['assignment-sessions', assignmentId] });
       setTimeout(() => setSaved(false), 2500);
+      toast.success('Changes saved');
     },
+    onError: () => toast.error('Could not save the grade. Please try again.'),
   });
 
   const handleSave = () => {

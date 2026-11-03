@@ -541,6 +541,11 @@ _EXPECTED_PATH_TIMEOUT_S = 40
 # without one. This one IS inside a request, so it stays far under the 60s
 # CloudFront origin timeout.
 _EXPECTED_PATH_WAIT_S = 6.0
+# A professor's dry-run (is_preview) answers seconds after the draft was built, so
+# the queued paths usually haven't landed inside the student budget — which left
+# preview EDS on the no-path rubric. Previews aren't latency-critical and exist to
+# verify scoring, so they wait longer (still well under the 60s origin timeout).
+_PREVIEW_EXPECTED_PATH_WAIT_S = 25.0
 # The per-turn evaluation call, which every answer pays. A healthy one is ~2-4s
 # (max_tokens is only 500), so 20s is well clear of normal variance while keeping a
 # stalled call from riding to CloudFront's 60s cut-off and 504ing mid-exam.
@@ -3444,6 +3449,24 @@ class AssignExamRequest(BaseModel):
     draft: bool = False
 
 
+class UpdateAssignmentRequest(BaseModel):
+    """Edit an existing assignment in place, preserving its assignment_id.
+
+    Same payload as AssignExamRequest minus `draft` — the existing status is
+    preserved (a draft stays a draft, an active assignment stays active). The
+    continued-draft and edit-assignment flows use this instead of
+    assign+discard so the id (and any downstream references) survives the edit.
+    """
+    title: str = Field(min_length=1, max_length=300)
+    questions: List[ExamAssignQuestion]
+    difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
+    duration_minutes: Optional[int] = None
+    assignment_type: str = Field(default="assignment", pattern=r"^(practice|assignment|exam)$")
+    include_case: bool = False
+    session_id: Optional[str] = None
+    scope_concepts: Optional[List[str]] = None
+
+
 def _build_question_dicts(settings, *, concepts, chunks, difficulty, domain, count):
     """Author `count` oral-exam questions for the given concepts + chunks via
     Bedrock and parse them into question dicts — NO DB writes.
@@ -3895,6 +3918,216 @@ def _register_questions(app: FastAPI, deps) -> None:
                 # the background. This is the whole point: by the time a student opens
                 # the assignment the paths are already there, so no answer pays for
                 # one mid-exam.
+                if has_ep:
+                    _fill_expected_paths_async(
+                        d["settings"], caller.org_id,
+                        [(qid, q.q, [q.concept_id or q.topic or "general"])
+                         for qid, q in zip(question_ids, req.questions)])
+                return {"status": "completed", "assignment_id": assignment_id,
+                        "question_count": len(question_ids)}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.ASSIGNMENT_UPDATE)
+    def update_assignment(
+        assignment_id: str,
+        req: UpdateAssignmentRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Edit an assignment's questions + settings IN PLACE, preserving its id.
+
+        Used by the continued-draft and edit-assignment flows so the id (and any
+        links to it) survive the edit, rather than minting a fresh assignment and
+        discarding the original. Refuses if a real (non-preview) student has
+        already started the assignment — mutating its questions would invalidate
+        their results; the professor should duplicate it instead. Preview-only
+        sessions are purged (same teardown as publish) before the swap."""
+        import json as _json, uuid as _uuid
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                if not req.questions:
+                    return {"status": "error", "message": "no questions to assign"}
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT course_id, question_set_id, status
+                           FROM assignment
+                           WHERE assignment_id = %s::uuid AND org_id = %s::uuid
+                             AND created_by = %s""",
+                        (assignment_id, caller.org_id, caller.user_id),
+                    )
+                    arow = cur.fetchone()
+                    if not arow:
+                        raise AuthorizationError("assignment not found")
+                    course_id = str(arow[0])
+                    old_qs_id = str(arow[1])
+
+                    # Guard: never mutate questions out from under a student who
+                    # has already started a real (non-preview) attempt.
+                    cur.execute(
+                        """SELECT count(*) FROM exam_session
+                           WHERE assignment_id = %s::uuid AND NOT is_preview""",
+                        (assignment_id,),
+                    )
+                    real_attempts = cur.fetchone()[0]
+                    if real_attempts:
+                        return {
+                            "status": "error",
+                            "code": "has_attempts",
+                            "message": (
+                                f"{real_attempts} student"
+                                f"{'s have' if real_attempts != 1 else ' has'} already started "
+                                "this assignment — editing its questions would invalidate their "
+                                "results. Duplicate it as a new assignment instead."
+                            ),
+                        }
+
+                diff_json = _json.dumps({
+                    "level": req.difficulty,
+                    "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(req.difficulty, 0.55),
+                })
+                paths: dict = {}
+                question_ids = []
+                with repo.conn.cursor() as cur:
+                    # Tear down preview-session children in dependency order (no
+                    # ON DELETE CASCADE on this chain) so the old questions/set can
+                    # be removed without dangling refs. Mirrors publish_assignment.
+                    cur.execute(
+                        """DELETE FROM evaluation
+                           WHERE turn_id IN (
+                               SELECT turn_id FROM session_turn
+                               WHERE session_id IN (
+                                   SELECT session_id FROM exam_session
+                                   WHERE assignment_id = %s::uuid AND is_preview))""",
+                        (assignment_id,),
+                    )
+                    cur.execute(
+                        """DELETE FROM question_eds_aggregate
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview)""",
+                        (assignment_id,),
+                    )
+                    cur.execute(
+                        """DELETE FROM grade
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview)""",
+                        (assignment_id,),
+                    )
+                    cur.execute(
+                        """DELETE FROM session_turn
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview)""",
+                        (assignment_id,),
+                    )
+                    cur.execute(
+                        "DELETE FROM exam_session WHERE assignment_id = %s::uuid AND is_preview",
+                        (assignment_id,),
+                    )
+
+                    cur.execute(
+                        """SELECT 1 FROM information_schema.columns
+                           WHERE table_name = 'question' AND column_name = 'expected_path'""")
+                    has_ep = cur.fetchone() is not None
+                    for i, q in enumerate(req.questions):
+                        qid = str(_uuid.uuid4())
+                        question_ids.append(qid)
+                        concept_ids = _json.dumps([q.concept_id or q.topic or "general"])
+                        if has_ep:
+                            cur.execute(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks,
+                                    expected_path)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           'oral', %s::jsonb, 'approved', %s, '[]'::jsonb, %s::jsonb)""",
+                                (qid, course_id, caller.org_id, concept_ids, q.q, diff_json,
+                                 caller.user_id, _json.dumps(paths.get(i, {}))),
+                            )
+                        else:
+                            cur.execute(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           'oral', %s::jsonb, 'approved', %s, '[]'::jsonb)""",
+                                (qid, course_id, caller.org_id, concept_ids, q.q, diff_json,
+                                 caller.user_id),
+                            )
+                    new_qs_id = str(_uuid.uuid4())
+                    cur.execute(
+                        """INSERT INTO question_set (question_set_id, course_id, org_id, title, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s)""",
+                        (new_qs_id, course_id, caller.org_id, req.title, caller.user_id),
+                    )
+                    for idx, qid in enumerate(question_ids):
+                        cur.execute(
+                            """INSERT INTO question_set_membership
+                               (question_set_id, question_id, org_id, position)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s)""",
+                            (new_qs_id, qid, caller.org_id, idx),
+                        )
+                    cfg = _json.dumps({
+                        "adaptive": True, "max_questions": len(question_ids),
+                        "time_limit_minutes": req.duration_minutes,
+                        "difficulty": req.difficulty, "shuffle_questions": False,
+                        "include_case": req.include_case,
+                        "scope_session_id": req.session_id,
+                        "scope_concepts": req.scope_concepts or [],
+                    })
+                    # Repoint the SAME assignment at the new question set; status is
+                    # left untouched so a draft stays a draft and an active stays active.
+                    cur.execute(
+                        """UPDATE assignment
+                           SET title = %s, question_set_id = %s::uuid, config = %s::jsonb
+                           WHERE assignment_id = %s::uuid""",
+                        (req.title, new_qs_id, cfg, assignment_id),
+                    )
+                    cur.execute("""SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='assignment' AND column_name='assignment_type'""")
+                    if cur.fetchone() is not None:
+                        cur.execute("UPDATE assignment SET assignment_type = %s WHERE assignment_id = %s::uuid",
+                                    (req.assignment_type, assignment_id))
+
+                    # Best-effort teardown of the now-orphaned old question set. A
+                    # failure here must not fail the edit (the assignment already
+                    # points at the new set), so run it inside a SAVEPOINT and roll
+                    # back only this cleanup on error — the swap still commits.
+                    cur.execute("SAVEPOINT old_qs_cleanup")
+                    try:
+                        cur.execute(
+                            "SELECT question_id FROM question_set_membership WHERE question_set_id = %s::uuid",
+                            (old_qs_id,))
+                        old_qids = [str(r[0]) for r in cur.fetchall()]
+                        cur.execute("DELETE FROM question_set_membership WHERE question_set_id = %s::uuid",
+                                    (old_qs_id,))
+                        for oqid in old_qids:
+                            cur.execute(
+                                """DELETE FROM question q WHERE q.question_id = %s::uuid
+                                   AND NOT EXISTS (SELECT 1 FROM question_set_membership m
+                                                   WHERE m.question_id = q.question_id)""",
+                                (oqid,))
+                        cur.execute("DELETE FROM question_set WHERE question_set_id = %s::uuid",
+                                    (old_qs_id,))
+                        cur.execute("RELEASE SAVEPOINT old_qs_cleanup")
+                    except Exception as exc:
+                        cur.execute("ROLLBACK TO SAVEPOINT old_qs_cleanup")
+                        logger.warning("update_assignment: old question-set cleanup failed for %s: %s",
+                                       assignment_id[:8], exc)
+                repo.conn.commit()
                 if has_ep:
                     _fill_expected_paths_async(
                         d["settings"], caller.org_id,
@@ -5033,7 +5266,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 with repo.conn.cursor() as cur:
                     cur.execute(
                         """SELECT session_id, assignment_id, student_id, course_id,
-                                  status, current_turn_index, org_id
+                                  status, current_turn_index, org_id, is_preview
                            FROM exam_session WHERE session_id = %s::uuid""",
                         (session_id,),
                     )
@@ -5049,6 +5282,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 assignment_id = str(srow[1])
                 course_id = str(srow[3])
                 org_id = str(srow[6])
+                is_preview = bool(srow[7])
                 question_index = req.question_index
 
                 with repo.conn.cursor() as cur:
@@ -5107,13 +5341,20 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     # blind: without the path no eds_components is written, so the
                     # next probe can't see what this answer covered and the question's
                     # EDS union drops the turn. Past the budget, degrade and move on.
-                    with _timed("rubric_wait", qid=question_id[:8]):
+                    #
+                    # A professor's dry-run (is_preview) answers seconds after the draft
+                    # is created, so the just-queued paths often haven't landed inside
+                    # the student budget — which left preview EDS stuck on the no-path
+                    # rubric. Previews aren't latency-critical and exist precisely to
+                    # verify scoring, so wait longer for them to get real EDS from turn 1.
+                    path_budget = _PREVIEW_EXPECTED_PATH_WAIT_S if is_preview else _EXPECTED_PATH_WAIT_S
+                    with _timed("rubric_wait", qid=question_id[:8], preview=is_preview):
                         expected_path = _await_expected_path(
-                            repo, question_id, _EXPECTED_PATH_WAIT_S)
+                            repo, question_id, path_budget)
                     if not expected_path.get("nodes"):
                         logger.warning("No expected_path for question %s after %.0fs — "
                                        "grading this turn on the no-path rubric",
-                                       question_id[:8], _EXPECTED_PATH_WAIT_S)
+                                       question_id[:8], path_budget)
                         expected_path = {}
 
                 # ── Multi-turn: insert new sub-turn row ──────────────────

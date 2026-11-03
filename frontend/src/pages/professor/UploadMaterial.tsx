@@ -1,13 +1,16 @@
 import { useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { CheckCircle, AlertCircle, Home } from 'lucide-react';
+import { CheckCircle, AlertCircle, Home, ClipboardList } from 'lucide-react';
 import { uploadMaterial } from '../../api/materials';
 import { setSyllabus } from '../../api/courses';
 import FileUpload from '../../components/FileUpload';
 import { DEFAULT_ORG } from '../../config';
+import { Breadcrumbs } from '../../components/Breadcrumbs';
+import { useToast } from '../../components/Toast';
 
 export default function UploadMaterial() {
   const [params] = useSearchParams();
+  const toast = useToast();
   const isSyllabus = params.get('syllabus') === '1';
   // `courseId` in the URL is the course context (from the Materials tab link).
   const courseIdParam = params.get('courseId') || '';
@@ -83,11 +86,26 @@ export default function UploadMaterial() {
       setUploadResult((prev) => prev ?? firstResult);
       setUploadedCount(uploadedIdsRef.current.length);
       setSuccess(true);
+      toast.success(
+        isSyllabus
+          ? 'Syllabus uploaded'
+          : materialIds.length > 1 ? `${materialIds.length} materials uploaded` : 'Material uploaded',
+      );
+    }
+    if (failures.length) {
+      toast.error(failures.length === batch.length ? 'Upload failed. Please try again.' : `${failures.length} file(s) failed to upload.`);
     }
   };
 
   return (
     <div className="max-w-2xl mx-auto space-y-6">
+      <Breadcrumbs
+        items={[
+          { label: 'Courses', to: '/professor/dashboard' },
+          ...(courseIdParam ? [{ label: courseName || 'Course', to: `/professor/courses/${courseIdParam}` }] : []),
+          { label: isSyllabus ? 'Upload syllabus' : 'Upload' },
+        ]}
+      />
       <div>
         <h1 className="text-2xl font-bold text-gray-900">{isSyllabus ? 'Upload Syllabus' : 'Upload Course Materials'}</h1>
         <p className="text-sm text-gray-500 mt-1">
@@ -197,10 +215,20 @@ export default function UploadMaterial() {
               {/* Back to the course dashboard. */}
               <Link
                 to={courseHome}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
               >
                 <Home className="w-4 h-4" /> Course Home
               </Link>
+              {/* Next step in the flow (S4): go straight to creating an assignment
+                  from the material just uploaded. Only when we know the course. */}
+              {!isSyllabus && gid && (
+                <Link
+                  to={`/professor/assignments/new?course=${gid}`}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                >
+                  <ClipboardList className="w-4 h-4" /> Create assignment
+                </Link>
+              )}
             </div>
           );
         })()}
