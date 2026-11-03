@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2, CheckCircle, GraduationCap, Copy, Check, Pencil, Trash2, RefreshCw, Eye, AlertTriangle, Network, Plus, ArrowUp, ArrowDown, Search } from 'lucide-react';
@@ -8,8 +8,9 @@ import { Breadcrumbs } from '../../components/Breadcrumbs';
 import { useToast } from '../../components/Toast';
 import { listMaterials } from '../../api/materials';
 import { getSyllabus } from '../../api/courses';
-import { DEFAULT_ORG } from '../../config';
+import { DEFAULT_ORG, appPath } from '../../config';
 import TakeExam from '../student/TakeExam';
+import { trackPreviewDraft, untrackPreviewDraft, sweepPreviewDrafts, discardOnUnload, HEARTBEAT_MS } from '../../previewDrafts';
 
 interface Course {
   course_id: string;
@@ -89,6 +90,9 @@ export default function CreateAssignment() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [draftAssignmentId, setDraftAssignmentId] = useState<string | null>(null);
   const [dryRunOpen, setDryRunOpen] = useState(false);
+  // Mirror of draftAssignmentId for unmount/unload cleanup (state is stale there).
+  const dryRunIdRef = useRef<string | null>(null);
+  useEffect(() => { dryRunIdRef.current = draftAssignmentId; }, [draftAssignmentId]);
   const [error, setError] = useState('');
   // The existing Draft being continued (U6). Null for a fresh assignment. Its
   // stored questions are loaded into the preview; on publish it's discarded and
@@ -268,12 +272,40 @@ export default function CreateAssignment() {
     }
   };
 
+  // Preview drafts abandoned earlier (browser back / refresh / tab close) are
+  // discarded when the editor opens. A draft opened via "Continue editing" is
+  // adopted instead of deleted.
+  useEffect(() => {
+    sweepPreviewDrafts(discardDraft, draftParam || undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // While a preview draft exists: keep its heartbeat fresh (so another tab's
+  // sweep leaves it alone) and discard it if the page is refreshed or closed.
+  useEffect(() => {
+    if (!draftAssignmentId) return;
+    const id = draftAssignmentId;
+    const beat = window.setInterval(() => trackPreviewDraft(id), HEARTBEAT_MS);
+    const onPageHide = () => discardOnUnload(id);
+    window.addEventListener('pagehide', onPageHide);
+    return () => { window.clearInterval(beat); window.removeEventListener('pagehide', onPageHide); };
+  }, [draftAssignmentId]);
+
+  // Leaving the editor in-app (browser back, link) with a preview still open.
+  useEffect(() => () => {
+    const id = dryRunIdRef.current;
+    if (id) discardDraft(id).then(() => untrackPreviewDraft(id), () => {});
+  }, []);
+
   // Create a draft from the current curated questions and open the student dry-run.
   const handleDryRun = async () => {
     if (previewQuestions.length === 0) { setError('Add at least one question first.'); return; }
     setError('');
     try {
-      if (draftAssignmentId) { await discardDraft(draftAssignmentId).catch(() => {}); }  // replace any stale draft
+      if (draftAssignmentId) {  // replace any stale draft
+        const old = draftAssignmentId;
+        await discardDraft(old).then(() => untrackPreviewDraft(old), () => {});
+      }
       const res = await assignExam(courseId, {
         title: title.trim() || 'Untitled',
         questions: previewQuestions,
@@ -285,6 +317,7 @@ export default function CreateAssignment() {
         draft: true,
       });
       if (!res.assignment_id) throw new Error(res.message || 'Could not start preview.');
+      trackPreviewDraft(res.assignment_id);
       setDraftAssignmentId(res.assignment_id);
       setDryRunOpen(true);
     } catch (e) {
@@ -297,7 +330,11 @@ export default function CreateAssignment() {
     setDryRunOpen(false);
     const id = draftAssignmentId;
     setDraftAssignmentId(null);
-    if (id) { await discardDraft(id).catch(() => {}); }  // no-op if already published
+    if (id) {
+      // Untracked either way: success, or 403 because it was just published.
+      await discardDraft(id).catch(() => {});
+      untrackPreviewDraft(id);
+    }
   };
 
   // Author real (case-based) questions: kicks off the async concept-graph
@@ -413,7 +450,7 @@ export default function CreateAssignment() {
   };
 
   const copyLink = (assignmentId: string) => {
-    navigator.clipboard.writeText(`${window.location.origin}/student/exam/${assignmentId}`);
+    navigator.clipboard.writeText(`${window.location.origin}${appPath(`/student/exam/${assignmentId}`)}`);
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 2000);
   };
@@ -430,7 +467,7 @@ export default function CreateAssignment() {
 
   // ── Success screen ──────────────────────────────────────────────────────────
   if (created && createdData) {
-    const studentLink = `${window.location.origin}/student/exam/${createdData.assignment_id}`;
+    const studentLink = `${window.location.origin}${appPath(`/student/exam/${createdData.assignment_id}`)}`;
     const byTopic = builtQuestions.reduce<Record<string, string[]>>((acc, q) => {
       const t = q.topic || 'General';
       (acc[t] ||= []).push(q.q);

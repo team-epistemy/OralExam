@@ -423,6 +423,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const demoToken = props.demoToken;
   const isDemo = !!demoToken;
   const navigate = useNavigate();
+  // Leaving the exam. An embedded host (the professor's dry-run overlay) owns the
+  // exit: routing a professor to /student/* bounces them to /login and strands
+  // the dry-run draft, so hand control back via onExit whenever it's provided.
+  const leaveExam = () => {
+    if (props.onExit) props.onExit();
+    else navigate('/student/dashboard');
+  };
 
   // Session state
   const [phase, setPhase] = useState<Phase>('loading');
@@ -1029,7 +1036,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           <h2 className="text-lg font-heading text-ink mb-2">Unable to Start {typeLabel}</h2>
           <p className="text-sm text-muted mb-4">{error}</p>
           <button
-            onClick={() => navigate('/student/dashboard')}
+            onClick={leaveExam}
             className="px-4 py-2 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light"
           >
             Return to Dashboard
@@ -1194,7 +1201,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           {starting ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</> : `Start ${typeLabel} →`}
         </button>
         <button
-          onClick={() => navigate('/student/dashboard')}
+          onClick={leaveExam}
           className="w-full mt-2 py-2 text-sm text-muted hover:text-ink-light transition-colors"
         >
           Back to dashboard
@@ -1397,7 +1404,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 </button>
               )}
               <button
-                onClick={() => navigate('/student/dashboard')}
+                onClick={leaveExam}
                 className={`px-5 py-2 rounded-lg text-sm font-medium ${isPractice ? 'border border-border text-ink-light hover:bg-parchment/60' : 'bg-navy text-white hover:bg-navy-light'}`}
               >
                 <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
@@ -1456,7 +1463,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             </div>
           )}
           <button
-            onClick={() => navigate('/student/dashboard')}
+            onClick={leaveExam}
             className="px-3 py-1.5 bg-white/10 text-white rounded-lg text-sm hover:bg-white/20"
           >
             <ChevronLeft className="w-4 h-4 inline -mt-0.5" /> <span className="hidden sm:inline">Back</span>

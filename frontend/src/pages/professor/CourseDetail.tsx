@@ -10,7 +10,7 @@ import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
 import { listStudents, deleteCourse, getSyllabus, type Syllabus } from '../../api/courses';
-import { DEFAULT_ORG } from '../../config';
+import { DEFAULT_ORG, appPath } from '../../config';
 import { getCoursePerformance } from '../../api/performance';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 import DocumentGraphModal from '../../components/DocumentGraphModal';
@@ -102,7 +102,7 @@ export default function CourseDetail() {
       await deleteCourse(courseId!);
       // Hard navigation to the dashboard so it reloads with the course gone —
       // no chance of a stale list lingering after the removal.
-      window.location.assign('/professor/dashboard');
+      window.location.assign(appPath('/professor/dashboard'));
     } catch {
       toast.error('Could not remove the course. Please try again.');
     }
