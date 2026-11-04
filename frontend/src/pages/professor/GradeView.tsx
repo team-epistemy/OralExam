@@ -67,28 +67,28 @@ interface GradeReleaseResponse {
   grades: Array<{ session_id: string; student_id: string; grade_id: string; final_score?: number; status: string }>;
 }
 
+// Band thresholds mirror the backend EDS buckets (high >= 0.7, medium >= 0.3,
+// low) so the row Band and the per-question bucket tell the same story:
+//   Advanced >= 70 · Intermediate 30-69 · Beginner < 30.
 function edsColor(score: number | null): string {
   if (score === null) return 'text-gray-400';
-  if (score >= 85) return 'text-green-600';
-  if (score >= 70) return 'text-blue-600';
-  if (score >= 50) return 'text-yellow-600';
+  if (score >= 70) return 'text-green-600';
+  if (score >= 30) return 'text-yellow-600';
   return 'text-red-600';
 }
 
 function edsBgColor(score: number | null): string {
   if (score === null) return 'bg-gray-50';
-  if (score >= 85) return 'bg-green-50';
-  if (score >= 70) return 'bg-blue-50';
-  if (score >= 50) return 'bg-yellow-50';
+  if (score >= 70) return 'bg-green-50';
+  if (score >= 30) return 'bg-yellow-50';
   return 'bg-red-50';
 }
 
 function edsBand(score: number | null): string {
   if (score === null) return 'N/A';
-  if (score >= 85) return 'Distinction';
-  if (score >= 70) return 'Proficient';
-  if (score >= 50) return 'Developing';
-  return 'Starting';
+  if (score >= 70) return 'Advanced';
+  if (score >= 30) return 'Intermediate';
+  return 'Beginner';
 }
 
 function groupByQuestion(evals: TurnEvaluation[]) {
