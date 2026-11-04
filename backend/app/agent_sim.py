@@ -38,7 +38,7 @@ def skill_curve(n: int, curve: str = "linear") -> List[float]:
     - "bell":   clustered around the middle (most agents average, few extremes),
                 via the logistic quantile function.
     """
-    n = max(1, min(10, int(n)))
+    n = max(1, min(50, int(n)))
     if n == 1:
         return [round((SKILL_LO + SKILL_HI) / 2, 4)]
     if curve == "bell":

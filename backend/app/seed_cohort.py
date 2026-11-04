@@ -44,24 +44,43 @@ def _resolve_org_ids(cur) -> list:
 
 def _find_assignment(cur, course_name, assignment_title):
     """Return (org_id, course_id, assignment_id, question_set_id) or None, by
-    scanning each org with app.org_id set so RLS lets us read its tenant rows."""
+    scanning each org with app.org_id set so RLS lets us read its tenant rows.
+    Tries exact name/title first, then a case-insensitive partial match, so
+    'Operations Management' resolves 'Operations' and vice versa."""
     for oid, _oname in _resolve_org_ids(cur):
         cur.execute("SELECT set_config('app.org_id', %s, false)", (str(oid),))
         cur.execute(
-            "SELECT course_id FROM course WHERE course_name = %s OR title = %s",
-            (course_name, course_name))
+            """SELECT course_id FROM course
+               WHERE course_name = %s OR title = %s
+                  OR course_name ILIKE %s OR title ILIKE %s
+               ORDER BY (course_name = %s OR title = %s) DESC LIMIT 1""",
+            (course_name, course_name, f"%{course_name}%", f"%{course_name}%",
+             course_name, course_name))
         crow = cur.fetchone()
         if not crow:
             continue
         course_id = str(crow[0])
         cur.execute(
-            "SELECT assignment_id, question_set_id FROM assignment "
-            "WHERE course_id = %s::uuid AND title = %s",
-            (course_id, assignment_title))
+            """SELECT assignment_id, question_set_id FROM assignment
+               WHERE course_id = %s::uuid AND (title = %s OR title ILIKE %s)
+               ORDER BY (title = %s) DESC LIMIT 1""",
+            (course_id, assignment_title, f"%{assignment_title}%", assignment_title))
         arow = cur.fetchone()
         if arow:
             return str(oid), course_id, str(arow[0]), str(arow[1])
     return None
+
+
+def _list_available(cur):
+    """On a miss, dump each org's courses + their assignment titles so the right
+    names are visible in the logs without another round-trip."""
+    for oid, oname in _resolve_org_ids(cur):
+        cur.execute("SELECT set_config('app.org_id', %s, false)", (str(oid),))
+        cur.execute("SELECT course_id, course_name FROM course ORDER BY course_name")
+        for cid, cname in cur.fetchall():
+            cur.execute("SELECT title FROM assignment WHERE course_id = %s::uuid ORDER BY title", (str(cid),))
+            titles = [r[0] for r in cur.fetchall()]
+            print(f"  org {oname}: course {cname!r} -> assignments {titles}", flush=True)
 
 
 def _load_questions(cur, settings, question_set_id, course_id, org_id):
@@ -198,7 +217,8 @@ def run(course_name: str, assignment_title: str, n: int = 10,
 
     found = _find_assignment(cur, course_name, assignment_title)
     if not found:
-        print(f"NOT FOUND: course={course_name!r} assignment={assignment_title!r}", flush=True)
+        print(f"NOT FOUND: course={course_name!r} assignment={assignment_title!r}. Available:", flush=True)
+        _list_available(cur)
         return
     org_id, course_id, assignment_id, qs_id = found
     print(f"org={org_id} course={course_id} assignment={assignment_id}", flush=True)
