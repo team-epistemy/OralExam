@@ -378,7 +378,9 @@ function SessionDetail({
                       )}
                       {ev.components && (
                         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-400">
-                          {ev.components.recitation_gate != null && <span>authenticity R={ev.components.recitation_gate.toFixed(2)}</span>}
+                          {/* authenticity (R) is captured but NOT part of the EDS score
+                              (α·concepts + β·links; γ=0, no R-gate), so it's omitted here
+                              to avoid implying it drives the number. */}
                           {ev.components.node_coverage != null && <span>concepts {Math.round(ev.components.node_coverage * 100)}%</span>}
                           {ev.components.edge_coverage != null && <span>causal links {Math.round(ev.components.edge_coverage * 100)}%</span>}
                         </div>

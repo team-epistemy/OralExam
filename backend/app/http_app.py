@@ -4827,12 +4827,21 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         raise AuthorizationError("assignment not found")
 
                 with repo.conn.cursor() as cur:
+                    # overall_eds: prefer the released grade (final_score); before
+                    # release, fall back to the LIVE mean of the per-question EDS
+                    # aggregates so the professor sees the score on the row without
+                    # opening the transcript (and without releasing grades first).
                     cur.execute(
                         """SELECT es.session_id, es.student_id, es.status,
                                   es.current_turn_index, es.completed_at,
-                                  g.final_score
+                                  COALESCE(g.final_score, qea.avg_eds)
                            FROM exam_session es
                            LEFT JOIN grade g ON g.session_id = es.session_id
+                           LEFT JOIN (
+                               SELECT session_id, AVG(final_eds) AS avg_eds
+                               FROM question_eds_aggregate
+                               GROUP BY session_id
+                           ) qea ON qea.session_id = es.session_id
                            WHERE es.assignment_id = %s::uuid AND NOT es.is_preview
                            ORDER BY es.started_at DESC""",
                         (assignment_id,),
