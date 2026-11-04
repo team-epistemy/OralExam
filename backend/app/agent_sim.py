@@ -24,7 +24,9 @@ from typing import Callable, List
 from backend.constants import EDS_ALPHA, EDS_BETA, EDS_GAMMA, compute_eds
 
 # Competence is a skill in [SKILL_LO, SKILL_HI]; 0 ≈ struggling, 1 ≈ mastery.
-SKILL_LO, SKILL_HI = 0.05, 0.95
+# SKILL_LO is 0.0 so the weakest agent genuinely bottoms out (Beginner band),
+# giving a full spread rather than a floor around the Struggling tier.
+SKILL_LO, SKILL_HI = 0.0, 0.95
 DEFAULT_MAX_FOLLOWUPS = 2   # Socratic probe rounds per question in a sim
 
 
@@ -64,10 +66,15 @@ def persona_directive(skill: float) -> str:
         band = ("an AVERAGE student: you recall the main idea and some facts but "
                 "your causal reasoning is partial and vague on the mechanism, 2-4 "
                 "sentences")
-    else:
-        band = ("a STRUGGLING student: vague, surface-level answers that restate "
-                "the question or name terms without explaining any mechanism; "
+    elif skill >= 0.15:
+        band = ("a STRUGGLING student: name at most one or two terms and do NOT "
+                "explain how anything connects; mostly restate the question; "
                 "sometimes unsure, 1-2 short sentences")
+    else:
+        band = ("a VERY WEAK student who barely engages: you cannot recall the "
+                "specifics, name at most one term (often the wrong one), explain no "
+                "mechanism at all, and frequently say you are not sure; one short, "
+                "vague sentence")
     return (f"You are {band}. Your competence level is {skill:.2f} on a 0-1 scale — "
             "answer with exactly that level of depth and accuracy, no more.")
 
