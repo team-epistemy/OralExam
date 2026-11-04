@@ -1080,10 +1080,10 @@ function PerformanceTab({ courseId }: { courseId: string }) {
     return (
       <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
         <BarChart3 className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-        <h3 className="text-lg font-medium text-gray-900 mb-2">No practice attempts yet</h3>
+        <h3 className="text-lg font-medium text-gray-900 mb-2">No completed tests yet</h3>
         <p className="text-sm text-gray-500 max-w-md mx-auto">
-          Once students complete a <span className="font-medium">practice test</span>, this shows anonymized class
-          performance — topic coverage and how many students reach recall, application, and in-depth understanding.
+          Once students complete a <span className="font-medium">test</span> (practice, assignment, or exam), this shows
+          anonymized class performance — topic coverage and how many students reach recall, application, and in-depth understanding.
         </p>
       </div>
     );
@@ -1092,7 +1092,7 @@ function PerformanceTab({ courseId }: { courseId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-900">Class practice performance</h3>
+        <h3 className="text-sm font-semibold text-gray-900">Class performance</h3>
         <span className="text-xs text-gray-500">Anonymized · n = {n} student{n === 1 ? '' : 's'}</span>
       </div>
 

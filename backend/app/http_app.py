@@ -2851,17 +2851,19 @@ def _query_course_performance(repo, org_id: str, course_id: str) -> dict:
             label_of[str(lbl)] = lbl
 
     with repo.conn.cursor() as cur:
-        cur.execute("""SELECT 1 FROM information_schema.columns
-                       WHERE table_name='assignment' AND column_name='assignment_type'""")
-        type_clause = "AND a.assignment_type = 'practice'" if cur.fetchone() is not None else ""
+        # Class performance spans ALL completed tests (practice, assignment, exam) —
+        # it only ever emits class-level aggregates, so no per-student data leaks
+        # regardless of type. Professor dry-runs (is_preview) are excluded so a
+        # practice run while authoring never counts as a student result.
         cur.execute(
-            f"""SELECT es.student_id, q.concept_ids, e.eds_components
+            """SELECT es.student_id, q.concept_ids, e.eds_components
                 FROM exam_session es
                 JOIN assignment a ON a.assignment_id = es.assignment_id
                 JOIN session_turn st ON st.session_id = es.session_id
                 JOIN evaluation e ON e.turn_id = st.turn_id
                 JOIN question q ON q.question_id = st.question_id
-                WHERE a.course_id = %s::uuid AND es.status = 'completed' {type_clause}""",
+                WHERE a.course_id = %s::uuid AND es.status = 'completed'
+                  AND NOT es.is_preview""",
             (course_id,),
         )
         rows = cur.fetchall()
