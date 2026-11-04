@@ -251,11 +251,29 @@ def smoke() -> None:
     smoke_test.run(load_settings())
 
 
+def seed_cohort() -> None:
+    """Seed N synthetic students against a real assignment (demo/test data).
+
+    Usage: seed-cohort <course_name> <assignment_title> [n=10] [curve=bell] [domain]
+    """
+    from backend.app import seed_cohort as sc
+    args = sys.argv[2:]
+    if len(args) < 2:
+        print("usage: seed-cohort <course_name> <assignment_title> [n] [curve] [domain]")
+        return
+    course, title = args[0], args[1]
+    n = int(args[2]) if len(args) > 2 else 10
+    curve = args[3] if len(args) > 3 else "bell"
+    domain = args[4] if len(args) > 4 else "columbia.demo"
+    sc.run(course, title, n=n, curve=curve, domain=domain)
+
+
 def main() -> None:
     """Dispatch on the first CLI argument."""
     command = sys.argv[1] if len(sys.argv) > 1 else "serve"
     {"serve": serve, "worker": worker, "migrate": migrate,
-     "clean": clean, "bootstrap": bootstrap, "smoke": smoke}.get(command, serve)()
+     "clean": clean, "bootstrap": bootstrap, "smoke": smoke,
+     "seed-cohort": seed_cohort}.get(command, serve)()
 
 
 if __name__ == "__main__":
