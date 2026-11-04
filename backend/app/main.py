@@ -259,13 +259,14 @@ def seed_cohort() -> None:
     from backend.app import seed_cohort as sc
     args = sys.argv[2:]
     if len(args) < 2:
-        print("usage: seed-cohort <course_name> <assignment_title> [n] [curve] [domain]")
+        print("usage: seed-cohort <course_name> <assignment_title> [n] [curve] [domain] [max_followups]")
         return
     course, title = args[0], args[1]
     n = int(args[2]) if len(args) > 2 else 10
     curve = args[3] if len(args) > 3 else "bell"
     domain = args[4] if len(args) > 4 else "columbia.demo"
-    sc.run(course, title, n=n, curve=curve, domain=domain)
+    max_followups = int(args[5]) if len(args) > 5 else 1
+    sc.run(course, title, n=n, curve=curve, domain=domain, max_followups=max_followups)
 
 
 def main() -> None:

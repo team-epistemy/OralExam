@@ -189,7 +189,8 @@ def _persist_agent(cur, org_id, course_id, assignment_id, student_id, questions,
 
 
 def run(course_name: str, assignment_title: str, n: int = 10,
-        curve: str = "bell", domain: str = "columbia.demo") -> None:
+        curve: str = "bell", domain: str = "columbia.demo",
+        max_followups: int = 1) -> None:
     settings = Settings()
     conn = factory.db_connection(settings)
     conn.autocommit = False
@@ -214,7 +215,8 @@ def run(course_name: str, assignment_title: str, n: int = 10,
     eval_fn = agent_sim.default_eval_fn(settings)
     skills = agent_sim.skill_curve(n, curve)
     now = datetime.now(timezone.utc)
-    print(f"seeding {len(skills)} agents (curve={curve}); skills={skills}", flush=True)
+    print(f"seeding {len(skills)} agents (curve={curve}, max_followups={max_followups}); "
+          f"skills={skills}", flush=True)
 
     results = []
     for i, skill in enumerate(skills):
@@ -222,7 +224,7 @@ def run(course_name: str, assignment_title: str, n: int = 10,
         student_id = f"sim-student-{i + 1:02d}@{domain}"
         try:
             per_q = [agent_sim.take_question(q, directive, answer_fn, eval_fn,
-                                             agent_sim.DEFAULT_MAX_FOLLOWUPS) for q in questions]
+                                             max_followups) for q in questions]
             sid, overall = _persist_agent(cur, org_id, course_id, assignment_id,
                                           student_id, questions, per_q, now)
             conn.commit()
