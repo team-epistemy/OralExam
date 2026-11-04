@@ -1116,10 +1116,19 @@ function PerformanceTab({ courseId }: { courseId: string }) {
         </div>
       </div>
 
-      {/* Topic coverage */}
+      {/* Topic coverage — Named (recalled the concepts) vs Mastered (full EDS) */}
       <div className="bg-white rounded-xl border border-gray-200 p-5">
-        <h4 className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-1">Topic coverage</h4>
-        <p className="text-xs text-gray-500 mb-4">% of students who demonstrated each topic on the practice test.</p>
+        <div className="flex items-baseline justify-between mb-1">
+          <h4 className="text-xs font-bold uppercase tracking-wide text-gray-400">Topic coverage</h4>
+          <div className="flex items-center gap-3 text-[11px] text-gray-500">
+            <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" /> Mastered</span>
+            <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-gray-300 inline-block" /> Named</span>
+          </div>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          % of students who <span className="font-medium text-emerald-700">mastered</span> each topic (full reasoning, EDS &ge; {_pct(data.bar)}) vs
+          merely <span className="font-medium">named</span> its concepts.
+        </p>
         {data.topics.length === 0 ? (
           <p className="text-sm text-gray-400">No graded topics yet.</p>
         ) : (
@@ -1127,10 +1136,15 @@ function PerformanceTab({ courseId }: { courseId: string }) {
             {data.topics.map((t) => (
               <div key={t.label} className="flex items-center gap-3">
                 <span className="text-sm text-gray-700 w-44 flex-shrink-0 truncate" title={t.label}>{t.label}</span>
-                <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full bg-blue-500" style={{ width: _pct(t.pct_students) }} />
+                {/* Named = full-width faint track; Mastered = filled emerald overlay */}
+                <div className="flex-1 h-2.5 bg-gray-100 rounded-full overflow-hidden relative">
+                  <div className="absolute inset-y-0 left-0 rounded-full bg-gray-300" style={{ width: _pct(t.pct_named ?? t.pct_students) }} />
+                  <div className="absolute inset-y-0 left-0 rounded-full bg-emerald-500" style={{ width: _pct(t.pct_mastered ?? 0) }} />
                 </div>
-                <span className="text-xs font-mono text-gray-500 w-10 text-right">{_pct(t.pct_students)}</span>
+                <span className="text-xs font-mono w-20 text-right tabular-nums">
+                  <span className="text-emerald-600 font-semibold">{_pct(t.pct_mastered ?? 0)}</span>
+                  <span className="text-gray-400"> / {_pct(t.pct_named ?? t.pct_students)}</span>
+                </span>
               </div>
             ))}
           </div>
@@ -1138,11 +1152,11 @@ function PerformanceTab({ courseId }: { courseId: string }) {
       </div>
 
       <p className="text-xs text-gray-400 leading-relaxed">
-        Aspects reflect the reasoning captured per answer: <span className="font-medium">Recall</span> = concepts named,
-        <span className="font-medium"> Application</span> = causal links / case scenarios,
-        <span className="font-medium"> In-depth</span> = novel insight,
-        <span className="font-medium"> Authenticity</span> = genuine reasoning. Mastery bar = {_pct(data.bar)}. All figures
-        are aggregated across students — no individual results are shown.
+        <span className="font-medium">Named</span> = recalled the topic's concepts; <span className="font-medium">Mastered</span> =
+        demonstrated it on the full EDS rubric (concepts + causal links), the same score students receive. A student can name a topic
+        without mastering it, so Mastered is the stricter, truer figure. Aspects: <span className="font-medium">Recall</span> = concepts named,
+        <span className="font-medium"> Application</span> = causal links. Mastery bar = {_pct(data.bar)}. All figures are aggregated
+        across students — no individual results are shown.
       </p>
     </div>
   );
