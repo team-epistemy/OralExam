@@ -374,10 +374,13 @@ function SessionDetail({
                       )}
                       <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">{sessionGrade.anonymized ? 'hidden (anonymized)' : 'no answer'}</em>}</p>
                       {(ev.rationale || ev.feedback) && (
-                        <p className="mt-1 text-xs text-gray-500"><span className="font-medium text-gray-600">Why this score:</span>{' '}{ev.rationale || ev.feedback}</p>
+                        <div className="mt-2">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-700">Scoring Details</p>
+                          <p className="mt-0.5 text-sm text-gray-800 leading-relaxed">{ev.rationale || ev.feedback}</p>
+                        </div>
                       )}
                       {ev.components && (
-                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-400">
+                        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs font-medium text-gray-700">
                           {/* authenticity (R) is captured but NOT part of the EDS score
                               (α·concepts + β·links; γ=0, no R-gate), so it's omitted here
                               to avoid implying it drives the number. */}
