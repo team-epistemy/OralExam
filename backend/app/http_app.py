@@ -6011,10 +6011,12 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                 if caller.role != Role.PROFESSOR and srow[1] != caller.user_id:
                     raise AuthorizationError("access denied")
 
-                # Practice tests are anonymized to the professor: withhold the
-                # verbatim student answers (the transcript) so a practice run
-                # can't be tied back to what a specific student said (S-E-2.2).
-                # The student viewing their own session still sees everything.
+                # Practice tests anonymize the student's IDENTITY to the professor
+                # (the session list shows "Student N", never the email — S-E-2.2).
+                # The verbatim answers ARE shown so a reviewer can see the response
+                # and explain why each score sits where it does; identity stays
+                # hidden, so an answer can't be tied back to a specific student.
+                # The student viewing their own session always sees everything.
                 with repo.conn.cursor() as cur:
                     anon = (caller.role == Role.PROFESSOR
                             and _assignment_is_practice(cur, str(srow[2])))
@@ -6063,7 +6065,7 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                         "turn_index": er[5],
                         "sub_turn_index": er[6],
                         "question_text": er[8] or "",
-                        "student_answer": "" if anon else (er[7] or ""),
+                        "student_answer": er[7] or "",
                         "eds_score": score,
                         "eds_bucket": er[2],
                         "answered": raw.get("answered", True),

@@ -350,7 +350,7 @@ function SessionDetail({
     <div className="space-y-4">
       {sessionGrade.anonymized && (
         <div className="rounded-lg bg-blue-50 border border-blue-100 px-3 py-2 text-xs text-blue-800">
-          Practice test — anonymized. Student identity and verbatim answers are hidden; only scores and reasoning are shown.
+          Practice test — student identity is anonymized (shown as “Student N”). Answers and scores are shown so you can see how each response maps to its score.
         </div>
       )}
       {/* Per-question responses, scores, and reasoning */}
@@ -372,7 +372,7 @@ function SessionDetail({
                       {group.attempts.length > 1 && (
                         <p className="text-[11px] uppercase tracking-wide text-gray-400">{i === 0 ? 'Initial answer' : `Probe response ${i}`}</p>
                       )}
-                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">{sessionGrade.anonymized ? 'hidden (anonymized)' : 'no answer'}</em>}</p>
+                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">no answer</em>}</p>
                       {(ev.rationale || ev.feedback) && (
                         <div className="mt-2">
                           <p className="text-xs font-semibold uppercase tracking-wide text-gray-700">Scoring Details</p>
