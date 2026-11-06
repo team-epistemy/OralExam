@@ -198,6 +198,17 @@ export async function assignExam(
   return post<AssignExamResult>(`/api/courses/${courseId}/exams/assign`, body);
 }
 
+// Edit an existing assignment in place, preserving its id (continued-draft /
+// edit-assignment flows). Status is unchanged server-side; the caller flips a
+// draft to active with publishAssignment afterward. Returns status 'error' with
+// code 'has_attempts' if a real student has already started it.
+export async function updateAssignment(
+  assignmentId: string,
+  body: { title: string; questions: ExamVariantQuestion[]; difficulty: string; duration_minutes?: number; assignment_type?: AssignmentType; include_case?: boolean; session_id?: string; scope_concepts?: string[] },
+): Promise<AssignExamResult & { code?: string }> {
+  return post<AssignExamResult & { code?: string }>(`/api/assignments/${assignmentId}/update`, body);
+}
+
 export async function publishAssignment(assignmentId: string): Promise<{ status: string; assignment_id: string }> {
   return post<{ status: string; assignment_id: string }>(`/api/assignments/${assignmentId}/publish`);
 }

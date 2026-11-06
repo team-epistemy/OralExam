@@ -28,9 +28,9 @@ def test_skill_curve_bell_is_centre_dense():
     assert mid_gap < edge_gap
 
 
-def test_skill_curve_clamps_to_1_to_10():
+def test_skill_curve_clamps_to_1_to_50():
     assert len(S.skill_curve(0, "linear")) == 1
-    assert len(S.skill_curve(99, "linear")) == 10
+    assert len(S.skill_curve(99, "linear")) == 50
 
 
 def test_eds_formula_matches_hand_computation():

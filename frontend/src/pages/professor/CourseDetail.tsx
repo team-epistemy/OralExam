@@ -1,13 +1,16 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, ChevronDown, ChevronRight, BarChart3, BookOpen } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronDown, ChevronRight, BarChart3, BookOpen, Pencil, XCircle } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
+import { Breadcrumbs } from '../../components/Breadcrumbs';
+import { OverflowMenu } from '../../components/OverflowMenu';
+import { useToast } from '../../components/Toast';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
 import { createStudentsBatch, dropCourseStudent, resetStudentPassword } from '../../api/students';
 import { listStudents, deleteCourse, getSyllabus, type Syllabus } from '../../api/courses';
-import { DEFAULT_ORG } from '../../config';
+import { DEFAULT_ORG, appPath } from '../../config';
 import { getCoursePerformance } from '../../api/performance';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
 import DocumentGraphModal from '../../components/DocumentGraphModal';
@@ -61,6 +64,7 @@ export default function CourseDetail() {
     }
   }, [searchParams]);
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   const { data: course } = useQuery({
     queryKey: ['course', courseId],
@@ -98,9 +102,9 @@ export default function CourseDetail() {
       await deleteCourse(courseId!);
       // Hard navigation to the dashboard so it reloads with the course gone —
       // no chance of a stale list lingering after the removal.
-      window.location.assign('/professor/dashboard');
+      window.location.assign(appPath('/professor/dashboard'));
     } catch {
-      alert('Could not remove the course. Please try again.');
+      toast.error('Could not remove the course. Please try again.');
     }
   };
 
@@ -113,18 +117,14 @@ export default function CourseDetail() {
 
   return (
     <div className="space-y-6">
-      {/* Back to dashboard + course-level danger action (these lived in the old
-          left nav; they now live on the course page itself). */}
-      <div className="flex items-center justify-between">
-        <Link to="/professor/dashboard" className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 transition-colors">
-          <ChevronLeft className="w-4 h-4" /> All courses
-        </Link>
-        <button
-          onClick={handleRemoveCourse}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition-colors"
-        >
-          <Trash2 className="w-4 h-4" /> Remove course
-        </button>
+      {/* Breadcrumb trail + course-level actions. The destructive "Remove course"
+          is demoted into an overflow menu so it can't be hit by accident. */}
+      <div className="flex items-center justify-between gap-3">
+        <Breadcrumbs items={[{ label: 'Courses', to: '/professor/dashboard' }, { label: course?.name || 'Course' }]} />
+        <OverflowMenu
+          label="Course actions"
+          actions={[{ label: 'Remove course', onSelect: handleRemoveCourse, icon: Trash2, danger: true }]}
+        />
       </div>
 
       {/* Course header */}
@@ -190,6 +190,7 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
   const [graphViewing, setGraphViewing] = useState<{ id: string; name: string } | null>(null);
   const [buildingIds, setBuildingIds] = useState<Set<string>>(new Set());
   const [listOpen, setListOpen] = useState(true);   // uploaded-materials list is collapsible
+  const toast = useToast();
 
   // Which documents have a per-document concept graph (mapping 1) → material_version_id -> concept_count.
   const { data: docGraphData } = useQuery({
@@ -206,8 +207,9 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
     try {
       await del(`/api/materials/${materialId}`);
       queryClient.invalidateQueries({ queryKey: ['materials', courseId] });
+      toast.success('Material deleted');
     } catch (err: any) {
-      alert('Failed to delete material: ' + (err?.message || 'Unknown error'));
+      toast.error('Could not delete the material. Please try again.');
     }
   };
 
@@ -220,7 +222,7 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
       const res = await post<{ status?: string; message?: string }>(
         `/api/courses/${courseId}/materials/${versionId}/graph/build`, {});
       if (res?.status && res.status !== 'building') {
-        alert(res.message || 'Could not build the concept graph.');
+        toast.error(res.message || 'Could not build the concept graph.');
         return;
       }
       for (let i = 0; i < 20; i++) {
@@ -231,7 +233,7 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
         if (found && found.concept_count > 0) break;
       }
     } catch (err: any) {
-      alert('Failed to build the concept graph: ' + (err?.message || 'Unknown error'));
+      toast.error('Could not build the concept graph. Please try again.');
     } finally {
       setBuildingIds((prev) => { const n = new Set(prev); n.delete(versionId); return n; });
     }
@@ -313,13 +315,10 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
       >
         <Eye className="w-4 h-4" />
       </button>
-      <button
-        onClick={() => handleDelete(mvid)}
-        className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
-        title="Delete material"
-      >
-        <Trash2 className="w-4 h-4" />
-      </button>
+      <OverflowMenu
+        label="Material actions"
+        actions={[{ label: 'Delete material', onSelect: () => handleDelete(mvid), icon: Trash2, danger: true }]}
+      />
     </div>
     );
   };
@@ -368,14 +367,23 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
           <FileText className="w-8 h-8 text-gray-300 mx-auto mb-3" />
           <p className="text-sm text-gray-500">No materials uploaded yet</p>
+          <p className="text-xs text-gray-400 mt-1 mb-4">Upload course materials to build the concept graph that questions come from.</p>
+          <Link
+            to={`/professor/upload?course=${encodeURIComponent(courseName)}&courseId=${courseId}`}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+          >
+            <Upload className="w-4 h-4" /> Upload materials
+          </Link>
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          {/* Collapsible list of uploaded materials. */}
+        <div className="bg-white rounded-xl border border-gray-200">
+          {/* No overflow-hidden on this card: a row's overflow-menu popover must
+              be able to extend past the card's bottom edge without being clipped.
+              Collapsible list of uploaded materials. */}
           <button
             type="button"
             onClick={() => setListOpen((v) => !v)}
-            className="w-full flex items-center gap-2 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+            className="w-full flex items-center gap-2 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors rounded-t-xl"
           >
             {listOpen ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
             Uploaded materials ({listedMaterials.length})
@@ -405,6 +413,7 @@ function MaterialsTab({ materials, courseId, courseName, syllabus, queryClient }
 
 function GraphTab({ courseId }: { courseId: string }) {
   const queryClient = useQueryClient();
+  const toast = useToast();
   const { data: graphData, isLoading } = useQuery({
     queryKey: ['course-graph', courseId],
     queryFn: () => get<any>(`/api/courses/${courseId}/graph`),
@@ -446,7 +455,9 @@ function GraphTab({ courseId }: { courseId: string }) {
     onSuccess: () => {
       setDirty(false);
       queryClient.invalidateQueries({ queryKey: ['course-graph', courseId] });
+      toast.success('Changes saved');
     },
+    onError: () => toast.error("Couldn't save the concept changes. Please try again."),
   });
 
   const removeConcept = (id: string) => {
@@ -669,13 +680,16 @@ function AssignmentsTab({ assignments, courseId, courseName, materials, syllabus
   materials: Material[]; syllabus?: Syllabus | null;
   queryClient: ReturnType<typeof useQueryClient>;
 }) {
+  const toast = useToast();
+
   const handleClose = async (assignmentId: string) => {
     if (!confirm('Close this assignment? Students will no longer be able to start new exams.')) return;
     try {
       await post(`/api/assignments/${assignmentId}/close`, {});
       queryClient.invalidateQueries({ queryKey: ['assignments', courseId] });
+      toast.success('Assignment closed');
     } catch (err) {
-      alert('Failed to close assignment');
+      toast.error('Could not close the assignment. Please try again.');
     }
   };
 
@@ -683,11 +697,12 @@ function AssignmentsTab({ assignments, courseId, courseName, materials, syllabus
     if (!confirm('Delete this assignment? This will remove all student sessions and grades for this assignment.')) return;
     try {
       await del(`/api/assignments/${assignmentId}`);
+      toast.success('Assignment deleted');
       // Refresh the page so the assignment (and its now-removed sessions/grades)
       // clears everywhere. The active tab is preserved via ?tab= in the URL.
       window.location.reload();
     } catch (err: any) {
-      alert('Failed to delete assignment: ' + (err?.message || 'Unknown error'));
+      toast.error('Could not delete the assignment. Please try again.');
     }
   };
 
@@ -738,34 +753,47 @@ function AssignmentsTab({ assignments, courseId, courseName, materials, syllabus
                 </p>
               </div>
               <StatusBadge status={a.status || 'active'} />
+              {/* Draft assignments were started but never published — the primary
+                  action is to resume editing them, not to preview/grade. */}
+              {a.status === 'draft' && (
+                <Link
+                  to={`/professor/assignments/new?course=${courseId}&draft=${a.assignment_id || a.id}`}
+                  className="inline-flex items-center gap-1 text-xs px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  title="Reopen this draft to edit and publish it"
+                >
+                  <Pencil className="w-3.5 h-3.5" /> Continue editing
+                </Link>
+              )}
               <Link
                 to={`/professor/assignments/${a.assignment_id || a.id}/preview`}
+                // Pass the course context so the preview's "Exit preview" returns
+                // here and "Edit assignment" opens the editor with the course set.
+                state={{
+                  backTo: `/professor/courses/${courseId}?tab=assignments`,
+                  editTo: `/professor/assignments/new?course=${courseId}&draft=${a.assignment_id || a.id}`,
+                }}
                 className="inline-flex items-center gap-1 text-xs px-3 py-1 border border-purple-200 text-purple-600 rounded-lg hover:bg-purple-50 transition-colors"
                 title="See exactly what the student sees"
               >
                 <Eye className="w-3.5 h-3.5" /> Preview
               </Link>
-              <Link
-                to={`/professor/assignments/${a.assignment_id || a.id}/grades`}
-                className="text-xs px-3 py-1 border border-blue-200 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
-              >
-                View Grades
-              </Link>
-              {(a.status === 'active') && (
-                <button
-                  onClick={() => handleClose(a.assignment_id || a.id)}
-                  className="text-xs px-3 py-1 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+              {a.status !== 'draft' && (
+                <Link
+                  to={`/professor/assignments/${a.assignment_id || a.id}/grades`}
+                  className="text-xs px-3 py-1 border border-blue-200 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
                 >
-                  Close
-                </button>
+                  View Grades
+                </Link>
               )}
-              <button
-                onClick={() => handleDelete(a.assignment_id || a.id)}
-                className="p-1.5 text-red-600 hover:bg-red-50 rounded transition-colors"
-                title="Delete assignment"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              <OverflowMenu
+                label="Assignment actions"
+                actions={[
+                  ...(a.status === 'active'
+                    ? [{ label: 'Close assignment', onSelect: () => handleClose(a.assignment_id || a.id), icon: XCircle }]
+                    : []),
+                  { label: 'Delete assignment', onSelect: () => handleDelete(a.assignment_id || a.id), icon: Trash2, danger: true },
+                ]}
+              />
             </div>
           ))}
         </div>
@@ -789,6 +817,7 @@ function StudentsTab({ courseId }: { courseId: string }) {
   const [dropping, setDropping] = useState<string | null>(null);
   const [resetting, setResetting] = useState<string | null>(null);
   const queryClient = useQueryClient();
+  const toast = useToast();
 
   const { data: enrolled = [] } = useQuery({
     queryKey: ['course-roster', courseId],
@@ -803,8 +832,10 @@ function StudentsTab({ courseId }: { courseId: string }) {
     try {
       await dropCourseStudent(courseId, email);
       queryClient.invalidateQueries({ queryKey: ['course-roster', courseId] });
+      toast.success(`Removed ${email} from the course`);
     } catch {
       setErrors((e) => [...e, `Could not remove ${email}. Please try again.`]);
+      toast.error(`Could not remove ${email}. Please try again.`);
     } finally {
       setDropping(null);
     }
@@ -819,8 +850,10 @@ function StudentsTab({ courseId }: { courseId: string }) {
     try {
       const res = await resetStudentPassword(email);
       setRoster((prev) => [{ email: res.email, password: res.password }, ...prev.filter((r) => r.email !== res.email)]);
+      toast.success(`New password generated for ${email}`);
     } catch {
       setErrors((e) => [...e, `Could not reset the password for ${email}.`]);
+      toast.error(`Could not reset the password for ${email}.`);
     } finally {
       setResetting(null);
     }
@@ -881,6 +914,8 @@ function StudentsTab({ courseId }: { courseId: string }) {
     setErrors(failed);
     setEmails('');
     setCsvNote(`Done — ${added.length} new, ${existing} already enrolled${skipped ? `, ${skipped} skipped (already staff)` : ''}, ${failed.length} failed.`);
+    if (added.length > 0) toast.success(`Added ${added.length} student${added.length === 1 ? '' : 's'}`);
+    if (failed.length > 0) toast.error(`${failed.length} student${failed.length === 1 ? '' : 's'} could not be added — see details below.`);
     queryClient.invalidateQueries({ queryKey: ['course-roster', courseId] });
     queryClient.invalidateQueries({ queryKey: ['course', courseId] });
     setBusy(false);
@@ -1045,10 +1080,10 @@ function PerformanceTab({ courseId }: { courseId: string }) {
     return (
       <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
         <BarChart3 className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-        <h3 className="text-lg font-medium text-gray-900 mb-2">No practice attempts yet</h3>
+        <h3 className="text-lg font-medium text-gray-900 mb-2">No completed tests yet</h3>
         <p className="text-sm text-gray-500 max-w-md mx-auto">
-          Once students complete a <span className="font-medium">practice test</span>, this shows anonymized class
-          performance — topic coverage and how many students reach recall, application, and in-depth understanding.
+          Once students complete a <span className="font-medium">test</span> (practice, assignment, or exam), this shows
+          anonymized class performance — topic coverage and how many students reach recall, application, and in-depth understanding.
         </p>
       </div>
     );
@@ -1057,7 +1092,7 @@ function PerformanceTab({ courseId }: { courseId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-900">Class practice performance</h3>
+        <h3 className="text-sm font-semibold text-gray-900">Class performance</h3>
         <span className="text-xs text-gray-500">Anonymized · n = {n} student{n === 1 ? '' : 's'}</span>
       </div>
 
@@ -1081,10 +1116,19 @@ function PerformanceTab({ courseId }: { courseId: string }) {
         </div>
       </div>
 
-      {/* Topic coverage */}
+      {/* Topic coverage — Named (recalled the concepts) vs Mastered (full EDS) */}
       <div className="bg-white rounded-xl border border-gray-200 p-5">
-        <h4 className="text-xs font-bold uppercase tracking-wide text-gray-400 mb-1">Topic coverage</h4>
-        <p className="text-xs text-gray-500 mb-4">% of students who demonstrated each topic on the practice test.</p>
+        <div className="flex items-baseline justify-between mb-1">
+          <h4 className="text-xs font-bold uppercase tracking-wide text-gray-400">Topic coverage</h4>
+          <div className="flex items-center gap-3 text-[11px] text-gray-500">
+            <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" /> Mastered</span>
+            <span className="inline-flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-gray-300 inline-block" /> Named</span>
+          </div>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          % of students who <span className="font-medium text-emerald-700">mastered</span> each topic (full reasoning, EDS &ge; {_pct(data.bar)}) vs
+          merely <span className="font-medium">named</span> its concepts.
+        </p>
         {data.topics.length === 0 ? (
           <p className="text-sm text-gray-400">No graded topics yet.</p>
         ) : (
@@ -1092,10 +1136,15 @@ function PerformanceTab({ courseId }: { courseId: string }) {
             {data.topics.map((t) => (
               <div key={t.label} className="flex items-center gap-3">
                 <span className="text-sm text-gray-700 w-44 flex-shrink-0 truncate" title={t.label}>{t.label}</span>
-                <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full bg-blue-500" style={{ width: _pct(t.pct_students) }} />
+                {/* Named = full-width faint track; Mastered = filled emerald overlay */}
+                <div className="flex-1 h-2.5 bg-gray-100 rounded-full overflow-hidden relative">
+                  <div className="absolute inset-y-0 left-0 rounded-full bg-gray-300" style={{ width: _pct(t.pct_named ?? t.pct_students) }} />
+                  <div className="absolute inset-y-0 left-0 rounded-full bg-emerald-500" style={{ width: _pct(t.pct_mastered ?? 0) }} />
                 </div>
-                <span className="text-xs font-mono text-gray-500 w-10 text-right">{_pct(t.pct_students)}</span>
+                <span className="text-xs font-mono w-20 text-right tabular-nums">
+                  <span className="text-emerald-600 font-semibold">{_pct(t.pct_mastered ?? 0)}</span>
+                  <span className="text-gray-400"> / {_pct(t.pct_named ?? t.pct_students)}</span>
+                </span>
               </div>
             ))}
           </div>
@@ -1103,11 +1152,11 @@ function PerformanceTab({ courseId }: { courseId: string }) {
       </div>
 
       <p className="text-xs text-gray-400 leading-relaxed">
-        Aspects reflect the reasoning captured per answer: <span className="font-medium">Recall</span> = concepts named,
-        <span className="font-medium"> Application</span> = causal links / case scenarios,
-        <span className="font-medium"> In-depth</span> = novel insight,
-        <span className="font-medium"> Authenticity</span> = genuine reasoning. Mastery bar = {_pct(data.bar)}. All figures
-        are aggregated across students — no individual results are shown.
+        <span className="font-medium">Named</span> = recalled the topic's concepts; <span className="font-medium">Mastered</span> =
+        demonstrated it on the full EDS rubric (concepts + causal links), the same score students receive. A student can name a topic
+        without mastering it, so Mastered is the stricter, truer figure. Aspects: <span className="font-medium">Recall</span> = concepts named,
+        <span className="font-medium"> Application</span> = causal links. Mastery bar = {_pct(data.bar)}. All figures are aggregated
+        across students — no individual results are shown.
       </p>
     </div>
   );
