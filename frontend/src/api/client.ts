@@ -1,4 +1,4 @@
-import { API_BASE_URL, DEFAULT_ORG } from '../config';
+import { API_BASE_URL, DEFAULT_ORG, appPath } from '../config';
 import { refreshAccessToken } from './auth';
 
 class ApiError extends Error {
@@ -34,7 +34,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
       localStorage.removeItem('refresh_token');
       // Only redirect to login if we're not already on the login page
       if (!window.location.pathname.endsWith('/login')) {
-        window.location.href = '/login';
+        window.location.href = appPath('/login');
       }
     }
     const errorBody = await response.text();

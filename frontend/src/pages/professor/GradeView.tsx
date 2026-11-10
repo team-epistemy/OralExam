@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2 } from 'lucide-react';
+import { Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2 } from 'lucide-react';
 import { get, post } from '../../api/client';
+import { Breadcrumbs } from '../../components/Breadcrumbs';
+import { useToast } from '../../components/Toast';
 
 interface SessionSummary {
   session_id: string;
@@ -65,28 +67,28 @@ interface GradeReleaseResponse {
   grades: Array<{ session_id: string; student_id: string; grade_id: string; final_score?: number; status: string }>;
 }
 
+// Band thresholds mirror the backend EDS buckets (high >= 0.7, medium >= 0.3,
+// low) so the row Band and the per-question bucket tell the same story:
+//   Advanced >= 70 · Intermediate 30-69 · Beginner < 30.
 function edsColor(score: number | null): string {
   if (score === null) return 'text-gray-400';
-  if (score >= 85) return 'text-green-600';
-  if (score >= 70) return 'text-blue-600';
-  if (score >= 50) return 'text-yellow-600';
+  if (score >= 70) return 'text-green-600';
+  if (score >= 30) return 'text-yellow-600';
   return 'text-red-600';
 }
 
 function edsBgColor(score: number | null): string {
   if (score === null) return 'bg-gray-50';
-  if (score >= 85) return 'bg-green-50';
-  if (score >= 70) return 'bg-blue-50';
-  if (score >= 50) return 'bg-yellow-50';
+  if (score >= 70) return 'bg-green-50';
+  if (score >= 30) return 'bg-yellow-50';
   return 'bg-red-50';
 }
 
 function edsBand(score: number | null): string {
   if (score === null) return 'N/A';
-  if (score >= 85) return 'Distinction';
-  if (score >= 70) return 'Proficient';
-  if (score >= 50) return 'Developing';
-  return 'Starting';
+  if (score >= 70) return 'Advanced';
+  if (score >= 30) return 'Intermediate';
+  return 'Beginner';
 }
 
 function groupByQuestion(evals: TurnEvaluation[]) {
@@ -124,6 +126,7 @@ function statusBadge(status: string) {
 export default function GradeView() {
   const { assignmentId } = useParams<{ assignmentId: string }>();
   const queryClient = useQueryClient();
+  const toast = useToast();
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const [showReleasePreview, setShowReleasePreview] = useState(false);
 
@@ -131,6 +134,13 @@ export default function GradeView() {
     queryKey: ['assignment', assignmentId],
     queryFn: () => get<AssignmentDetail>(`/api/assignments/${assignmentId}`),
     enabled: !!assignmentId,
+  });
+
+  // Course name for the breadcrumb trail (assignment detail carries only the id).
+  const { data: course } = useQuery({
+    queryKey: ['course', assignment?.course_id],
+    queryFn: () => get<{ name: string }>(`/api/courses/${assignment!.course_id}`),
+    enabled: !!assignment?.course_id,
   });
 
   const { data: sessions = [], isLoading: loadingSessions } = useQuery({
@@ -141,10 +151,12 @@ export default function GradeView() {
 
   const releaseMutation = useMutation({
     mutationFn: () => post<GradeReleaseResponse>(`/api/assignments/${assignmentId}/grades/release`, {}),
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['assignment-sessions', assignmentId] });
       setShowReleasePreview(false);
+      toast.success(`Grades released for ${data.grades_released} session${data.grades_released === 1 ? '' : 's'}`);
     },
+    onError: () => toast.error('Could not release grades. Please try again.'),
   });
 
   const completedSessions = sessions.filter((s) => s.status === 'completed');
@@ -167,13 +179,17 @@ export default function GradeView() {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <Link
-            to={assignment ? `/professor/courses/${assignment.course_id}` : '/professor/dashboard'}
-            className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 mb-2 transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Back to Course
-          </Link>
+          <Breadcrumbs
+            className="mb-2"
+            items={[
+              { label: 'Courses', to: '/professor/dashboard' },
+              ...(assignment?.course_id
+                ? [{ label: course?.name || 'Course', to: `/professor/courses/${assignment.course_id}` }]
+                : []),
+              { label: assignment?.title || 'Assignment' },
+              { label: 'Results' },
+            ]}
+          />
           <h1 className="text-xl font-bold text-gray-900">{assignment?.title || 'Assignment Grades'}</h1>
           <p className="text-sm text-gray-500 mt-1">Review responses, adjust grades &amp; comments, then release.</p>
         </div>
@@ -334,7 +350,7 @@ function SessionDetail({
     <div className="space-y-4">
       {sessionGrade.anonymized && (
         <div className="rounded-lg bg-blue-50 border border-blue-100 px-3 py-2 text-xs text-blue-800">
-          Practice test — anonymized. Student identity and verbatim answers are hidden; only scores and reasoning are shown.
+          Practice test — student identity is anonymized (shown as “Student N”). Answers and scores are shown so you can see how each response maps to its score.
         </div>
       )}
       {/* Per-question responses, scores, and reasoning */}
@@ -356,13 +372,18 @@ function SessionDetail({
                       {group.attempts.length > 1 && (
                         <p className="text-[11px] uppercase tracking-wide text-gray-400">{i === 0 ? 'Initial answer' : `Probe response ${i}`}</p>
                       )}
-                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">{sessionGrade.anonymized ? 'hidden (anonymized)' : 'no answer'}</em>}</p>
+                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">no answer</em>}</p>
                       {(ev.rationale || ev.feedback) && (
-                        <p className="mt-1 text-xs text-gray-500"><span className="font-medium text-gray-600">Why this score:</span>{' '}{ev.rationale || ev.feedback}</p>
+                        <div className="mt-2">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-700">Scoring Details</p>
+                          <p className="mt-0.5 text-sm text-gray-800 leading-relaxed">{ev.rationale || ev.feedback}</p>
+                        </div>
                       )}
                       {ev.components && (
-                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-400">
-                          {ev.components.recitation_gate != null && <span>authenticity R={ev.components.recitation_gate.toFixed(2)}</span>}
+                        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs font-medium text-gray-700">
+                          {/* authenticity (R) is captured but NOT part of the EDS score
+                              (α·concepts + β·links; γ=0, no R-gate), so it's omitted here
+                              to avoid implying it drives the number. */}
                           {ev.components.node_coverage != null && <span>concepts {Math.round(ev.components.node_coverage * 100)}%</span>}
                           {ev.components.edge_coverage != null && <span>causal links {Math.round(ev.components.edge_coverage * 100)}%</span>}
                         </div>
@@ -394,6 +415,7 @@ function GradeEditor({
   assignmentId: string;
   queryClient: ReturnType<typeof useQueryClient>;
 }) {
+  const toast = useToast();
   const [score, setScore] = useState('');
   const [comment, setComment] = useState('');
   const [error, setError] = useState('');
@@ -416,7 +438,9 @@ function GradeEditor({
       queryClient.invalidateQueries({ queryKey: ['session-grade', sessionId] });
       queryClient.invalidateQueries({ queryKey: ['assignment-sessions', assignmentId] });
       setTimeout(() => setSaved(false), 2500);
+      toast.success('Changes saved');
     },
+    onError: () => toast.error('Could not save the grade. Please try again.'),
   });
 
   const handleSave = () => {

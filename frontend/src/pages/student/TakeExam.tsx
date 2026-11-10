@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen } from 'lucide-react';
+import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen, MessageSquare } from 'lucide-react';
 import { downloadTranscriptPdf, examTranscript } from '../../transcript';
 import { typeNoun, typeNounLower } from '../../assignmentType';
 import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft } from '../../api/exam';
@@ -423,6 +423,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const demoToken = props.demoToken;
   const isDemo = !!demoToken;
   const navigate = useNavigate();
+  // Leaving the exam. An embedded host (the professor's dry-run overlay) owns the
+  // exit: routing a professor to /student/* bounces them to /login and strands
+  // the dry-run draft, so hand control back via onExit whenever it's provided.
+  const leaveExam = () => {
+    if (props.onExit) props.onExit();
+    else navigate('/student/dashboard');
+  };
 
   // Session state
   const [phase, setPhase] = useState<Phase>('loading');
@@ -624,7 +631,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // On a graded item the in-app EDS and the evaluator's remarks are drafts, not a
   // mark: they stay hidden until the professor releases a grade, so this screen
   // matches the Results page. Practice is exempt, and a professor preview sees all.
-  const showDraftScores = isPractice || preview;
+  // Demo speaking tests are a pure spoken experience: no EDS numbers, no concept
+  // map, no text box (see the render gates below). Practice/preview keep them.
+  const showDraftScores = (isPractice || preview) && !isDemo;
 
   // Auto-speak the latest examiner line (question or probe) as it appears.
   useEffect(() => {
@@ -1029,7 +1038,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           <h2 className="text-lg font-heading text-ink mb-2">Unable to Start {typeLabel}</h2>
           <p className="text-sm text-muted mb-4">{error}</p>
           <button
-            onClick={() => navigate('/student/dashboard')}
+            onClick={leaveExam}
             className="px-4 py-2 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light"
           >
             Return to Dashboard
@@ -1072,6 +1081,14 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           <p className="text-sm text-muted mt-1">
             The timer starts only when you press <span className="font-medium text-ink-light">Start {typeLabel}</span>.
           </p>
+        </div>
+
+        {/* Follow-up explainer (U5) — sets the expectation that each question is a
+            short back-and-forth, not a one-shot answer. Brand-token styled to
+            match the reskinned exam UI. */}
+        <div className="flex items-start gap-2.5 bg-gold/10 border border-gold/30 rounded-xl px-4 py-3 mb-5 text-sm text-ink">
+          <MessageSquare className="w-4 h-4 mt-0.5 flex-shrink-0 text-gold" />
+          <span>Each question is a short conversation — the examiner may ask a few follow-up questions before moving on.</span>
         </div>
 
         {/* At a glance */}
@@ -1186,7 +1203,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           {starting ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</> : `Start ${typeLabel} →`}
         </button>
         <button
-          onClick={() => navigate('/student/dashboard')}
+          onClick={leaveExam}
           className="w-full mt-2 py-2 text-sm text-muted hover:text-ink-light transition-colors"
         >
           Back to dashboard
@@ -1389,7 +1406,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 </button>
               )}
               <button
-                onClick={() => navigate('/student/dashboard')}
+                onClick={leaveExam}
                 className={`px-5 py-2 rounded-lg text-sm font-medium ${isPractice ? 'border border-border text-ink-light hover:bg-parchment/60' : 'bg-navy text-white hover:bg-navy-light'}`}
               >
                 <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
@@ -1448,7 +1465,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             </div>
           )}
           <button
-            onClick={() => navigate('/student/dashboard')}
+            onClick={leaveExam}
             className="px-3 py-1.5 bg-white/10 text-white rounded-lg text-sm hover:bg-white/20"
           >
             <ChevronLeft className="w-4 h-4 inline -mt-0.5" /> <span className="hidden sm:inline">Back</span>
@@ -1478,8 +1495,17 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
 
       {/* Question navigation grid */}
       <div className="bg-white border-x border-border px-3 sm:px-5 py-3">
-        <div className="flex justify-between text-xs text-muted mb-2">
-          <span>Question {current + 1} of {N}</span>
+        {/* U4 — two distinct progress counters, kept visually separate so they
+            aren't confused: the assignment-level question position (left) vs. the
+            follow-up turn within THIS question's conversation (middle). */}
+        <div className="flex items-center justify-between gap-2 text-xs text-muted mb-2">
+          <span className="font-medium text-ink-light">Question {current + 1} of {N}</span>
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gold/10 text-gold font-medium"
+            title="Follow-up turns within this question's conversation"
+          >
+            <MessageSquare className="w-3 h-3" /> Turn {Math.min((cur?.attempts || 0) + 1, MAX_TURNS)} of {MAX_TURNS}
+          </span>
           <span>{attemptedCount} answered &middot; {N - attemptedCount} remaining</span>
         </div>
         <div className="flex gap-1.5 flex-wrap">
@@ -1561,16 +1587,24 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             </div>
           ) : (
             <div className="mb-3">
-              <textarea
-                ref={textareaRef}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Answer the question above... (Cmd+Enter to submit)"
-                disabled={answerMutation.isPending}
-                rows={3}
-                className="w-full px-4 py-3 border border-border rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-gold focus:border-transparent disabled:opacity-50 disabled:bg-parchment/60"
-              />
+              {/* Demo speaking tests are voice-only — the typed-answer box is
+                  hidden; the mic dictates into the (unseen) draft and submits. */}
+              {!isDemo ? (
+                <textarea
+                  ref={textareaRef}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Answer the question above... (Cmd+Enter to submit)"
+                  disabled={answerMutation.isPending}
+                  rows={3}
+                  className="w-full px-4 py-3 border border-border rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-gold focus:border-transparent disabled:opacity-50 disabled:bg-parchment/60"
+                />
+              ) : (
+                <div className="text-center text-sm text-muted py-2">
+                  {listening ? 'Listening — speak your answer…' : 'Tap the mic and speak your answer.'}
+                </div>
+              )}
               <div className="flex gap-2 mt-2">
                 <button
                   onClick={toggleMic}
@@ -1698,7 +1732,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 {questions[current]?.topic || `Question ${current + 1}`}
               </p>
               <p className="text-xs text-muted mt-1">
-                {cur?.attempts || 0} / {MAX_TURNS} turns used
+                Turn {Math.min((cur?.attempts || 0) + 1, MAX_TURNS)} of {MAX_TURNS} in this conversation
               </p>
             </div>
           </div>
@@ -1707,8 +1741,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               so it can't be used as a scaffold on the real assessment. Once the
               answer flow is feeding the live graph (demo), show the "watch it think"
               panel: concepts ignite and causal links draw as they're demonstrated.
-              Otherwise fall back to the static topic-coverage map. */}
-          {isPractice && (
+              Otherwise fall back to the static topic-coverage map.
+              Hidden entirely on demo speaking tests (voice-only, no scaffold). */}
+          {isPractice && !isDemo && (
             <div className="border border-border rounded-xl mt-3 p-3">
               <p className="text-[10px] font-bold uppercase tracking-wide text-muted mb-2 text-center">
                 {graphNodes.length > 0 ? 'Your understanding, live' : 'Concept Map'}

@@ -66,6 +66,7 @@ ASSIGNMENT_CLOSE = "/api/assignments/{assignment_id}/close"
 ASSIGNMENT_DELETE = "/api/assignments/{assignment_id}"
 ASSIGNMENT_PUBLISH = "/api/assignments/{assignment_id}/publish"   # POST: draft -> active (professor)
 ASSIGNMENT_DISCARD = "/api/assignments/{assignment_id}/discard"   # POST: delete a draft (professor)
+ASSIGNMENT_UPDATE = "/api/assignments/{assignment_id}/update"     # POST: edit questions+meta in place, preserving the id (professor)
 MATERIAL_DELETE = "/api/materials/{material_id}"
 ASSIGNMENT_START = "/api/assignments/{assignment_id}/start"
 ASSIGNMENT_RESULTS = "/api/assignments/{assignment_id}/results"

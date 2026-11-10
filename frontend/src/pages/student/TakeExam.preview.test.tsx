@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 // Mock the exam API — EXACTLY the runtime symbols TakeExam imports from ../../api/exam.
@@ -24,12 +24,15 @@ vi.mock('../../api/client', () => ({ get: vi.fn().mockResolvedValue({}) }));
 
 import TakeExam from './TakeExam';
 
-function renderPreview() {
+function renderPreview(onExit: () => void = () => {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
-        <TakeExam assignmentId="a1" preview onExit={() => {}} />
+      <MemoryRouter initialEntries={['/professor/assignments/new']}>
+        <Routes>
+          <Route path="/professor/assignments/new" element={<TakeExam assignmentId="a1" preview onExit={onExit} />} />
+          <Route path="/student/dashboard" element={<div>STUDENT DASHBOARD</div>} />
+        </Routes>
       </MemoryRouter>
     </QueryClientProvider>
   );
@@ -62,5 +65,25 @@ describe('TakeExam preview mode', () => {
     await waitFor(() =>
       expect(screen.getByText(/nothing is saved for students/i)).toBeInTheDocument()
     );
+  });
+
+  // A professor's dry-run must never route into the student area: for a
+  // professor, /student/* bounces to /login and strands the draft.
+  it('Back on the readiness screen exits the preview instead of going to the student dashboard', async () => {
+    const onExit = vi.fn();
+    renderPreview(onExit);
+    fireEvent.click(await screen.findByRole('button', { name: /back to dashboard/i }));
+    expect(onExit).toHaveBeenCalled();
+    expect(screen.queryByText('STUDENT DASHBOARD')).not.toBeInTheDocument();
+  });
+
+  it('Back in the taking phase exits the preview instead of going to the student dashboard', async () => {
+    const onExit = vi.fn();
+    renderPreview(onExit);
+    await enterTaking();
+    await screen.findByText(/nothing is saved for students/i);
+    fireEvent.click(screen.getByRole('button', { name: /^back$/i }));
+    expect(onExit).toHaveBeenCalled();
+    expect(screen.queryByText('STUDENT DASHBOARD')).not.toBeInTheDocument();
   });
 });
