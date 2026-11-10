@@ -631,7 +631,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // On a graded item the in-app EDS and the evaluator's remarks are drafts, not a
   // mark: they stay hidden until the professor releases a grade, so this screen
   // matches the Results page. Practice is exempt, and a professor preview sees all.
-  const showDraftScores = isPractice || preview;
+  // Demo speaking tests are a pure spoken experience: no EDS numbers, no concept
+  // map, no text box (see the render gates below). Practice/preview keep them.
+  const showDraftScores = (isPractice || preview) && !isDemo;
 
   // Auto-speak the latest examiner line (question or probe) as it appears.
   useEffect(() => {
@@ -1585,16 +1587,24 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             </div>
           ) : (
             <div className="mb-3">
-              <textarea
-                ref={textareaRef}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Answer the question above... (Cmd+Enter to submit)"
-                disabled={answerMutation.isPending}
-                rows={3}
-                className="w-full px-4 py-3 border border-border rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-gold focus:border-transparent disabled:opacity-50 disabled:bg-parchment/60"
-              />
+              {/* Demo speaking tests are voice-only — the typed-answer box is
+                  hidden; the mic dictates into the (unseen) draft and submits. */}
+              {!isDemo ? (
+                <textarea
+                  ref={textareaRef}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Answer the question above... (Cmd+Enter to submit)"
+                  disabled={answerMutation.isPending}
+                  rows={3}
+                  className="w-full px-4 py-3 border border-border rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-gold focus:border-transparent disabled:opacity-50 disabled:bg-parchment/60"
+                />
+              ) : (
+                <div className="text-center text-sm text-muted py-2">
+                  {listening ? 'Listening — speak your answer…' : 'Tap the mic and speak your answer.'}
+                </div>
+              )}
               <div className="flex gap-2 mt-2">
                 <button
                   onClick={toggleMic}
@@ -1731,8 +1741,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               so it can't be used as a scaffold on the real assessment. Once the
               answer flow is feeding the live graph (demo), show the "watch it think"
               panel: concepts ignite and causal links draw as they're demonstrated.
-              Otherwise fall back to the static topic-coverage map. */}
-          {isPractice && (
+              Otherwise fall back to the static topic-coverage map.
+              Hidden entirely on demo speaking tests (voice-only, no scaffold). */}
+          {isPractice && !isDemo && (
             <div className="border border-border rounded-xl mt-3 p-3">
               <p className="text-[10px] font-bold uppercase tracking-wide text-muted mb-2 text-center">
                 {graphNodes.length > 0 ? 'Your understanding, live' : 'Concept Map'}
