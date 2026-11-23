@@ -3,8 +3,35 @@ import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2, AlertTriangle } from 'lucide-react';
 import { get, post } from '../../api/client';
+import { getTurnAudio } from '../../api/exam';
 import { Breadcrumbs } from '../../components/Breadcrumbs';
 import { useToast } from '../../components/Toast';
+import { Volume2 } from 'lucide-react';
+
+// Re-listen to a recorded answer (Phase B): fetch a short-lived presigned URL on
+// demand and play it inline, so a professor can confirm a suspected mishear.
+function AnswerAudio({ turnId }: { turnId: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(false);
+  if (url) return <audio controls src={url} className="mt-1 h-8 w-full max-w-sm" />;
+  return (
+    <button
+      type="button"
+      disabled={loading}
+      onClick={async () => {
+        setLoading(true); setErr(false);
+        try {
+          const r = await getTurnAudio(turnId);
+          if (r.url) setUrl(r.url); else setErr(true);
+        } catch { setErr(true); } finally { setLoading(false); }
+      }}
+      className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+    >
+      <Volume2 className="w-3 h-3" /> {loading ? 'Loading…' : err ? 'Recording unavailable' : 'Listen to recording'}
+    </button>
+  );
+}
 
 interface SessionSummary {
   session_id: string;
@@ -53,6 +80,8 @@ interface TurnEvaluation {
   feedback?: string;
   rationale?: string;
   transcription_suspect?: boolean;
+  turn_id?: string;
+  has_audio?: boolean;
   components?: {
     node_coverage?: number | null;
     edge_coverage?: number | null;
@@ -390,6 +419,7 @@ function SessionDetail({
                           </span>
                         )}
                       </p>
+                      {ev.has_audio && ev.turn_id && <AnswerAudio turnId={ev.turn_id} />}
                       {(ev.rationale || ev.feedback) && (
                         <div className="mt-2">
                           <p className="text-xs font-semibold uppercase tracking-wide text-gray-700">Scoring Details</p>

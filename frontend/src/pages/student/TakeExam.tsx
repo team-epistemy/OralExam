@@ -4,7 +4,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen, MessageSquare } from 'lucide-react';
 import { downloadTranscriptPdf, examTranscript } from '../../transcript';
 import { typeNoun, typeNounLower } from '../../assignmentType';
-import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft } from '../../api/exam';
+import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft, getAnswerAudioUrl, uploadAnswerAudio } from '../../api/exam';
 import type { CaseMaterial } from '../../api/exam';
 import { demoMeta, demoCase, demoStart, demoAnswer, demoComplete, demoTts } from '../../api/demo';
 import type { DemoAnswerResponse } from '../../api/demo';
@@ -468,6 +468,10 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // Voice: TTS (ElevenLabs proxy) speaks questions/probes; ASR (Web Speech API) dictates answers.
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const recognitionRef = useRef<{ stop: () => void; start: () => void } | null>(null);
+  // Phase B — per-answer audio capture (authenticated exams only, never demo).
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const spokenRef = useRef<string>('');
   // Org "text-first render" flag (from assignment meta): true = show probe immediately +
   // play TTS async; false = reveal probe text together with the audio. Kept in a ref so
@@ -549,6 +553,39 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     setSpeaking(false);
   }, []);
 
+  // Start capturing the answer audio alongside dictation (best-effort). Never in
+  // the demo (it states "nothing is saved"); silently no-ops if unsupported.
+  const startRecording = useCallback(async () => {
+    if (isDemo || typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+      audioChunksRef.current = [];
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mediaRecorderRef.current = mr;
+      mr.start();
+    } catch { /* mic denied / unsupported — answer still works via text */ }
+  }, [isDemo]);
+
+  // Stop the recorder and resolve the assembled clip (or null if none).
+  const stopRecordingAndGetBlob = useCallback((): Promise<Blob | null> => {
+    const mr = mediaRecorderRef.current;
+    mediaRecorderRef.current = null;
+    const stream = audioStreamRef.current;
+    audioStreamRef.current = null;
+    const cleanup = () => { try { stream?.getTracks().forEach((t) => t.stop()); } catch { /* noop */ } };
+    if (!mr || mr.state === 'inactive') { cleanup(); return Promise.resolve(null); }
+    return new Promise((resolve) => {
+      mr.onstop = () => {
+        const chunks = audioChunksRef.current; audioChunksRef.current = [];
+        cleanup();
+        resolve(chunks.length ? new Blob(chunks, { type: 'audio/webm' }) : null);
+      };
+      try { mr.stop(); } catch { cleanup(); resolve(null); }
+    });
+  }, []);
+
   // Hard-stop the examiner's question audio (not paused — it won't resume).
   // Called on submit, exit, retake, and unmount so a question's TTS never keeps
   // playing after the student has left that question (issue S-E-4.5).
@@ -568,6 +605,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     // Student is taking the floor: cancel any question audio outright (not paused —
     // it won't resume), so the examiner's voice doesn't talk over the answer.
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    void startRecording();   // capture the spoken answer (non-demo, best-effort)
     const rec: any = new Ctor();
     rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
     // Anchor dictation to whatever is in the box *now*; a fresh recognizer per
@@ -886,10 +924,10 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // ── Submit answer mutation ─────────────────────────────────────────────────
 
   const answerMutation = useMutation({
-    mutationFn: async ({ questionIndex, text }: { questionIndex: number; text: string }) => {
+    mutationFn: async ({ questionIndex, text, audioKey }: { questionIndex: number; text: string; audioKey?: string }) => {
       if (!sessionId) throw new Error('No session');
       return isDemo ? demoAnswer(demoToken!, sessionId, questionIndex, text)
-                    : submitAnswer(sessionId, questionIndex, text);
+                    : submitAnswer(sessionId, questionIndex, text, audioKey);
     },
     onSuccess: (data: AnswerResponse, variables) => {
       const { questionIndex } = variables;
@@ -1004,6 +1042,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     if (!draft.trim() || answerMutation.isPending || timerExpired) return;
     const studentText = draft.trim();
     stopMic();          // end dictation so it can't spill into the next turn
+    const subTurn = qData[current]?.attempts || 0;
     setDraft('');
 
     // Append student message immediately
@@ -1016,8 +1055,22 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     );
     scrollBottom();
 
-    answerMutation.mutate({ questionIndex: current, text: studentText });
-  }, [draft, current, answerMutation, scrollBottom, timerExpired, stopMic]);
+    // Capture + upload the spoken answer (best-effort, never blocks grading),
+    // then submit with the audio key so the professor can re-listen.
+    void (async () => {
+      let audioKey: string | undefined;
+      try {
+        const blob = await stopRecordingAndGetBlob();
+        if (!isDemo && sessionId && blob && blob.size > 0) {
+          const { upload_url, audio_key } = await getAnswerAudioUrl(sessionId, current, subTurn);
+          void uploadAnswerAudio(upload_url, blob).catch(() => {}); // fire-and-forget
+          audioKey = audio_key;
+        }
+      } catch { /* audio is best-effort; answer must still submit */ }
+      answerMutation.mutate({ questionIndex: current, text: studentText, audioKey });
+    })();
+  }, [draft, current, answerMutation, scrollBottom, timerExpired, stopMic,
+      qData, isDemo, sessionId, stopRecordingAndGetBlob]);
 
   // ── Keyboard shortcut ──────────────────────────────────────────────────────
 

@@ -73,12 +73,14 @@ ASSIGNMENT_RESULTS = "/api/assignments/{assignment_id}/results"
 ASSIGNMENT_CASE = "/api/assignments/{assignment_id}/case"
 ASSIGNMENT_PREVIEW = "/api/assignments/{assignment_id}/preview"  # GET: read-only student-view data for a professor (no session)
 SESSION_ANSWER = "/api/sessions/{session_id}/answer"
+SESSION_ANSWER_AUDIO_URL = "/api/sessions/{session_id}/answer-audio-url"  # POST: presigned PUT for answer audio (student)
 SESSION_COMPLETE = "/api/sessions/{session_id}/complete"
 SESSION_STATUS = "/api/sessions/{session_id}/status"
 SESSION_STREAM = "/api/sessions/{session_id}/stream"
 
 # ── M7 Evaluation routes ────────────────────────────────────────────────────
 EVALUATION_GET = "/api/evaluations/{turn_id}"
+TURN_AUDIO = "/api/turns/{turn_id}/audio"  # GET: presigned URL to re-listen to an answer (professor)
 GRADES_SESSION = "/api/grades/{session_id}"
 GRADES_RELEASE = "/api/assignments/{assignment_id}/grades/release"
 GRADE_OVERRIDE = "/api/grades/{grade_id}/override"

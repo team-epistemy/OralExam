@@ -4674,6 +4674,14 @@ class SubmitAnswerRequest(BaseModel):
     """POST body for submitting an answer."""
     question_index: int = Field(..., ge=0)
     answer_text: str = Field(..., min_length=1, max_length=MAX_ANSWER_LENGTH)
+    # S3 key of the recorded spoken answer (from answer-audio-url), if captured.
+    audio_key: Optional[str] = Field(default=None, max_length=512)
+
+
+class AnswerAudioUrlRequest(BaseModel):
+    """POST body to mint a presigned PUT for an answer's audio clip."""
+    question_index: int = Field(..., ge=0)
+    sub_turn_index: int = Field(default=0, ge=0)
 
 
 def _register_delivery(app: FastAPI, deps) -> None:
@@ -5573,21 +5581,44 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     )
                     sub_turn_count = cur.fetchone()[0]
 
+                # audio_key column (migration_028) may not exist on an un-migrated
+                # DB; detect once so the INSERT degrades gracefully without it.
+                with repo.conn.cursor() as cur:
+                    cur.execute("""SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='session_turn' AND column_name='audio_key'""")
+                    has_audio_col = cur.fetchone() is not None
+                audio_key = (req.audio_key or None) if has_audio_col else None
+
                 with repo.conn.cursor() as cur:
                     # Each sub-turn is its own row (unique on session+turn+sub_turn),
                     # so a retried submit updates that sub-turn rather than the question.
-                    cur.execute(
-                        """INSERT INTO session_turn
-                           (turn_id, session_id, org_id, turn_index, sub_turn_index,
-                            question_id, student_answer, answered_at)
-                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid, %s, %s)
-                           ON CONFLICT (session_id, turn_index, sub_turn_index)
-                           DO UPDATE SET student_answer = EXCLUDED.student_answer,
-                                         answered_at = EXCLUDED.answered_at
-                           RETURNING turn_id""",
-                        (turn_id, session_id, org_id, question_index, sub_turn_count,
-                         question_id, req.answer_text, now),
-                    )
+                    if has_audio_col:
+                        cur.execute(
+                            """INSERT INTO session_turn
+                               (turn_id, session_id, org_id, turn_index, sub_turn_index,
+                                question_id, student_answer, answered_at, audio_key)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid, %s, %s, %s)
+                               ON CONFLICT (session_id, turn_index, sub_turn_index)
+                               DO UPDATE SET student_answer = EXCLUDED.student_answer,
+                                             answered_at = EXCLUDED.answered_at,
+                                             audio_key = COALESCE(EXCLUDED.audio_key, session_turn.audio_key)
+                               RETURNING turn_id""",
+                            (turn_id, session_id, org_id, question_index, sub_turn_count,
+                             question_id, req.answer_text, now, audio_key),
+                        )
+                    else:
+                        cur.execute(
+                            """INSERT INTO session_turn
+                               (turn_id, session_id, org_id, turn_index, sub_turn_index,
+                                question_id, student_answer, answered_at)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid, %s, %s)
+                               ON CONFLICT (session_id, turn_index, sub_turn_index)
+                               DO UPDATE SET student_answer = EXCLUDED.student_answer,
+                                             answered_at = EXCLUDED.answered_at
+                               RETURNING turn_id""",
+                            (turn_id, session_id, org_id, question_index, sub_turn_count,
+                             question_id, req.answer_text, now),
+                        )
                     actual_turn_id = str(cur.fetchone()[0])
 
                 with repo.conn.cursor() as cur:
@@ -5993,6 +6024,79 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 _release_repo(d, repo)
         return _guard(deps, _do)
 
+    # ── POST /api/sessions/{session_id}/answer-audio-url ──────────────────
+    # A student requests a presigned PUT to upload the audio of their spoken
+    # answer (Phase B of transcription review). Authenticated exams only — the
+    # credential-free demo never records (it states "nothing is saved").
+    @app.post(R.SESSION_ANSWER_AUDIO_URL)
+    def answer_audio_url(
+        session_id: str,
+        req: "AnswerAudioUrlRequest",
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT student_id, org_id, status FROM exam_session WHERE session_id = %s::uuid",
+                        (session_id,))
+                    srow = cur.fetchone()
+                if not srow:
+                    raise AuthorizationError("session not found")
+                if srow[0] != caller.user_id:
+                    raise AuthorizationError("not your session")
+                if srow[2] != "active":
+                    raise AuthorizationError("session is not active")
+                # Deterministic key per (session, question, sub-turn) so a retried
+                # answer overwrites rather than orphaning a clip.
+                key = (f"answer-audio/{str(srow[1])}/{session_id}/"
+                       f"{int(req.question_index)}-{int(req.sub_turn_index)}.webm")
+                url = d["storage"].presign_put(key, "audio/webm", MAX_UPLOAD_BYTES)
+                return {"upload_url": url, "audio_key": key}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/turns/{turn_id}/audio ────────────────────────────────────
+    # A professor re-listens to a recorded answer to confirm a suspected mishear.
+    @app.get(R.TURN_AUDIO)
+    def turn_audio(
+        turn_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                audio_key = None
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute("SELECT audio_key FROM session_turn WHERE turn_id = %s::uuid",
+                                    (turn_id,))
+                        row = cur.fetchone()
+                        audio_key = row[0] if row else None
+                except Exception:
+                    repo.conn.rollback()  # un-migrated DB: no audio column
+                if not audio_key:
+                    return {"status": "no_audio", "url": None}
+                url = d["storage"].presign_get(audio_key, file_name="answer.webm", ttl=600)
+                return {"status": "ok", "url": url}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
     # ── GET /api/sessions/{session_id}/status ─────────────────────────────
     @app.get(R.SESSION_STATUS)
     def session_status(
@@ -6324,7 +6428,22 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                             "edges_demonstrated": comp.get("edges_demonstrated", []),
                         },
                         "rationale": _threshold_rationale(score, er[2], comp, fb),
+                        "has_audio": False,
                     })
+
+                # Mark turns that have a stored audio clip (guarded: audio_key is
+                # migration_028; absent on an un-migrated DB → no audio).
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT turn_id FROM session_turn
+                               WHERE session_id = %s::uuid AND audio_key IS NOT NULL""",
+                            (session_id,))
+                        with_audio = {str(r[0]) for r in cur.fetchall()}
+                    for e in evaluations:
+                        e["has_audio"] = e["turn_id"] in with_audio
+                except Exception:
+                    repo.conn.rollback()
 
                 if grade_row:
                     comp_all = grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}")

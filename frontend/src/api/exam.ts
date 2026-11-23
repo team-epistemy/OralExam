@@ -86,11 +86,34 @@ export async function submitAnswer(
   sessionId: string,
   questionIndex: number,
   answerText: string,
+  audioKey?: string,
 ): Promise<AnswerResponse> {
   return post<AnswerResponse>(`/api/sessions/${sessionId}/answer`, {
     question_index: questionIndex,
     answer_text: answerText,
+    ...(audioKey ? { audio_key: audioKey } : {}),
   });
+}
+
+// Phase B — answer audio. Mint a presigned PUT, upload the recorded clip, and
+// (professor) fetch a presigned URL to re-listen. Authenticated exams only.
+export async function getAnswerAudioUrl(
+  sessionId: string, questionIndex: number, subTurnIndex: number,
+): Promise<{ upload_url: string; audio_key: string }> {
+  return post(`/api/sessions/${sessionId}/answer-audio-url`, {
+    question_index: questionIndex, sub_turn_index: subTurnIndex,
+  });
+}
+
+export async function uploadAnswerAudio(uploadUrl: string, blob: Blob): Promise<void> {
+  const res = await fetch(uploadUrl, {
+    method: 'PUT', headers: { 'Content-Type': 'audio/webm' }, body: blob,
+  });
+  if (!res.ok) throw new Error(`audio upload failed (${res.status})`);
+}
+
+export async function getTurnAudio(turnId: string): Promise<{ status: string; url: string | null }> {
+  return get(`/api/turns/${turnId}/audio`);
 }
 
 export async function getSessionStatus(sessionId: string): Promise<SessionStatus> {
