@@ -131,14 +131,73 @@ EXAMINER_EVAL_TEMPLATE = (
     "reusable phrase like 'tell me more', 'explain the mechanism', or 'why does that "
     "matter' — the probe must only make sense as a reply to what they just said.\n"
     "{{PROBE_DIRECTIVE}}\n"
+    "Set stressed=true if the student expresses distress or an inability to continue "
+    "(e.g. 'I'm stressed', 'I don't know this', 'I can't', or asks to skip).\n"
     "Respond ONLY with minified JSON, no prose, no code fences:\n"
-    '{"clarify": false, "answered": true, "adequate": false, '
+    '{"clarify": false, "stressed": false, "answered": true, "adequate": false, '
     '"feedback": "one sentence", "probe": "follow-up question", '
     '"eds": {"nodes_demonstrated": ["list of node labels demonstrated"], '
     '"edges_demonstrated": [0, 1], '
     '"recitation_score": 0.3, '
     '"novel_extensions": ["any valid concepts beyond expected path"]}}'
 )
+
+
+# When a student keeps giving the same answer, nudge the examiner to reword the
+# question instead of probing deeper (pilot: Matteo repeated "time value of money"
+# ~3x and the examiner kept digging). Threaded into the prompt builders' probe_directive.
+_STUCK_REPHRASE_DIRECTIVE = (
+    "IMPORTANT: the student has repeated essentially the same answer and seems stuck. "
+    "Do NOT probe deeper or ask for more detail. Instead, REPHRASE the original question "
+    "in simpler, different words — a fresh angle to unstick them — as the probe."
+)
+
+# Spoken line when the examiner gives up probing a stuck question and advances.
+_MOVE_ON_LINE = "That's alright — let's move on to the next question."
+
+# Phrases that signal distress / inability to continue, as a deterministic fallback
+# so the stress path fires even if the model misses it or on the heuristic eval path.
+_STRESS_PHRASES = (
+    "i'm stressed", "i am stressed", "im stressed", "i'm so stressed",
+    "i don't know this", "i dont know this", "i don't know any of this",
+    "i can't do this", "i cant do this", "i give up", "i can't think",
+    "can we skip", "can i skip", "please skip", "too hard", "this is too hard",
+    "i'm panicking", "i am panicking", "i'm freaking out", "i'm overwhelmed",
+)
+
+
+def _normalize_answer(text):
+    """Lowercase + collapse whitespace for similarity/keyword comparison."""
+    import re as _re
+    return _re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _count_trailing_repeats(prior_answers, answer_text, threshold=0.82):
+    """How many of the immediately-preceding answers are ~the same as this one.
+
+    Walks backward through ``prior_answers`` (oldest→newest list of the student's
+    earlier answers on THIS question) counting consecutive entries whose
+    SequenceMatcher ratio against the current answer is >= threshold. 0 = this
+    answer is novel; 1 = one prior near-duplicate (2nd time saying it); etc.
+    """
+    import difflib as _difflib
+    cur = _normalize_answer(answer_text)
+    if not cur:
+        return 0
+    n = 0
+    for prev in reversed(prior_answers or []):
+        p = _normalize_answer(prev)
+        if p and _difflib.SequenceMatcher(None, cur, p).ratio() >= threshold:
+            n += 1
+        else:
+            break
+    return n
+
+
+def _looks_stressed(text):
+    """True if the answer plainly expresses distress / inability to continue."""
+    t = _normalize_answer(text)
+    return any(phrase in t for phrase in _STRESS_PHRASES)
 
 
 def build_examiner_eval_prompt(repo, org_id, question_text, expected_path,
@@ -215,8 +274,10 @@ EXAMINER_PROBE_TEMPLATE = (
     "- Never name, define, or hint at a concept the student has not already produced.\n"
     "- Never join two questions with \"and\", \"or\", or \"also\". Plain spoken sentence.\n"
     "{{PROBE_DIRECTIVE}}\n"
+    "Set stressed=true if the student expresses distress or an inability to continue "
+    "(e.g. 'I'm stressed', 'I don't know this', 'I can't', or asks to skip).\n"
     "Respond ONLY with minified JSON, no prose, no code fences:\n"
-    '{"clarify": false, "answered": true, "adequate": false, '
+    '{"clarify": false, "stressed": false, "answered": true, "adequate": false, '
     '"feedback": "one-sentence internal assessment, always present", '
     '"probe": "ONE grounded question, <=25 words, no acknowledgment"}'
 )
@@ -3585,6 +3646,119 @@ def _build_question_dicts(settings, *, concepts, chunks, difficulty, domain, cou
     return out
 
 
+def _read_session_overrides(repo, session_id):
+    """Per-session question overrides ({position -> {question_id,text,...}}), or {}.
+    Guarded so a DB that predates migration_027 simply reports no overrides."""
+    import json as _json
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute("SELECT question_overrides FROM exam_session WHERE session_id = %s::uuid",
+                        (session_id,))
+            row = cur.fetchone()
+        if row and row[0]:
+            return row[0] if isinstance(row[0], dict) else _json.loads(row[0])
+    except Exception:
+        repo.conn.rollback()
+    return {}
+
+
+def _stress_replacement(repo, settings, org_id, course_id, created_by,
+                        session_id, question_index, current_concept_ids):
+    """Source a different, easier question from the course concept banks when a
+    student signals stress, persist it to the question table (so FK + EDS hold),
+    record it as a per-session override for this position, and return
+    {question_id, text, concept_id, topic} — or None if nothing could be sourced
+    (empty graph, generation failure, or this position was already swapped once).
+
+    The original (stressful) turn is left unscored — no evaluation/aggregate row
+    is written for it — so the swap carries no penalty.
+    """
+    import json as _json, uuid as _uuid
+
+    # One swap per position: if this index already has an override, bail (the
+    # caller then falls back to a gentle move-on instead of swapping again).
+    overrides = _read_session_overrides(repo, session_id)
+    if str(question_index) in overrides:
+        return None
+
+    # Pick a DIFFERENT concept from the course graph (avoid the one they're stuck
+    # on); "recall" difficulty makes the replacement an easier warm-up.
+    try:
+        graph = _query_graph_version(repo, org_id, course_id)
+    except Exception:
+        repo.conn.rollback()
+        return None
+    concepts = (graph or {}).get("concepts") or []
+    if not concepts:
+        return None
+    cur_set = {str(c).lower() for c in (current_concept_ids or [])}
+    candidates = [c for c in concepts
+                  if str(c.get("id") or c.get("label") or "").lower() not in cur_set
+                  and str(c.get("label") or "").lower() not in cur_set] or concepts
+    chosen = candidates[0]
+
+    try:
+        built = _build_question_dicts(
+            settings, concepts=[{"label": chosen.get("label") or chosen.get("id") or "the topic"}],
+            chunks=[], difficulty="recall", domain="this course", count=1)
+    except Exception as exc:
+        logger.warning("stress replacement generation failed: %s", exc)
+        repo.conn.rollback()
+        return None
+    if not built:
+        return None
+    q = built[0]
+    new_qid = str(_uuid.uuid4())
+    text = q.get("question") or q.get("q") or ""
+    topic = q.get("topic") or chosen.get("label") or "general"
+    concept_ids = q.get("concept_ids") or [chosen.get("id") or topic]
+    expected_path = q.get("expected_path") or {}
+    if not text:
+        return None
+
+    # Persist the replacement question (approved) so session_turn/evaluation FKs
+    # resolve and the override path can fetch its expected_path for EDS.
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                """SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'question' AND column_name = 'expected_path'""")
+            has_ep = cur.fetchone() is not None
+            diff_json = _json.dumps({"level": "recall", "eds_score": 0.3})
+            if has_ep:
+                cur.execute(
+                    """INSERT INTO question
+                       (question_id, course_id, org_id, concept_ids, text,
+                        question_type, difficulty, status, created_by, source_chunks, expected_path)
+                       VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                               'oral', %s::jsonb, 'approved', %s, '[]'::jsonb, %s::jsonb)""",
+                    (new_qid, course_id, org_id, _json.dumps(concept_ids), text,
+                     diff_json, created_by, _json.dumps(expected_path)))
+            else:
+                cur.execute(
+                    """INSERT INTO question
+                       (question_id, course_id, org_id, concept_ids, text,
+                        question_type, difficulty, status, created_by, source_chunks)
+                       VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                               'oral', %s::jsonb, 'approved', %s, '[]'::jsonb)""",
+                    (new_qid, course_id, org_id, _json.dumps(concept_ids), text,
+                     diff_json, created_by))
+            # Record the override for this position (jsonb merge on the session).
+            overrides[str(question_index)] = {
+                "question_id": new_qid, "text": text,
+                "concept_ids": concept_ids, "topic": topic}
+            cur.execute(
+                "UPDATE exam_session SET question_overrides = %s::jsonb WHERE session_id = %s::uuid",
+                (_json.dumps(overrides), session_id))
+        repo.conn.commit()
+    except Exception as exc:
+        logger.warning("stress replacement persist failed: %s", exc)
+        repo.conn.rollback()
+        return None
+
+    return {"question_id": new_qid, "text": text, "concept_id": concept_ids[0], "topic": topic}
+
+
 def _register_questions(app: FastAPI, deps) -> None:
     """Question generation (direct Bedrock Converse) and review endpoints."""
 
@@ -5307,24 +5481,34 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     raise AuthorizationError("assignment not found")
                 question_set_id = str(qs_row[0])
 
-                with repo.conn.cursor() as cur:
-                    cur.execute(
-                        """SELECT q.question_id, q.text, q.concept_ids
-                           FROM question_set_membership qsm
-                           JOIN question q ON q.question_id = qsm.question_id
-                           WHERE qsm.question_set_id = %s::uuid AND qsm.position = %s""",
-                        (question_set_id, question_index),
-                    )
-                    qrow = cur.fetchone()
+                # A stress swap may have replaced the question at this position for
+                # THIS session (see _stress_replacement). The override wins over the
+                # shared question_set so the student answers the backup question.
+                session_overrides = _read_session_overrides(repo, session_id)
+                ov = session_overrides.get(str(question_index))
+                if ov and ov.get("question_id"):
+                    question_id = str(ov["question_id"])
+                    question_text = ov.get("text") or ""
+                    concept_ids_for_question = ov.get("concept_ids") if isinstance(ov.get("concept_ids"), list) else []
+                else:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT q.question_id, q.text, q.concept_ids
+                               FROM question_set_membership qsm
+                               JOIN question q ON q.question_id = qsm.question_id
+                               WHERE qsm.question_set_id = %s::uuid AND qsm.position = %s""",
+                            (question_set_id, question_index),
+                        )
+                        qrow = cur.fetchone()
 
-                if not qrow:
-                    raise AuthorizationError(
-                        f"no question at index {question_index} in this assignment"
-                    )
+                    if not qrow:
+                        raise AuthorizationError(
+                            f"no question at index {question_index} in this assignment"
+                        )
 
-                question_id = str(qrow[0])
-                question_text = qrow[1]
-                concept_ids_for_question = qrow[2] if isinstance(qrow[2], list) else []
+                    question_id = str(qrow[0])
+                    question_text = qrow[1]
+                    concept_ids_for_question = qrow[2] if isinstance(qrow[2], list) else []
 
                 # ── Fetch expected_path for EDS scoring ──────────────────
                 expected_path = {}
@@ -5418,15 +5602,50 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     )
                     prior_answers = [r[0] for r in cur.fetchall() if r[0]]
 
+                # ── Stress fallback ──────────────────────────────────────
+                # A student signalling distress ("I'm stressed, I don't know this")
+                # gets a different, easier question from the course banks instead of
+                # more probing (pilot feedback). Deterministic keyword detection, so
+                # it fires before (and independent of) the eval model. One swap per
+                # position; the original turn is recorded but left unscored.
+                if not is_preview and _looks_stressed(req.answer_text):
+                    replacement = _stress_replacement(
+                        repo, settings, org_id, course_id, caller.user_id,
+                        session_id, question_index, concept_ids_for_question)
+                    if replacement:
+                        return {
+                            "answered": False, "adequate": False,
+                            "feedback": "Student expressed stress; swapped to an easier question.",
+                            "probe": "No problem — let's set that one aside and try a different question.",
+                            "eds_delta": 0, "stressed": True,
+                            "replacement_question": {
+                                "text": replacement["text"],
+                                "topic": replacement["topic"],
+                                "concept_id": replacement["concept_id"],
+                            },
+                        }
+
+                # ── Stuck detection ──────────────────────────────────────
+                # Repeating essentially the same answer: on the 2nd near-duplicate,
+                # rephrase the question instead of probing deeper; on the 3rd, move on
+                # (pilot: Matteo repeated "time value of money" ~3x). Deterministic,
+                # mode-agnostic — works in sonnet, hybrid, and the heuristic fallback.
+                repeats = _count_trailing_repeats(prior_answers, req.answer_text)
+                move_on = repeats >= 2
+
                 # ── Decide evaluation strategy based on expected_path ────
                 use_eds_formula = bool(expected_path.get("nodes"))
 
                 # Steer this turn's probe at whatever the student has not yet covered,
                 # traversing the question's own sub-graph instead of letting the model
-                # re-probe ground already demonstrated.
-                probe_directive = ""
+                # re-probe ground already demonstrated. When the student is stuck
+                # repeating themselves (repeats == 1), rephrase instead of going deeper.
+                probe_directive = _STUCK_REPHRASE_DIRECTIVE if repeats == 1 else ""
 
-                if use_eds_formula:
+                if use_eds_formula and repeats != 1:
+                    # Skip probe-targeting when stuck (repeats==1): the rephrase
+                    # directive already owns probe_directive — don't bury it under a
+                    # deeper target that re-probes the same ground.
                     seen_n, seen_e = _prior_coverage(repo, session_id, question_index)
                     target = _probe_target(expected_path, seen_n, seen_e)
                     if target:
@@ -5523,8 +5742,9 @@ def _register_delivery(app: FastAPI, deps) -> None:
                               expected_path, ctx, h_answered, h_adequate, h_feedback, h_probe),
                         daemon=True).start()
                     return {"answered": h_answered, "adequate": h_adequate,
-                            "feedback": h_feedback, "probe": h_probe,
-                            "eds_delta": 0, "eds_pending": True}
+                            "feedback": h_feedback,
+                            "probe": _MOVE_ON_LINE if move_on else h_probe,
+                            "eds_delta": 0, "eds_pending": True, "move_on": move_on}
 
                 answered = False
                 adequate = False
@@ -5597,8 +5817,9 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "answered": answered,
                         "adequate": adequate,
                         "feedback": feedback,
-                        "probe": probe,
+                        "probe": _MOVE_ON_LINE if move_on else probe,
                         "eds_delta": eds_delta,
+                        "move_on": move_on,
                     }
 
                 # ── EDS Formula Path ─────────────────────────────────────
@@ -5736,9 +5957,10 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     "answered": answered,
                     "adequate": adequate,
                     "feedback": feedback,
-                    "probe": probe,
+                    "probe": _MOVE_ON_LINE if move_on else probe,
                     "eds_delta": int(eds_question * 10),
                     "eds_question": eds_question,
+                    "move_on": move_on,
                     "eds_components": {
                         "node_score": agg_node_score,
                         "edge_score": agg_edge_score,

@@ -893,15 +893,41 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     },
     onSuccess: (data: AnswerResponse, variables) => {
       const { questionIndex } = variables;
+
+      // ── Stress fallback: the backend swapped in an easier backup question for
+      //    this slot. Replace the question in place, reset its conversation, and
+      //    narrate the reassurance + new question. No score is committed here.
+      if (data.replacement_question) {
+        const rq = data.replacement_question;
+        const reassure = data.probe || "No problem — let's try a different question.";
+        setQuestions((prev) => prev.map((q, i) =>
+          i === questionIndex ? { ...q, text: rq.text, topic: rq.topic } : q));
+        setQData((prev) => prev.map((q, i) => i === questionIndex ? {
+          ...q,
+          turns: [...q.turns,
+            { role: 'evaluator' as const, text: reassure },
+            { role: 'evaluator' as const, text: `Question ${questionIndex + 1}. ${rq.text}` }],
+          attempts: 0, attempted: false, done: false, score: 0, edsComponents: null,
+        } : q));
+        setDraft('');
+        spokenRef.current = '';   // let the auto-speak narrate the new question
+        scrollBottom();
+        return;
+      }
+
       const attempt = (qData[questionIndex]?.attempts || 0) + 1;
       const maxed = attempt >= MAX_TURNS;
-      const advance = maxed;
+      // Advance on the turn cap OR when the backend decides the student is stuck
+      // repeating the same answer and we should move on.
+      const advance = maxed || !!data.move_on;
 
       // Show the student ONLY the examiner's spoken probe. `feedback` is an internal
       // grader assessment (used for scoring/professor review), never surfaced here.
       let bubble: string;
       if (advance) {
-        bubble = 'Answer recorded.';
+        // On a move-on, speak the examiner's actual move-on line; on the plain
+        // turn cap, the neutral "recorded" acknowledgement.
+        bubble = data.move_on ? (data.probe || 'Let’s move on.') : 'Answer recorded.';
       } else {
         bubble = data.probe || 'Could you say more about your reasoning?';
       }
@@ -938,6 +964,11 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           setLitEdges((prev) => { const s = new Set(prev); (g.edges_detected || []).forEach((e) => s.add(`${e.src}|${e.dst}`)); return Array.from(s); });
         }
         scrollBottom();
+        // On a stuck move-on, gently advance to the next question after the
+        // examiner's line has been shown (and had a beat to narrate).
+        if (data.move_on && questionIndex < N - 1) {
+          setTimeout(() => goTo(questionIndex + 1), 1400);
+        }
       };
 
       const canTts = ttsOn && ttsAvailable;

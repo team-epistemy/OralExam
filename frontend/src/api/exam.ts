@@ -28,6 +28,11 @@ export interface AnswerResponse {
   eds_delta: number;
   eds_question?: number;
   eds_components?: EDSComponents;
+  // Examiner gave up probing a stuck question (repeated answer) → advance.
+  move_on?: boolean;
+  // Student signalled stress → swap in an easier backup question in place.
+  stressed?: boolean;
+  replacement_question?: { text: string; topic: string; concept_id: string };
 }
 
 export interface SessionStatus {
