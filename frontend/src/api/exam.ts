@@ -33,6 +33,8 @@ export interface AnswerResponse {
   // Student signalled stress → swap in an easier backup question in place.
   stressed?: boolean;
   replacement_question?: { text: string; topic: string; concept_id: string };
+  // Examiner flagged this answer as a likely speech-to-text error (for review).
+  transcription_suspect?: boolean;
 }
 
 export interface SessionStatus {

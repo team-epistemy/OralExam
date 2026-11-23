@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2 } from 'lucide-react';
+import { Users, BarChart3, CheckCircle2, ChevronDown, ChevronUp, X, Save, Loader2, AlertTriangle } from 'lucide-react';
 import { get, post } from '../../api/client';
 import { Breadcrumbs } from '../../components/Breadcrumbs';
 import { useToast } from '../../components/Toast';
@@ -52,6 +52,7 @@ interface TurnEvaluation {
   eds_delta: number;
   feedback?: string;
   rationale?: string;
+  transcription_suspect?: boolean;
   components?: {
     node_coverage?: number | null;
     edge_coverage?: number | null;
@@ -108,6 +109,8 @@ function groupByQuestion(evals: TurnEvaluation[]) {
         question_text: attempts.find((a) => a.question_text)?.question_text || '',
         eds_score: best.eds_score,
         eds_bucket: best.eds_bucket,
+        // Any attempt the examiner flagged as a likely speech-to-text error.
+        transcription_suspect: attempts.some((a) => a.transcription_suspect),
         attempts,
       };
     });
@@ -362,9 +365,17 @@ function SessionDetail({
               <div key={group.turn_index} className="bg-white rounded-lg border border-gray-100 p-4">
                 <div className="flex items-start justify-between gap-3 mb-2">
                   <p className="text-sm font-medium text-gray-900">Q{group.turn_index + 1}. {group.question_text || 'Question'}</p>
-                  <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${edsBgColor(group.eds_score * 100)} ${edsColor(group.eds_score * 100)}`}>
-                    {Math.round(group.eds_score * 100)} · {group.eds_bucket}
-                  </span>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {group.transcription_suspect && (
+                      <span className="inline-flex items-center gap-1 text-xs font-medium whitespace-nowrap px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200"
+                            title="An answer here looks like a possible speech-to-text error — review the transcript.">
+                        <AlertTriangle className="w-3 h-3" /> Review — possible mishear
+                      </span>
+                    )}
+                    <span className={`text-xs font-semibold whitespace-nowrap px-2 py-0.5 rounded ${edsBgColor(group.eds_score * 100)} ${edsColor(group.eds_score * 100)}`}>
+                      {Math.round(group.eds_score * 100)} · {group.eds_bucket}
+                    </span>
+                  </div>
                 </div>
                 <div className="space-y-2">
                   {group.attempts.map((ev, i) => (
@@ -372,7 +383,13 @@ function SessionDetail({
                       {group.attempts.length > 1 && (
                         <p className="text-[11px] uppercase tracking-wide text-gray-400">{i === 0 ? 'Initial answer' : `Probe response ${i}`}</p>
                       )}
-                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">no answer</em>}</p>
+                      <p className="text-sm text-gray-700"><span className="text-gray-400">Answer:</span>{' '}{ev.student_answer || <em className="text-gray-400">no answer</em>}
+                        {ev.transcription_suspect && (
+                          <span className="ml-2 inline-flex items-center gap-1 text-[11px] font-medium text-amber-700" title="This response may be a speech-to-text error.">
+                            <AlertTriangle className="w-3 h-3" /> possible mishear
+                          </span>
+                        )}
+                      </p>
                       {(ev.rationale || ev.feedback) && (
                         <div className="mt-2">
                           <p className="text-xs font-semibold uppercase tracking-wide text-gray-700">Scoring Details</p>

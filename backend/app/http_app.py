@@ -133,8 +133,12 @@ EXAMINER_EVAL_TEMPLATE = (
     "{{PROBE_DIRECTIVE}}\n"
     "Set stressed=true if the student expresses distress or an inability to continue "
     "(e.g. 'I'm stressed', 'I don't know this', 'I can't', or asks to skip).\n"
+    "Set transcription_suspect=true if the answer reads like a speech-to-text error — "
+    "garbled, incoherent, or semantically disconnected from the question in a way that "
+    "suggests mis-transcription (a misheard word) rather than a genuinely wrong answer.\n"
     "Respond ONLY with minified JSON, no prose, no code fences:\n"
-    '{"clarify": false, "stressed": false, "answered": true, "adequate": false, '
+    '{"clarify": false, "stressed": false, "transcription_suspect": false, '
+    '"answered": true, "adequate": false, '
     '"feedback": "one sentence", "probe": "follow-up question", '
     '"eds": {"nodes_demonstrated": ["list of node labels demonstrated"], '
     '"edges_demonstrated": [0, 1], '
@@ -276,8 +280,12 @@ EXAMINER_PROBE_TEMPLATE = (
     "{{PROBE_DIRECTIVE}}\n"
     "Set stressed=true if the student expresses distress or an inability to continue "
     "(e.g. 'I'm stressed', 'I don't know this', 'I can't', or asks to skip).\n"
+    "Set transcription_suspect=true if the answer reads like a speech-to-text error — "
+    "garbled or semantically disconnected from the question in a way that suggests a "
+    "misheard word rather than a wrong answer.\n"
     "Respond ONLY with minified JSON, no prose, no code fences:\n"
-    '{"clarify": false, "stressed": false, "answered": true, "adequate": false, '
+    '{"clarify": false, "stressed": false, "transcription_suspect": false, '
+    '"answered": true, "adequate": false, '
     '"feedback": "one-sentence internal assessment, always present", '
     '"probe": "ONE grounded question, <=25 words, no acknowledgment"}'
 )
@@ -5679,8 +5687,11 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "the specific thing they said (or the step they skipped) and push on that exact gap. "
                         "Never emit a generic, reusable phrase like 'tell me more' or 'explain the "
                         "mechanism'; the probe should only make sense as a reply to what they just said. "
+                        "Set transcription_suspect=true if the answer reads like a speech-to-text "
+                        "error — garbled or disconnected from the question in a way that suggests a "
+                        "misheard word rather than a wrong answer. "
                         "Respond ONLY with minified JSON, no prose and no code fences: "
-                        '{"clarify": bool, "answered": bool, "adequate": bool, '
+                        '{"clarify": bool, "transcription_suspect": bool, "answered": bool, "adequate": bool, '
                         '"feedback": "one sentence on what was strong or thin", '
                         '"probe": "ONE short follow-up that quotes/paraphrases the student and targets their specific gap"}'
                     )
@@ -5708,16 +5719,19 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         h_adequate = bool(pj.get("adequate", False))
                         h_feedback = (pj.get("feedback") or "").strip()
                         h_probe = (pj.get("probe") or "").strip()
+                        h_suspect = bool(pj.get("transcription_suspect", False))
                     except Exception as eval_err:
                         logger.warning("Hybrid Haiku probe failed: %s", eval_err)
                         h_answered, h_adequate, h_feedback, h_probe = _heuristic_eval(
                             req.answer_text)
+                        h_suspect = False
                     # Preliminary evaluation row; EDS score filled in by the async worker.
                     # eds_bucket must satisfy evaluation_bucket_chk (low|medium|high), so use
                     # a provisional bucket from answered/adequate; the async EDS overwrites it.
                     # `eds_pending` in raw_llm_output is the real "not yet scored" signal.
                     prelim = {"answered": h_answered, "adequate": h_adequate,
                               "feedback": h_feedback, "probe": h_probe,
+                              "transcription_suspect": h_suspect,
                               "eds_pending": True, "eval_mode": "hybrid"}
                     prelim_bucket = ("high" if h_adequate
                                      else ("medium" if h_answered else "low"))
@@ -5744,13 +5758,15 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     return {"answered": h_answered, "adequate": h_adequate,
                             "feedback": h_feedback,
                             "probe": _MOVE_ON_LINE if move_on else h_probe,
-                            "eds_delta": 0, "eds_pending": True, "move_on": move_on}
+                            "eds_delta": 0, "eds_pending": True, "move_on": move_on,
+                            "transcription_suspect": h_suspect}
 
                 answered = False
                 adequate = False
                 feedback = ""
                 probe = ""
                 eds_delta = 0
+                transcription_suspect = False
                 parsed = {}
 
                 try:
@@ -5770,6 +5786,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     adequate = bool(parsed.get("adequate", False))
                     feedback = (parsed.get("feedback") or "").strip()
                     probe = (parsed.get("probe") or "").strip()
+                    transcription_suspect = bool(parsed.get("transcription_suspect", False))
                 except Exception as eval_err:
                     logger.warning("Bedrock Socratic eval failed: %s", eval_err)
                     answered, adequate, feedback, probe = _heuristic_eval(
@@ -5793,6 +5810,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "feedback": feedback,
                         "probe": probe,
                         "eds_delta": eds_delta,
+                        "transcription_suspect": transcription_suspect,
                     }
                     with repo.conn.cursor() as cur:
                         cur.execute(
@@ -5820,6 +5838,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "probe": _MOVE_ON_LINE if move_on else probe,
                         "eds_delta": eds_delta,
                         "move_on": move_on,
+                        "transcription_suspect": transcription_suspect,
                     }
 
                 # ── EDS Formula Path ─────────────────────────────────────
@@ -5903,6 +5922,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     "probe": probe,
                     "eds_delta": int(eds_question * 10),
                     "eds_question": eds_question,
+                    "transcription_suspect": transcription_suspect,
                 }
                 with repo.conn.cursor() as cur:
                     cur.execute(
@@ -5961,6 +5981,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     "eds_delta": int(eds_question * 10),
                     "eds_question": eds_question,
                     "move_on": move_on,
+                    "transcription_suspect": transcription_suspect,
                     "eds_components": {
                         "node_score": agg_node_score,
                         "edge_score": agg_edge_score,
@@ -6294,6 +6315,7 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                         "adequate": raw.get("adequate", False),
                         "feedback": fb,
                         "eds_delta": raw.get("eds_delta", 0),
+                        "transcription_suspect": bool(raw.get("transcription_suspect", False)),
                         "components": {
                             "node_coverage": comp.get("node_score"),
                             "edge_coverage": comp.get("edge_score"),
