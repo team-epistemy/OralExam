@@ -1225,6 +1225,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Answer by voice (microphone) or by typing — your choice, and you can switch anytime.</li>
             <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Your progress auto-saves; if you refresh, you'll resume where you left off.</li>
             <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Keep this {typeLower} open in a single browser tab.</li>
+            {!isDemo && (
+              <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> When you answer by voice, your spoken answers are recorded so your instructor can review them. Recordings are kept for 30 days.</li>
+            )}
           </ul>
         </div>
 
