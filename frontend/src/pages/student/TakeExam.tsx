@@ -4,7 +4,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen, MessageSquare } from 'lucide-react';
 import { downloadTranscriptPdf, examTranscript } from '../../transcript';
 import { typeNoun, typeNounLower } from '../../assignmentType';
-import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft, getAnswerAudioUrl, uploadAnswerAudio } from '../../api/exam';
+import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft, getAnswerAudioUrl, uploadAnswerAudio, recordIntegrityEvent, type IntegrityEvent } from '../../api/exam';
 import type { CaseMaterial } from '../../api/exam';
 import { demoMeta, demoCase, demoStart, demoAnswer, demoComplete, demoTts } from '../../api/demo';
 import type { DemoAnswerResponse } from '../../api/demo';
@@ -858,6 +858,42 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     });
     if (!ok) setPersistWarning(true);
   }, [assignmentId, sessionId, questions, qData, current, phase, startTime, durationMinutes, preview]);
+
+  // ── Exam integrity logging (detect-and-flag) ───────────────────────────────
+  // Authenticated exams only, during the attempt: report tab switches, window
+  // blur, paste/copy, context-menu, and fullscreen-exit so the professor can see
+  // them in GradeView. Detection only — a browser can't block other apps — and
+  // non-punitive. Each event type is throttled so a flurry counts once.
+  useEffect(() => {
+    if (preview || isDemo || !sessionId || phase !== 'taking') return;
+    const last: Record<string, number> = {};
+    const report = (event: IntegrityEvent) => {
+      const now = Date.now();
+      if (last[event] && now - last[event] < 2000) return;   // throttle per type
+      last[event] = now;
+      void recordIntegrityEvent(sessionId, event).catch(() => {});
+    };
+    const onVis = () => { if (document.hidden) report('tab_hidden'); };
+    const onBlur = () => report('window_blur');
+    const onPaste = () => report('paste');
+    const onCopy = () => report('copy');
+    const onCtx = () => report('context_menu');
+    const onFs = () => { if (!document.fullscreenElement) report('fullscreen_exit'); };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('paste', onPaste);
+    document.addEventListener('copy', onCopy);
+    document.addEventListener('contextmenu', onCtx);
+    document.addEventListener('fullscreenchange', onFs);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('paste', onPaste);
+      document.removeEventListener('copy', onCopy);
+      document.removeEventListener('contextmenu', onCtx);
+      document.removeEventListener('fullscreenchange', onFs);
+    };
+  }, [preview, isDemo, sessionId, phase]);
 
   // ── Countdown timer ────────────────────────────────────────────────────────
 

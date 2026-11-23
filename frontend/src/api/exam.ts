@@ -116,6 +116,14 @@ export async function getTurnAudio(turnId: string): Promise<{ status: string; ur
   return get(`/api/turns/${turnId}/audio`);
 }
 
+// Report a client-side integrity event (tab switch, paste, …) during an exam.
+// Detection only + non-punitive; fire-and-forget from the caller.
+export type IntegrityEvent =
+  | 'tab_hidden' | 'window_blur' | 'paste' | 'copy' | 'context_menu' | 'fullscreen_exit';
+export async function recordIntegrityEvent(sessionId: string, event: IntegrityEvent): Promise<void> {
+  await post(`/api/sessions/${sessionId}/integrity`, { event });
+}
+
 export async function getSessionStatus(sessionId: string): Promise<SessionStatus> {
   return get<SessionStatus>(`/api/sessions/${sessionId}/status`);
 }

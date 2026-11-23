@@ -41,6 +41,21 @@ interface SessionSummary {
   overall_eds: number | null;
   completed_at: string | null;
   anonymized?: boolean;
+  integrity_flags?: Record<string, number>;
+}
+
+// Compact "3 tab-switches · 2 pastes" summary from the integrity counts.
+const INTEGRITY_LABELS: Record<string, string> = {
+  tab_hidden: 'tab-switch', window_blur: 'left window', paste: 'paste',
+  copy: 'copy', context_menu: 'right-click', fullscreen_exit: 'left fullscreen',
+};
+function integritySummary(flags?: Record<string, number>): string {
+  if (!flags) return '';
+  const parts = Object.entries(flags)
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `${n} ${INTEGRITY_LABELS[k] || k}${n > 1 && !/s$/.test(INTEGRITY_LABELS[k] || k) ? 's' : ''}`);
+  return parts.join(' · ');
 }
 
 interface AssignmentDetail {
@@ -333,7 +348,15 @@ function SessionRow({
   return (
     <>
       <tr className="hover:bg-gray-50 cursor-pointer transition-colors" onClick={onToggle}>
-        <td className="px-5 py-3"><p className="text-sm font-medium text-gray-900">{session.student_email}</p></td>
+        <td className="px-5 py-3">
+          <p className="text-sm font-medium text-gray-900">{session.student_email}</p>
+          {integritySummary(session.integrity_flags) && (
+            <span className="mt-0.5 inline-flex items-center gap-1 text-[11px] font-medium text-amber-700"
+                  title="Client-side integrity signals during the exam — detection only, review in context.">
+              <AlertTriangle className="w-3 h-3" /> {integritySummary(session.integrity_flags)}
+            </span>
+          )}
+        </td>
         <td className="px-5 py-3">{statusBadge(session.status)}</td>
         <td className="px-5 py-3">
           <span className={`text-sm font-bold ${edsColor(session.overall_eds)}`}>

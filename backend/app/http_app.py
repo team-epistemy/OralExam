@@ -4684,6 +4684,18 @@ class AnswerAudioUrlRequest(BaseModel):
     sub_turn_index: int = Field(default=0, ge=0)
 
 
+# Integrity events the client may report. Closed set so a count can't be spammed
+# with arbitrary keys; a browser can only DETECT these, never block them.
+_INTEGRITY_EVENTS = frozenset({
+    "tab_hidden", "window_blur", "paste", "copy", "context_menu", "fullscreen_exit",
+})
+
+
+class IntegrityEventRequest(BaseModel):
+    """POST body to record one client-side integrity event for a session."""
+    event: str = Field(..., max_length=32)
+
+
 def _register_delivery(app: FastAPI, deps) -> None:
     """Assignment creation, exam start, answer submission, and session status.
 
@@ -5051,6 +5063,23 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     for i, sid in enumerate(sorted({r[1] for r in rows})):
                         label_by_student[sid] = f"Student {i + 1}"
 
+                # Per-session integrity flags (guarded: migration_029). Absent on
+                # an un-migrated DB → empty, so GradeView simply shows no chip.
+                flags_by_session = {}
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT session_id, integrity_flags FROM exam_session
+                               WHERE assignment_id = %s::uuid AND NOT is_preview""",
+                            (assignment_id,))
+                        for sid, flags in cur.fetchall():
+                            if flags:
+                                f = flags if isinstance(flags, dict) else _json.loads(flags)
+                                if any(f.values()):
+                                    flags_by_session[str(sid)] = f
+                except Exception:
+                    repo.conn.rollback()
+
                 sessions = []
                 for r in rows:
                     overall_eds = round(float(r[5]) * 100, 1) if r[5] is not None else None
@@ -5064,6 +5093,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "overall_eds": overall_eds,
                         "completed_at": r[4].isoformat() if r[4] else None,
                         "anonymized": anon,
+                        "integrity_flags": flags_by_session.get(str(r[0]), {}),
                     })
 
                 return sessions
@@ -6059,6 +6089,56 @@ def _register_delivery(app: FastAPI, deps) -> None:
                        f"{int(req.question_index)}-{int(req.sub_turn_index)}.webm")
                 url = d["storage"].presign_put(key, "audio/webm", MAX_UPLOAD_BYTES)
                 return {"upload_url": url, "audio_key": key}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/sessions/{session_id}/integrity ─────────────────────────
+    # The student's browser reports an integrity event (tab switch, paste, …).
+    # We increment a per-session counter — detection only, non-punitive. A
+    # browser cannot block other apps, so this flags behaviour for review.
+    @app.post(R.SESSION_INTEGRITY)
+    def record_integrity(
+        session_id: str,
+        req: "IntegrityEventRequest",
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                event = (req.event or "").strip()
+                if event not in _INTEGRITY_EVENTS:
+                    return {"status": "ignored"}
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT student_id FROM exam_session WHERE session_id = %s::uuid",
+                        (session_id,))
+                    srow = cur.fetchone()
+                if not srow:
+                    raise AuthorizationError("session not found")
+                if srow[0] != caller.user_id:
+                    raise AuthorizationError("not your session")
+                # Atomic jsonb counter increment; guarded for an un-migrated DB.
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE exam_session
+                               SET integrity_flags = jsonb_set(
+                                   COALESCE(integrity_flags, '{}'::jsonb),
+                                   %s::text[],
+                                   to_jsonb(COALESCE((integrity_flags->>%s)::int, 0) + 1))
+                               WHERE session_id = %s::uuid""",
+                            ([event], event, session_id))
+                    repo.conn.commit()
+                except Exception:
+                    repo.conn.rollback()  # column missing (pre-migration_029)
+                    return {"status": "unavailable"}
+                return {"status": "ok"}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)

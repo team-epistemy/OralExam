@@ -74,6 +74,7 @@ ASSIGNMENT_CASE = "/api/assignments/{assignment_id}/case"
 ASSIGNMENT_PREVIEW = "/api/assignments/{assignment_id}/preview"  # GET: read-only student-view data for a professor (no session)
 SESSION_ANSWER = "/api/sessions/{session_id}/answer"
 SESSION_ANSWER_AUDIO_URL = "/api/sessions/{session_id}/answer-audio-url"  # POST: presigned PUT for answer audio (student)
+SESSION_INTEGRITY = "/api/sessions/{session_id}/integrity"  # POST: record a client-side integrity event (student)
 SESSION_COMPLETE = "/api/sessions/{session_id}/complete"
 SESSION_STATUS = "/api/sessions/{session_id}/status"
 SESSION_STREAM = "/api/sessions/{session_id}/stream"
