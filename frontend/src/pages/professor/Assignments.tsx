@@ -5,6 +5,8 @@ import { ClipboardList, ChevronRight, Plus, Loader2, Share2, Copy, Check, X } fr
 import { get } from '../../api/client';
 import { createAssignmentDemoLink, type DemoLinkCreated } from '../../api/demo';
 import StatusBadge from '../../components/StatusBadge';
+import { Breadcrumbs } from '../../components/Breadcrumbs';
+import { useToast } from '../../components/Toast';
 
 interface ActiveAssignment {
   assignment_id: string;
@@ -62,21 +64,23 @@ export default function ProfessorAssignments() {
     retry: false,
   });
 
+  const toast = useToast();
   const [demoLink, setDemoLink] = useState<(DemoLinkCreated & { title?: string }) | null>(null);
   const mint = useMutation({
     mutationFn: (a: ActiveAssignment) =>
       createAssignmentDemoLink(a.assignment_id).then((r) => ({ ...r, title: r.title || a.title })),
     onSuccess: (r) => {
-      if (r.status === 'error') { alert(r.message || 'Could not create a demo link.'); return; }
+      if (r.status === 'error') { toast.error(r.message || 'Could not create a demo link. Please try again.'); return; }
       setDemoLink(r);
     },
-    onError: (e: Error) => alert(e.message || 'Could not create a demo link.'),
+    onError: (e: Error) => toast.error(e.message || 'Could not create a demo link. Please try again.'),
   });
 
   const assignments = data?.active_assignments || [];
 
   return (
     <div className="space-y-8">
+      <Breadcrumbs items={[{ label: 'Dashboard', to: '/professor/dashboard' }, { label: 'Assignments' }]} />
       <div className="flex items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-heading text-navy tracking-tight">Active Assignments</h1>

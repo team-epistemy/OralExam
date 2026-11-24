@@ -131,13 +131,30 @@ EXAMINER_EVAL_TEMPLATE = (
     "reusable phrase like 'tell me more', 'explain the mechanism', or 'why does that "
     "matter' — the probe must only make sense as a reply to what they just said.\n"
     "{{PROBE_DIRECTIVE}}\n"
+    "Set stressed=true if the student expresses distress or an inability to continue "
+    "(e.g. 'I'm stressed', 'I don't know this', 'I can't', or asks to skip).\n"
+    "Set transcription_suspect=true if the answer reads like a speech-to-text error — "
+    "garbled, incoherent, or semantically disconnected from the question in a way that "
+    "suggests mis-transcription (a misheard word) rather than a genuinely wrong answer.\n"
     "Respond ONLY with minified JSON, no prose, no code fences:\n"
-    '{"clarify": false, "answered": true, "adequate": false, '
+    '{"clarify": false, "stressed": false, "transcription_suspect": false, '
+    '"answered": true, "adequate": false, '
     '"feedback": "one sentence", "probe": "follow-up question", '
     '"eds": {"nodes_demonstrated": ["list of node labels demonstrated"], '
     '"edges_demonstrated": [0, 1], '
     '"recitation_score": 0.3, '
     '"novel_extensions": ["any valid concepts beyond expected path"]}}'
+)
+
+
+# Follow-up detection helpers live in an import-light module (followup.py) so the
+# unit tests can exercise them without importing fastapi. Re-exported here under
+# the names the rest of this module already uses.
+from backend.app.followup import (  # noqa: E402
+    STUCK_REPHRASE_DIRECTIVE as _STUCK_REPHRASE_DIRECTIVE,
+    MOVE_ON_LINE as _MOVE_ON_LINE,
+    count_trailing_repeats as _count_trailing_repeats,
+    looks_stressed as _looks_stressed,
 )
 
 
@@ -215,8 +232,14 @@ EXAMINER_PROBE_TEMPLATE = (
     "- Never name, define, or hint at a concept the student has not already produced.\n"
     "- Never join two questions with \"and\", \"or\", or \"also\". Plain spoken sentence.\n"
     "{{PROBE_DIRECTIVE}}\n"
+    "Set stressed=true if the student expresses distress or an inability to continue "
+    "(e.g. 'I'm stressed', 'I don't know this', 'I can't', or asks to skip).\n"
+    "Set transcription_suspect=true if the answer reads like a speech-to-text error — "
+    "garbled or semantically disconnected from the question in a way that suggests a "
+    "misheard word rather than a wrong answer.\n"
     "Respond ONLY with minified JSON, no prose, no code fences:\n"
-    '{"clarify": false, "answered": true, "adequate": false, '
+    '{"clarify": false, "stressed": false, "transcription_suspect": false, '
+    '"answered": true, "adequate": false, '
     '"feedback": "one-sentence internal assessment, always present", '
     '"probe": "ONE grounded question, <=25 words, no acknowledgment"}'
 )
@@ -541,6 +564,11 @@ _EXPECTED_PATH_TIMEOUT_S = 40
 # without one. This one IS inside a request, so it stays far under the 60s
 # CloudFront origin timeout.
 _EXPECTED_PATH_WAIT_S = 6.0
+# A professor's dry-run (is_preview) answers seconds after the draft was built, so
+# the queued paths usually haven't landed inside the student budget — which left
+# preview EDS on the no-path rubric. Previews aren't latency-critical and exist to
+# verify scoring, so they wait longer (still well under the 60s origin timeout).
+_PREVIEW_EXPECTED_PATH_WAIT_S = 25.0
 # The per-turn evaluation call, which every answer pays. A healthy one is ~2-4s
 # (max_tokens is only 500), so 20s is well clear of normal variance while keeping a
 # stalled call from riding to CloudFront's 60s cut-off and 504ing mid-exam.
@@ -2846,17 +2874,19 @@ def _query_course_performance(repo, org_id: str, course_id: str) -> dict:
             label_of[str(lbl)] = lbl
 
     with repo.conn.cursor() as cur:
-        cur.execute("""SELECT 1 FROM information_schema.columns
-                       WHERE table_name='assignment' AND column_name='assignment_type'""")
-        type_clause = "AND a.assignment_type = 'practice'" if cur.fetchone() is not None else ""
+        # Class performance spans ALL completed tests (practice, assignment, exam) —
+        # it only ever emits class-level aggregates, so no per-student data leaks
+        # regardless of type. Professor dry-runs (is_preview) are excluded so a
+        # practice run while authoring never counts as a student result.
         cur.execute(
-            f"""SELECT es.student_id, q.concept_ids, e.eds_components
+            """SELECT es.student_id, q.concept_ids, e.eds_components
                 FROM exam_session es
                 JOIN assignment a ON a.assignment_id = es.assignment_id
                 JOIN session_turn st ON st.session_id = es.session_id
                 JOIN evaluation e ON e.turn_id = st.turn_id
                 JOIN question q ON q.question_id = st.question_id
-                WHERE a.course_id = %s::uuid AND es.status = 'completed' {type_clause}""",
+                WHERE a.course_id = %s::uuid AND es.status = 'completed'
+                  AND NOT es.is_preview""",
             (course_id,),
         )
         rows = cur.fetchall()
@@ -3444,6 +3474,24 @@ class AssignExamRequest(BaseModel):
     draft: bool = False
 
 
+class UpdateAssignmentRequest(BaseModel):
+    """Edit an existing assignment in place, preserving its assignment_id.
+
+    Same payload as AssignExamRequest minus `draft` — the existing status is
+    preserved (a draft stays a draft, an active assignment stays active). The
+    continued-draft and edit-assignment flows use this instead of
+    assign+discard so the id (and any downstream references) survives the edit.
+    """
+    title: str = Field(min_length=1, max_length=300)
+    questions: List[ExamAssignQuestion]
+    difficulty: str = Field(default="balanced", pattern=r"^(recall|balanced|deep)$")
+    duration_minutes: Optional[int] = None
+    assignment_type: str = Field(default="assignment", pattern=r"^(practice|assignment|exam)$")
+    include_case: bool = False
+    session_id: Optional[str] = None
+    scope_concepts: Optional[List[str]] = None
+
+
 def _build_question_dicts(settings, *, concepts, chunks, difficulty, domain, count):
     """Author `count` oral-exam questions for the given concepts + chunks via
     Bedrock and parse them into question dicts — NO DB writes.
@@ -3558,6 +3606,119 @@ def _build_question_dicts(settings, *, concepts, chunks, difficulty, domain, cou
             "expected_path": q.get("expected_path", {}),
         })
     return out
+
+
+def _read_session_overrides(repo, session_id):
+    """Per-session question overrides ({position -> {question_id,text,...}}), or {}.
+    Guarded so a DB that predates migration_027 simply reports no overrides."""
+    import json as _json
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute("SELECT question_overrides FROM exam_session WHERE session_id = %s::uuid",
+                        (session_id,))
+            row = cur.fetchone()
+        if row and row[0]:
+            return row[0] if isinstance(row[0], dict) else _json.loads(row[0])
+    except Exception:
+        repo.conn.rollback()
+    return {}
+
+
+def _stress_replacement(repo, settings, org_id, course_id, created_by,
+                        session_id, question_index, current_concept_ids):
+    """Source a different, easier question from the course concept banks when a
+    student signals stress, persist it to the question table (so FK + EDS hold),
+    record it as a per-session override for this position, and return
+    {question_id, text, concept_id, topic} — or None if nothing could be sourced
+    (empty graph, generation failure, or this position was already swapped once).
+
+    The original (stressful) turn is left unscored — no evaluation/aggregate row
+    is written for it — so the swap carries no penalty.
+    """
+    import json as _json, uuid as _uuid
+
+    # One swap per position: if this index already has an override, bail (the
+    # caller then falls back to a gentle move-on instead of swapping again).
+    overrides = _read_session_overrides(repo, session_id)
+    if str(question_index) in overrides:
+        return None
+
+    # Pick a DIFFERENT concept from the course graph (avoid the one they're stuck
+    # on); "recall" difficulty makes the replacement an easier warm-up.
+    try:
+        graph = _query_graph_version(repo, org_id, course_id)
+    except Exception:
+        repo.conn.rollback()
+        return None
+    concepts = (graph or {}).get("concepts") or []
+    if not concepts:
+        return None
+    cur_set = {str(c).lower() for c in (current_concept_ids or [])}
+    candidates = [c for c in concepts
+                  if str(c.get("id") or c.get("label") or "").lower() not in cur_set
+                  and str(c.get("label") or "").lower() not in cur_set] or concepts
+    chosen = candidates[0]
+
+    try:
+        built = _build_question_dicts(
+            settings, concepts=[{"label": chosen.get("label") or chosen.get("id") or "the topic"}],
+            chunks=[], difficulty="recall", domain="this course", count=1)
+    except Exception as exc:
+        logger.warning("stress replacement generation failed: %s", exc)
+        repo.conn.rollback()
+        return None
+    if not built:
+        return None
+    q = built[0]
+    new_qid = str(_uuid.uuid4())
+    text = q.get("question") or q.get("q") or ""
+    topic = q.get("topic") or chosen.get("label") or "general"
+    concept_ids = q.get("concept_ids") or [chosen.get("id") or topic]
+    expected_path = q.get("expected_path") or {}
+    if not text:
+        return None
+
+    # Persist the replacement question (approved) so session_turn/evaluation FKs
+    # resolve and the override path can fetch its expected_path for EDS.
+    try:
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                """SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'question' AND column_name = 'expected_path'""")
+            has_ep = cur.fetchone() is not None
+            diff_json = _json.dumps({"level": "recall", "eds_score": 0.3})
+            if has_ep:
+                cur.execute(
+                    """INSERT INTO question
+                       (question_id, course_id, org_id, concept_ids, text,
+                        question_type, difficulty, status, created_by, source_chunks, expected_path)
+                       VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                               'oral', %s::jsonb, 'approved', %s, '[]'::jsonb, %s::jsonb)""",
+                    (new_qid, course_id, org_id, _json.dumps(concept_ids), text,
+                     diff_json, created_by, _json.dumps(expected_path)))
+            else:
+                cur.execute(
+                    """INSERT INTO question
+                       (question_id, course_id, org_id, concept_ids, text,
+                        question_type, difficulty, status, created_by, source_chunks)
+                       VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                               'oral', %s::jsonb, 'approved', %s, '[]'::jsonb)""",
+                    (new_qid, course_id, org_id, _json.dumps(concept_ids), text,
+                     diff_json, created_by))
+            # Record the override for this position (jsonb merge on the session).
+            overrides[str(question_index)] = {
+                "question_id": new_qid, "text": text,
+                "concept_ids": concept_ids, "topic": topic}
+            cur.execute(
+                "UPDATE exam_session SET question_overrides = %s::jsonb WHERE session_id = %s::uuid",
+                (_json.dumps(overrides), session_id))
+        repo.conn.commit()
+    except Exception as exc:
+        logger.warning("stress replacement persist failed: %s", exc)
+        repo.conn.rollback()
+        return None
+
+    return {"question_id": new_qid, "text": text, "concept_id": concept_ids[0], "topic": topic}
 
 
 def _register_questions(app: FastAPI, deps) -> None:
@@ -3895,6 +4056,216 @@ def _register_questions(app: FastAPI, deps) -> None:
                 # the background. This is the whole point: by the time a student opens
                 # the assignment the paths are already there, so no answer pays for
                 # one mid-exam.
+                if has_ep:
+                    _fill_expected_paths_async(
+                        d["settings"], caller.org_id,
+                        [(qid, q.q, [q.concept_id or q.topic or "general"])
+                         for qid, q in zip(question_ids, req.questions)])
+                return {"status": "completed", "assignment_id": assignment_id,
+                        "question_count": len(question_ids)}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    @app.post(R.ASSIGNMENT_UPDATE)
+    def update_assignment(
+        assignment_id: str,
+        req: UpdateAssignmentRequest,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        """Edit an assignment's questions + settings IN PLACE, preserving its id.
+
+        Used by the continued-draft and edit-assignment flows so the id (and any
+        links to it) survive the edit, rather than minting a fresh assignment and
+        discarding the original. Refuses if a real (non-preview) student has
+        already started the assignment — mutating its questions would invalidate
+        their results; the professor should duplicate it instead. Preview-only
+        sessions are purged (same teardown as publish) before the swap."""
+        import json as _json, uuid as _uuid
+
+        def _do():
+            d = deps()
+            repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                if not req.questions:
+                    return {"status": "error", "message": "no questions to assign"}
+
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT course_id, question_set_id, status
+                           FROM assignment
+                           WHERE assignment_id = %s::uuid AND org_id = %s::uuid
+                             AND created_by = %s""",
+                        (assignment_id, caller.org_id, caller.user_id),
+                    )
+                    arow = cur.fetchone()
+                    if not arow:
+                        raise AuthorizationError("assignment not found")
+                    course_id = str(arow[0])
+                    old_qs_id = str(arow[1])
+
+                    # Guard: never mutate questions out from under a student who
+                    # has already started a real (non-preview) attempt.
+                    cur.execute(
+                        """SELECT count(*) FROM exam_session
+                           WHERE assignment_id = %s::uuid AND NOT is_preview""",
+                        (assignment_id,),
+                    )
+                    real_attempts = cur.fetchone()[0]
+                    if real_attempts:
+                        return {
+                            "status": "error",
+                            "code": "has_attempts",
+                            "message": (
+                                f"{real_attempts} student"
+                                f"{'s have' if real_attempts != 1 else ' has'} already started "
+                                "this assignment — editing its questions would invalidate their "
+                                "results. Duplicate it as a new assignment instead."
+                            ),
+                        }
+
+                diff_json = _json.dumps({
+                    "level": req.difficulty,
+                    "eds_score": {"recall": 0.3, "balanced": 0.55, "deep": 0.8}.get(req.difficulty, 0.55),
+                })
+                paths: dict = {}
+                question_ids = []
+                with repo.conn.cursor() as cur:
+                    # Tear down preview-session children in dependency order (no
+                    # ON DELETE CASCADE on this chain) so the old questions/set can
+                    # be removed without dangling refs. Mirrors publish_assignment.
+                    cur.execute(
+                        """DELETE FROM evaluation
+                           WHERE turn_id IN (
+                               SELECT turn_id FROM session_turn
+                               WHERE session_id IN (
+                                   SELECT session_id FROM exam_session
+                                   WHERE assignment_id = %s::uuid AND is_preview))""",
+                        (assignment_id,),
+                    )
+                    cur.execute(
+                        """DELETE FROM question_eds_aggregate
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview)""",
+                        (assignment_id,),
+                    )
+                    cur.execute(
+                        """DELETE FROM grade
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview)""",
+                        (assignment_id,),
+                    )
+                    cur.execute(
+                        """DELETE FROM session_turn
+                           WHERE session_id IN (
+                               SELECT session_id FROM exam_session
+                               WHERE assignment_id = %s::uuid AND is_preview)""",
+                        (assignment_id,),
+                    )
+                    cur.execute(
+                        "DELETE FROM exam_session WHERE assignment_id = %s::uuid AND is_preview",
+                        (assignment_id,),
+                    )
+
+                    cur.execute(
+                        """SELECT 1 FROM information_schema.columns
+                           WHERE table_name = 'question' AND column_name = 'expected_path'""")
+                    has_ep = cur.fetchone() is not None
+                    for i, q in enumerate(req.questions):
+                        qid = str(_uuid.uuid4())
+                        question_ids.append(qid)
+                        concept_ids = _json.dumps([q.concept_id or q.topic or "general"])
+                        if has_ep:
+                            cur.execute(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks,
+                                    expected_path)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           'oral', %s::jsonb, 'approved', %s, '[]'::jsonb, %s::jsonb)""",
+                                (qid, course_id, caller.org_id, concept_ids, q.q, diff_json,
+                                 caller.user_id, _json.dumps(paths.get(i, {}))),
+                            )
+                        else:
+                            cur.execute(
+                                """INSERT INTO question
+                                   (question_id, course_id, org_id, concept_ids, text,
+                                    question_type, difficulty, status, created_by, source_chunks)
+                                   VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, %s,
+                                           'oral', %s::jsonb, 'approved', %s, '[]'::jsonb)""",
+                                (qid, course_id, caller.org_id, concept_ids, q.q, diff_json,
+                                 caller.user_id),
+                            )
+                    new_qs_id = str(_uuid.uuid4())
+                    cur.execute(
+                        """INSERT INTO question_set (question_set_id, course_id, org_id, title, created_by)
+                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s)""",
+                        (new_qs_id, course_id, caller.org_id, req.title, caller.user_id),
+                    )
+                    for idx, qid in enumerate(question_ids):
+                        cur.execute(
+                            """INSERT INTO question_set_membership
+                               (question_set_id, question_id, org_id, position)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s)""",
+                            (new_qs_id, qid, caller.org_id, idx),
+                        )
+                    cfg = _json.dumps({
+                        "adaptive": True, "max_questions": len(question_ids),
+                        "time_limit_minutes": req.duration_minutes,
+                        "difficulty": req.difficulty, "shuffle_questions": False,
+                        "include_case": req.include_case,
+                        "scope_session_id": req.session_id,
+                        "scope_concepts": req.scope_concepts or [],
+                    })
+                    # Repoint the SAME assignment at the new question set; status is
+                    # left untouched so a draft stays a draft and an active stays active.
+                    cur.execute(
+                        """UPDATE assignment
+                           SET title = %s, question_set_id = %s::uuid, config = %s::jsonb
+                           WHERE assignment_id = %s::uuid""",
+                        (req.title, new_qs_id, cfg, assignment_id),
+                    )
+                    cur.execute("""SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='assignment' AND column_name='assignment_type'""")
+                    if cur.fetchone() is not None:
+                        cur.execute("UPDATE assignment SET assignment_type = %s WHERE assignment_id = %s::uuid",
+                                    (req.assignment_type, assignment_id))
+
+                    # Best-effort teardown of the now-orphaned old question set. A
+                    # failure here must not fail the edit (the assignment already
+                    # points at the new set), so run it inside a SAVEPOINT and roll
+                    # back only this cleanup on error — the swap still commits.
+                    cur.execute("SAVEPOINT old_qs_cleanup")
+                    try:
+                        cur.execute(
+                            "SELECT question_id FROM question_set_membership WHERE question_set_id = %s::uuid",
+                            (old_qs_id,))
+                        old_qids = [str(r[0]) for r in cur.fetchall()]
+                        cur.execute("DELETE FROM question_set_membership WHERE question_set_id = %s::uuid",
+                                    (old_qs_id,))
+                        for oqid in old_qids:
+                            cur.execute(
+                                """DELETE FROM question q WHERE q.question_id = %s::uuid
+                                   AND NOT EXISTS (SELECT 1 FROM question_set_membership m
+                                                   WHERE m.question_id = q.question_id)""",
+                                (oqid,))
+                        cur.execute("DELETE FROM question_set WHERE question_set_id = %s::uuid",
+                                    (old_qs_id,))
+                        cur.execute("RELEASE SAVEPOINT old_qs_cleanup")
+                    except Exception as exc:
+                        cur.execute("ROLLBACK TO SAVEPOINT old_qs_cleanup")
+                        logger.warning("update_assignment: old question-set cleanup failed for %s: %s",
+                                       assignment_id[:8], exc)
+                repo.conn.commit()
                 if has_ep:
                     _fill_expected_paths_async(
                         d["settings"], caller.org_id,
@@ -4257,6 +4628,26 @@ class SubmitAnswerRequest(BaseModel):
     """POST body for submitting an answer."""
     question_index: int = Field(..., ge=0)
     answer_text: str = Field(..., min_length=1, max_length=MAX_ANSWER_LENGTH)
+    # S3 key of the recorded spoken answer (from answer-audio-url), if captured.
+    audio_key: Optional[str] = Field(default=None, max_length=512)
+
+
+class AnswerAudioUrlRequest(BaseModel):
+    """POST body to mint a presigned PUT for an answer's audio clip."""
+    question_index: int = Field(..., ge=0)
+    sub_turn_index: int = Field(default=0, ge=0)
+
+
+# Integrity events the client may report. Closed set so a count can't be spammed
+# with arbitrary keys; a browser can only DETECT these, never block them.
+_INTEGRITY_EVENTS = frozenset({
+    "tab_hidden", "window_blur", "paste", "copy", "context_menu", "fullscreen_exit",
+})
+
+
+class IntegrityEventRequest(BaseModel):
+    """POST body to record one client-side integrity event for a session."""
+    event: str = Field(..., max_length=32)
 
 
 def _register_delivery(app: FastAPI, deps) -> None:
@@ -4594,12 +4985,21 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         raise AuthorizationError("assignment not found")
 
                 with repo.conn.cursor() as cur:
+                    # overall_eds: prefer the released grade (final_score); before
+                    # release, fall back to the LIVE mean of the per-question EDS
+                    # aggregates so the professor sees the score on the row without
+                    # opening the transcript (and without releasing grades first).
                     cur.execute(
                         """SELECT es.session_id, es.student_id, es.status,
                                   es.current_turn_index, es.completed_at,
-                                  g.final_score
+                                  COALESCE(g.final_score, qea.avg_eds)
                            FROM exam_session es
                            LEFT JOIN grade g ON g.session_id = es.session_id
+                           LEFT JOIN (
+                               SELECT session_id, AVG(final_eds) AS avg_eds
+                               FROM question_eds_aggregate
+                               GROUP BY session_id
+                           ) qea ON qea.session_id = es.session_id
                            WHERE es.assignment_id = %s::uuid AND NOT es.is_preview
                            ORDER BY es.started_at DESC""",
                         (assignment_id,),
@@ -4617,6 +5017,23 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     for i, sid in enumerate(sorted({r[1] for r in rows})):
                         label_by_student[sid] = f"Student {i + 1}"
 
+                # Per-session integrity flags (guarded: migration_029). Absent on
+                # an un-migrated DB → empty, so GradeView simply shows no chip.
+                flags_by_session = {}
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT session_id, integrity_flags FROM exam_session
+                               WHERE assignment_id = %s::uuid AND NOT is_preview""",
+                            (assignment_id,))
+                        for sid, flags in cur.fetchall():
+                            if flags:
+                                f = flags if isinstance(flags, dict) else _json.loads(flags)
+                                if any(f.values()):
+                                    flags_by_session[str(sid)] = f
+                except Exception:
+                    repo.conn.rollback()
+
                 sessions = []
                 for r in rows:
                     overall_eds = round(float(r[5]) * 100, 1) if r[5] is not None else None
@@ -4630,6 +5047,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "overall_eds": overall_eds,
                         "completed_at": r[4].isoformat() if r[4] else None,
                         "anonymized": anon,
+                        "integrity_flags": flags_by_session.get(str(r[0]), {}),
                     })
 
                 return sessions
@@ -5033,7 +5451,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 with repo.conn.cursor() as cur:
                     cur.execute(
                         """SELECT session_id, assignment_id, student_id, course_id,
-                                  status, current_turn_index, org_id
+                                  status, current_turn_index, org_id, is_preview
                            FROM exam_session WHERE session_id = %s::uuid""",
                         (session_id,),
                     )
@@ -5049,6 +5467,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                 assignment_id = str(srow[1])
                 course_id = str(srow[3])
                 org_id = str(srow[6])
+                is_preview = bool(srow[7])
                 question_index = req.question_index
 
                 with repo.conn.cursor() as cur:
@@ -5062,24 +5481,34 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     raise AuthorizationError("assignment not found")
                 question_set_id = str(qs_row[0])
 
-                with repo.conn.cursor() as cur:
-                    cur.execute(
-                        """SELECT q.question_id, q.text, q.concept_ids
-                           FROM question_set_membership qsm
-                           JOIN question q ON q.question_id = qsm.question_id
-                           WHERE qsm.question_set_id = %s::uuid AND qsm.position = %s""",
-                        (question_set_id, question_index),
-                    )
-                    qrow = cur.fetchone()
+                # A stress swap may have replaced the question at this position for
+                # THIS session (see _stress_replacement). The override wins over the
+                # shared question_set so the student answers the backup question.
+                session_overrides = _read_session_overrides(repo, session_id)
+                ov = session_overrides.get(str(question_index))
+                if ov and ov.get("question_id"):
+                    question_id = str(ov["question_id"])
+                    question_text = ov.get("text") or ""
+                    concept_ids_for_question = ov.get("concept_ids") if isinstance(ov.get("concept_ids"), list) else []
+                else:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT q.question_id, q.text, q.concept_ids
+                               FROM question_set_membership qsm
+                               JOIN question q ON q.question_id = qsm.question_id
+                               WHERE qsm.question_set_id = %s::uuid AND qsm.position = %s""",
+                            (question_set_id, question_index),
+                        )
+                        qrow = cur.fetchone()
 
-                if not qrow:
-                    raise AuthorizationError(
-                        f"no question at index {question_index} in this assignment"
-                    )
+                    if not qrow:
+                        raise AuthorizationError(
+                            f"no question at index {question_index} in this assignment"
+                        )
 
-                question_id = str(qrow[0])
-                question_text = qrow[1]
-                concept_ids_for_question = qrow[2] if isinstance(qrow[2], list) else []
+                    question_id = str(qrow[0])
+                    question_text = qrow[1]
+                    concept_ids_for_question = qrow[2] if isinstance(qrow[2], list) else []
 
                 # ── Fetch expected_path for EDS scoring ──────────────────
                 expected_path = {}
@@ -5107,13 +5536,20 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     # blind: without the path no eds_components is written, so the
                     # next probe can't see what this answer covered and the question's
                     # EDS union drops the turn. Past the budget, degrade and move on.
-                    with _timed("rubric_wait", qid=question_id[:8]):
+                    #
+                    # A professor's dry-run (is_preview) answers seconds after the draft
+                    # is created, so the just-queued paths often haven't landed inside
+                    # the student budget — which left preview EDS stuck on the no-path
+                    # rubric. Previews aren't latency-critical and exist precisely to
+                    # verify scoring, so wait longer for them to get real EDS from turn 1.
+                    path_budget = _PREVIEW_EXPECTED_PATH_WAIT_S if is_preview else _EXPECTED_PATH_WAIT_S
+                    with _timed("rubric_wait", qid=question_id[:8], preview=is_preview):
                         expected_path = _await_expected_path(
-                            repo, question_id, _EXPECTED_PATH_WAIT_S)
+                            repo, question_id, path_budget)
                     if not expected_path.get("nodes"):
                         logger.warning("No expected_path for question %s after %.0fs — "
                                        "grading this turn on the no-path rubric",
-                                       question_id[:8], _EXPECTED_PATH_WAIT_S)
+                                       question_id[:8], path_budget)
                         expected_path = {}
 
                 # ── Multi-turn: insert new sub-turn row ──────────────────
@@ -5129,21 +5565,44 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     )
                     sub_turn_count = cur.fetchone()[0]
 
+                # audio_key column (migration_028) may not exist on an un-migrated
+                # DB; detect once so the INSERT degrades gracefully without it.
+                with repo.conn.cursor() as cur:
+                    cur.execute("""SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='session_turn' AND column_name='audio_key'""")
+                    has_audio_col = cur.fetchone() is not None
+                audio_key = (req.audio_key or None) if has_audio_col else None
+
                 with repo.conn.cursor() as cur:
                     # Each sub-turn is its own row (unique on session+turn+sub_turn),
                     # so a retried submit updates that sub-turn rather than the question.
-                    cur.execute(
-                        """INSERT INTO session_turn
-                           (turn_id, session_id, org_id, turn_index, sub_turn_index,
-                            question_id, student_answer, answered_at)
-                           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid, %s, %s)
-                           ON CONFLICT (session_id, turn_index, sub_turn_index)
-                           DO UPDATE SET student_answer = EXCLUDED.student_answer,
-                                         answered_at = EXCLUDED.answered_at
-                           RETURNING turn_id""",
-                        (turn_id, session_id, org_id, question_index, sub_turn_count,
-                         question_id, req.answer_text, now),
-                    )
+                    if has_audio_col:
+                        cur.execute(
+                            """INSERT INTO session_turn
+                               (turn_id, session_id, org_id, turn_index, sub_turn_index,
+                                question_id, student_answer, answered_at, audio_key)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid, %s, %s, %s)
+                               ON CONFLICT (session_id, turn_index, sub_turn_index)
+                               DO UPDATE SET student_answer = EXCLUDED.student_answer,
+                                             answered_at = EXCLUDED.answered_at,
+                                             audio_key = COALESCE(EXCLUDED.audio_key, session_turn.audio_key)
+                               RETURNING turn_id""",
+                            (turn_id, session_id, org_id, question_index, sub_turn_count,
+                             question_id, req.answer_text, now, audio_key),
+                        )
+                    else:
+                        cur.execute(
+                            """INSERT INTO session_turn
+                               (turn_id, session_id, org_id, turn_index, sub_turn_index,
+                                question_id, student_answer, answered_at)
+                               VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid, %s, %s)
+                               ON CONFLICT (session_id, turn_index, sub_turn_index)
+                               DO UPDATE SET student_answer = EXCLUDED.student_answer,
+                                             answered_at = EXCLUDED.answered_at
+                               RETURNING turn_id""",
+                            (turn_id, session_id, org_id, question_index, sub_turn_count,
+                             question_id, req.answer_text, now),
+                        )
                     actual_turn_id = str(cur.fetchone()[0])
 
                 with repo.conn.cursor() as cur:
@@ -5166,15 +5625,50 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     )
                     prior_answers = [r[0] for r in cur.fetchall() if r[0]]
 
+                # ── Stress fallback ──────────────────────────────────────
+                # A student signalling distress ("I'm stressed, I don't know this")
+                # gets a different, easier question from the course banks instead of
+                # more probing (pilot feedback). Deterministic keyword detection, so
+                # it fires before (and independent of) the eval model. One swap per
+                # position; the original turn is recorded but left unscored.
+                if not is_preview and _looks_stressed(req.answer_text):
+                    replacement = _stress_replacement(
+                        repo, settings, org_id, course_id, caller.user_id,
+                        session_id, question_index, concept_ids_for_question)
+                    if replacement:
+                        return {
+                            "answered": False, "adequate": False,
+                            "feedback": "Student expressed stress; swapped to an easier question.",
+                            "probe": "No problem — let's set that one aside and try a different question.",
+                            "eds_delta": 0, "stressed": True,
+                            "replacement_question": {
+                                "text": replacement["text"],
+                                "topic": replacement["topic"],
+                                "concept_id": replacement["concept_id"],
+                            },
+                        }
+
+                # ── Stuck detection ──────────────────────────────────────
+                # Repeating essentially the same answer: on the 2nd near-duplicate,
+                # rephrase the question instead of probing deeper; on the 3rd, move on
+                # (pilot: Matteo repeated "time value of money" ~3x). Deterministic,
+                # mode-agnostic — works in sonnet, hybrid, and the heuristic fallback.
+                repeats = _count_trailing_repeats(prior_answers, req.answer_text)
+                move_on = repeats >= 2
+
                 # ── Decide evaluation strategy based on expected_path ────
                 use_eds_formula = bool(expected_path.get("nodes"))
 
                 # Steer this turn's probe at whatever the student has not yet covered,
                 # traversing the question's own sub-graph instead of letting the model
-                # re-probe ground already demonstrated.
-                probe_directive = ""
+                # re-probe ground already demonstrated. When the student is stuck
+                # repeating themselves (repeats == 1), rephrase instead of going deeper.
+                probe_directive = _STUCK_REPHRASE_DIRECTIVE if repeats == 1 else ""
 
-                if use_eds_formula:
+                if use_eds_formula and repeats != 1:
+                    # Skip probe-targeting when stuck (repeats==1): the rephrase
+                    # directive already owns probe_directive — don't bury it under a
+                    # deeper target that re-probes the same ground.
                     seen_n, seen_e = _prior_coverage(repo, session_id, question_index)
                     target = _probe_target(expected_path, seen_n, seen_e)
                     if target:
@@ -5208,8 +5702,11 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "the specific thing they said (or the step they skipped) and push on that exact gap. "
                         "Never emit a generic, reusable phrase like 'tell me more' or 'explain the "
                         "mechanism'; the probe should only make sense as a reply to what they just said. "
+                        "Set transcription_suspect=true if the answer reads like a speech-to-text "
+                        "error — garbled or disconnected from the question in a way that suggests a "
+                        "misheard word rather than a wrong answer. "
                         "Respond ONLY with minified JSON, no prose and no code fences: "
-                        '{"clarify": bool, "answered": bool, "adequate": bool, '
+                        '{"clarify": bool, "transcription_suspect": bool, "answered": bool, "adequate": bool, '
                         '"feedback": "one sentence on what was strong or thin", '
                         '"probe": "ONE short follow-up that quotes/paraphrases the student and targets their specific gap"}'
                     )
@@ -5237,16 +5734,19 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         h_adequate = bool(pj.get("adequate", False))
                         h_feedback = (pj.get("feedback") or "").strip()
                         h_probe = (pj.get("probe") or "").strip()
+                        h_suspect = bool(pj.get("transcription_suspect", False))
                     except Exception as eval_err:
                         logger.warning("Hybrid Haiku probe failed: %s", eval_err)
                         h_answered, h_adequate, h_feedback, h_probe = _heuristic_eval(
                             req.answer_text)
+                        h_suspect = False
                     # Preliminary evaluation row; EDS score filled in by the async worker.
                     # eds_bucket must satisfy evaluation_bucket_chk (low|medium|high), so use
                     # a provisional bucket from answered/adequate; the async EDS overwrites it.
                     # `eds_pending` in raw_llm_output is the real "not yet scored" signal.
                     prelim = {"answered": h_answered, "adequate": h_adequate,
                               "feedback": h_feedback, "probe": h_probe,
+                              "transcription_suspect": h_suspect,
                               "eds_pending": True, "eval_mode": "hybrid"}
                     prelim_bucket = ("high" if h_adequate
                                      else ("medium" if h_answered else "low"))
@@ -5271,14 +5771,17 @@ def _register_delivery(app: FastAPI, deps) -> None:
                               expected_path, ctx, h_answered, h_adequate, h_feedback, h_probe),
                         daemon=True).start()
                     return {"answered": h_answered, "adequate": h_adequate,
-                            "feedback": h_feedback, "probe": h_probe,
-                            "eds_delta": 0, "eds_pending": True}
+                            "feedback": h_feedback,
+                            "probe": _MOVE_ON_LINE if move_on else h_probe,
+                            "eds_delta": 0, "eds_pending": True, "move_on": move_on,
+                            "transcription_suspect": h_suspect}
 
                 answered = False
                 adequate = False
                 feedback = ""
                 probe = ""
                 eds_delta = 0
+                transcription_suspect = False
                 parsed = {}
 
                 try:
@@ -5298,6 +5801,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     adequate = bool(parsed.get("adequate", False))
                     feedback = (parsed.get("feedback") or "").strip()
                     probe = (parsed.get("probe") or "").strip()
+                    transcription_suspect = bool(parsed.get("transcription_suspect", False))
                 except Exception as eval_err:
                     logger.warning("Bedrock Socratic eval failed: %s", eval_err)
                     answered, adequate, feedback, probe = _heuristic_eval(
@@ -5321,6 +5825,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "feedback": feedback,
                         "probe": probe,
                         "eds_delta": eds_delta,
+                        "transcription_suspect": transcription_suspect,
                     }
                     with repo.conn.cursor() as cur:
                         cur.execute(
@@ -5345,8 +5850,10 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "answered": answered,
                         "adequate": adequate,
                         "feedback": feedback,
-                        "probe": probe,
+                        "probe": _MOVE_ON_LINE if move_on else probe,
                         "eds_delta": eds_delta,
+                        "move_on": move_on,
+                        "transcription_suspect": transcription_suspect,
                     }
 
                 # ── EDS Formula Path ─────────────────────────────────────
@@ -5430,6 +5937,7 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     "probe": probe,
                     "eds_delta": int(eds_question * 10),
                     "eds_question": eds_question,
+                    "transcription_suspect": transcription_suspect,
                 }
                 with repo.conn.cursor() as cur:
                     cur.execute(
@@ -5484,9 +5992,11 @@ def _register_delivery(app: FastAPI, deps) -> None:
                     "answered": answered,
                     "adequate": adequate,
                     "feedback": feedback,
-                    "probe": probe,
+                    "probe": _MOVE_ON_LINE if move_on else probe,
                     "eds_delta": int(eds_question * 10),
                     "eds_question": eds_question,
+                    "move_on": move_on,
+                    "transcription_suspect": transcription_suspect,
                     "eds_components": {
                         "node_score": agg_node_score,
                         "edge_score": agg_edge_score,
@@ -5494,6 +6004,129 @@ def _register_delivery(app: FastAPI, deps) -> None:
                         "gen_score": agg_gen,
                     },
                 }
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/sessions/{session_id}/answer-audio-url ──────────────────
+    # A student requests a presigned PUT to upload the audio of their spoken
+    # answer (Phase B of transcription review). Authenticated exams only — the
+    # credential-free demo never records (it states "nothing is saved").
+    @app.post(R.SESSION_ANSWER_AUDIO_URL)
+    def answer_audio_url(
+        session_id: str,
+        req: "AnswerAudioUrlRequest",
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT student_id, org_id, status FROM exam_session WHERE session_id = %s::uuid",
+                        (session_id,))
+                    srow = cur.fetchone()
+                if not srow:
+                    raise AuthorizationError("session not found")
+                if srow[0] != caller.user_id:
+                    raise AuthorizationError("not your session")
+                if srow[2] != "active":
+                    raise AuthorizationError("session is not active")
+                # Deterministic key per (session, question, sub-turn) so a retried
+                # answer overwrites rather than orphaning a clip.
+                key = (f"answer-audio/{str(srow[1])}/{session_id}/"
+                       f"{int(req.question_index)}-{int(req.sub_turn_index)}.webm")
+                url = d["storage"].presign_put(key, "audio/webm", MAX_UPLOAD_BYTES)
+                return {"upload_url": url, "audio_key": key}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── POST /api/sessions/{session_id}/integrity ─────────────────────────
+    # The student's browser reports an integrity event (tab switch, paste, …).
+    # We increment a per-session counter — detection only, non-punitive. A
+    # browser cannot block other apps, so this flags behaviour for review.
+    @app.post(R.SESSION_INTEGRITY)
+    def record_integrity(
+        session_id: str,
+        req: "IntegrityEventRequest",
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("student"),
+    ):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                repo.set_tenant(caller.org_id)
+                event = (req.event or "").strip()
+                if event not in _INTEGRITY_EVENTS:
+                    return {"status": "ignored"}
+                with repo.conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT student_id FROM exam_session WHERE session_id = %s::uuid",
+                        (session_id,))
+                    srow = cur.fetchone()
+                if not srow:
+                    raise AuthorizationError("session not found")
+                if srow[0] != caller.user_id:
+                    raise AuthorizationError("not your session")
+                # Atomic jsonb counter increment; guarded for an un-migrated DB.
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE exam_session
+                               SET integrity_flags = jsonb_set(
+                                   COALESCE(integrity_flags, '{}'::jsonb),
+                                   %s::text[],
+                                   to_jsonb(COALESCE((integrity_flags->>%s)::int, 0) + 1))
+                               WHERE session_id = %s::uuid""",
+                            ([event], event, session_id))
+                    repo.conn.commit()
+                except Exception:
+                    repo.conn.rollback()  # column missing (pre-migration_029)
+                    return {"status": "unavailable"}
+                return {"status": "ok"}
+            finally:
+                _release_repo(d, repo)
+        return _guard(deps, _do)
+
+    # ── GET /api/turns/{turn_id}/audio ────────────────────────────────────
+    # A professor re-listens to a recorded answer to confirm a suspected mishear.
+    @app.get(R.TURN_AUDIO)
+    def turn_audio(
+        turn_id: str,
+        x_org_name: str = Header(...),
+        x_user_id: str = Header("operator"),
+        x_role: str = Header("professor"),
+    ):
+        def _do():
+            d = deps(); repo = _request_repo(d)
+            try:
+                api = factory.build_api(d["settings"], repo, d["storage"], d["queue"])
+                caller = api.caller_for_org(x_user_id, x_role, x_org_name)
+                if caller.role != Role.PROFESSOR:
+                    raise AuthorizationError("professor role required")
+                repo.set_tenant(caller.org_id)
+                audio_key = None
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute("SELECT audio_key FROM session_turn WHERE turn_id = %s::uuid",
+                                    (turn_id,))
+                        row = cur.fetchone()
+                        audio_key = row[0] if row else None
+                except Exception:
+                    repo.conn.rollback()  # un-migrated DB: no audio column
+                if not audio_key:
+                    return {"status": "no_audio", "url": None}
+                url = d["storage"].presign_get(audio_key, file_name="answer.webm", ttl=600)
+                return {"status": "ok", "url": url}
             finally:
                 _release_repo(d, repo)
         return _guard(deps, _do)
@@ -5759,10 +6392,12 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                 if caller.role != Role.PROFESSOR and srow[1] != caller.user_id:
                     raise AuthorizationError("access denied")
 
-                # Practice tests are anonymized to the professor: withhold the
-                # verbatim student answers (the transcript) so a practice run
-                # can't be tied back to what a specific student said (S-E-2.2).
-                # The student viewing their own session still sees everything.
+                # Practice tests anonymize the student's IDENTITY to the professor
+                # (the session list shows "Student N", never the email — S-E-2.2).
+                # The verbatim answers ARE shown so a reviewer can see the response
+                # and explain why each score sits where it does; identity stays
+                # hidden, so an answer can't be tied back to a specific student.
+                # The student viewing their own session always sees everything.
                 with repo.conn.cursor() as cur:
                     anon = (caller.role == Role.PROFESSOR
                             and _assignment_is_practice(cur, str(srow[2])))
@@ -5811,13 +6446,14 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                         "turn_index": er[5],
                         "sub_turn_index": er[6],
                         "question_text": er[8] or "",
-                        "student_answer": "" if anon else (er[7] or ""),
+                        "student_answer": er[7] or "",
                         "eds_score": score,
                         "eds_bucket": er[2],
                         "answered": raw.get("answered", True),
                         "adequate": raw.get("adequate", False),
                         "feedback": fb,
                         "eds_delta": raw.get("eds_delta", 0),
+                        "transcription_suspect": bool(raw.get("transcription_suspect", False)),
                         "components": {
                             "node_coverage": comp.get("node_score"),
                             "edge_coverage": comp.get("edge_score"),
@@ -5826,7 +6462,22 @@ def _register_evaluation(app: FastAPI, deps) -> None:
                             "edges_demonstrated": comp.get("edges_demonstrated", []),
                         },
                         "rationale": _threshold_rationale(score, er[2], comp, fb),
+                        "has_audio": False,
                     })
+
+                # Mark turns that have a stored audio clip (guarded: audio_key is
+                # migration_028; absent on an un-migrated DB → no audio).
+                try:
+                    with repo.conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT turn_id FROM session_turn
+                               WHERE session_id = %s::uuid AND audio_key IS NOT NULL""",
+                            (session_id,))
+                        with_audio = {str(r[0]) for r in cur.fetchall()}
+                    for e in evaluations:
+                        e["has_audio"] = e["turn_id"] in with_audio
+                except Exception:
+                    repo.conn.rollback()
 
                 if grade_row:
                     comp_all = grade_row[2] if isinstance(grade_row[2], dict) else _json.loads(grade_row[2] or "{}")

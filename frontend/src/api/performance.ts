@@ -10,8 +10,12 @@ export interface AspectStat {
 
 export interface TopicStat {
   label: string;
-  pct_students: number; // share of all practice-takers who demonstrated the topic
-  avg_score: number;
+  pct_students: number; // back-compat alias for pct_named
+  avg_score: number;    // back-compat alias for avg_named
+  pct_named: number;    // share who recalled the topic's concepts (node_score >= bar)
+  avg_named: number;
+  pct_mastered: number; // share who demonstrated it on the full EDS rubric (>= bar)
+  avg_mastered: number;
   n_attempted: number;
 }
 

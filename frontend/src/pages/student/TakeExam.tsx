@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen } from 'lucide-react';
+import { Send, Loader2, CheckCircle, ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen, MessageSquare } from 'lucide-react';
 import { downloadTranscriptPdf, examTranscript } from '../../transcript';
 import { typeNoun, typeNounLower } from '../../assignmentType';
-import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft } from '../../api/exam';
+import { startExamSession, submitAnswer, getSessionStatus, completeSession, getAssignmentCase, publishAssignment, discardDraft, getAnswerAudioUrl, uploadAnswerAudio, recordIntegrityEvent, type IntegrityEvent } from '../../api/exam';
 import type { CaseMaterial } from '../../api/exam';
 import { demoMeta, demoCase, demoStart, demoAnswer, demoComplete, demoTts } from '../../api/demo';
 import type { DemoAnswerResponse } from '../../api/demo';
@@ -423,6 +423,13 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   const demoToken = props.demoToken;
   const isDemo = !!demoToken;
   const navigate = useNavigate();
+  // Leaving the exam. An embedded host (the professor's dry-run overlay) owns the
+  // exit: routing a professor to /student/* bounces them to /login and strands
+  // the dry-run draft, so hand control back via onExit whenever it's provided.
+  const leaveExam = () => {
+    if (props.onExit) props.onExit();
+    else navigate('/student/dashboard');
+  };
 
   // Session state
   const [phase, setPhase] = useState<Phase>('loading');
@@ -461,6 +468,10 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // Voice: TTS (ElevenLabs proxy) speaks questions/probes; ASR (Web Speech API) dictates answers.
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const recognitionRef = useRef<{ stop: () => void; start: () => void } | null>(null);
+  // Phase B — per-answer audio capture (authenticated exams only, never demo).
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const spokenRef = useRef<string>('');
   // Org "text-first render" flag (from assignment meta): true = show probe immediately +
   // play TTS async; false = reveal probe text together with the audio. Kept in a ref so
@@ -542,6 +553,39 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     setSpeaking(false);
   }, []);
 
+  // Start capturing the answer audio alongside dictation (best-effort). Never in
+  // the demo (it states "nothing is saved"); silently no-ops if unsupported.
+  const startRecording = useCallback(async () => {
+    if (isDemo || typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+      audioChunksRef.current = [];
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mr.ondataavailable = (e) => { if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mediaRecorderRef.current = mr;
+      mr.start();
+    } catch { /* mic denied / unsupported — answer still works via text */ }
+  }, [isDemo]);
+
+  // Stop the recorder and resolve the assembled clip (or null if none).
+  const stopRecordingAndGetBlob = useCallback((): Promise<Blob | null> => {
+    const mr = mediaRecorderRef.current;
+    mediaRecorderRef.current = null;
+    const stream = audioStreamRef.current;
+    audioStreamRef.current = null;
+    const cleanup = () => { try { stream?.getTracks().forEach((t) => t.stop()); } catch { /* noop */ } };
+    if (!mr || mr.state === 'inactive') { cleanup(); return Promise.resolve(null); }
+    return new Promise((resolve) => {
+      mr.onstop = () => {
+        const chunks = audioChunksRef.current; audioChunksRef.current = [];
+        cleanup();
+        resolve(chunks.length ? new Blob(chunks, { type: 'audio/webm' }) : null);
+      };
+      try { mr.stop(); } catch { cleanup(); resolve(null); }
+    });
+  }, []);
+
   // Hard-stop the examiner's question audio (not paused — it won't resume).
   // Called on submit, exit, retake, and unmount so a question's TTS never keeps
   // playing after the student has left that question (issue S-E-4.5).
@@ -561,6 +605,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     // Student is taking the floor: cancel any question audio outright (not paused —
     // it won't resume), so the examiner's voice doesn't talk over the answer.
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    void startRecording();   // capture the spoken answer (non-demo, best-effort)
     const rec: any = new Ctor();
     rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
     // Anchor dictation to whatever is in the box *now*; a fresh recognizer per
@@ -624,7 +669,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // On a graded item the in-app EDS and the evaluator's remarks are drafts, not a
   // mark: they stay hidden until the professor releases a grade, so this screen
   // matches the Results page. Practice is exempt, and a professor preview sees all.
-  const showDraftScores = isPractice || preview;
+  // Demo speaking tests are a pure spoken experience: no EDS numbers, no concept
+  // map, no text box (see the render gates below). Practice/preview keep them.
+  const showDraftScores = (isPractice || preview) && !isDemo;
 
   // Auto-speak the latest examiner line (question or probe) as it appears.
   useEffect(() => {
@@ -812,6 +859,42 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     if (!ok) setPersistWarning(true);
   }, [assignmentId, sessionId, questions, qData, current, phase, startTime, durationMinutes, preview]);
 
+  // ── Exam integrity logging (detect-and-flag) ───────────────────────────────
+  // Authenticated exams only, during the attempt: report tab switches, window
+  // blur, paste/copy, context-menu, and fullscreen-exit so the professor can see
+  // them in GradeView. Detection only — a browser can't block other apps — and
+  // non-punitive. Each event type is throttled so a flurry counts once.
+  useEffect(() => {
+    if (preview || isDemo || !sessionId || phase !== 'taking') return;
+    const last: Record<string, number> = {};
+    const report = (event: IntegrityEvent) => {
+      const now = Date.now();
+      if (last[event] && now - last[event] < 2000) return;   // throttle per type
+      last[event] = now;
+      void recordIntegrityEvent(sessionId, event).catch(() => {});
+    };
+    const onVis = () => { if (document.hidden) report('tab_hidden'); };
+    const onBlur = () => report('window_blur');
+    const onPaste = () => report('paste');
+    const onCopy = () => report('copy');
+    const onCtx = () => report('context_menu');
+    const onFs = () => { if (!document.fullscreenElement) report('fullscreen_exit'); };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('blur', onBlur);
+    document.addEventListener('paste', onPaste);
+    document.addEventListener('copy', onCopy);
+    document.addEventListener('contextmenu', onCtx);
+    document.addEventListener('fullscreenchange', onFs);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('blur', onBlur);
+      document.removeEventListener('paste', onPaste);
+      document.removeEventListener('copy', onCopy);
+      document.removeEventListener('contextmenu', onCtx);
+      document.removeEventListener('fullscreenchange', onFs);
+    };
+  }, [preview, isDemo, sessionId, phase]);
+
   // ── Countdown timer ────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -877,22 +960,48 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
   // ── Submit answer mutation ─────────────────────────────────────────────────
 
   const answerMutation = useMutation({
-    mutationFn: async ({ questionIndex, text }: { questionIndex: number; text: string }) => {
+    mutationFn: async ({ questionIndex, text, audioKey }: { questionIndex: number; text: string; audioKey?: string }) => {
       if (!sessionId) throw new Error('No session');
       return isDemo ? demoAnswer(demoToken!, sessionId, questionIndex, text)
-                    : submitAnswer(sessionId, questionIndex, text);
+                    : submitAnswer(sessionId, questionIndex, text, audioKey);
     },
     onSuccess: (data: AnswerResponse, variables) => {
       const { questionIndex } = variables;
+
+      // ── Stress fallback: the backend swapped in an easier backup question for
+      //    this slot. Replace the question in place, reset its conversation, and
+      //    narrate the reassurance + new question. No score is committed here.
+      if (data.replacement_question) {
+        const rq = data.replacement_question;
+        const reassure = data.probe || "No problem — let's try a different question.";
+        setQuestions((prev) => prev.map((q, i) =>
+          i === questionIndex ? { ...q, text: rq.text, topic: rq.topic } : q));
+        setQData((prev) => prev.map((q, i) => i === questionIndex ? {
+          ...q,
+          turns: [...q.turns,
+            { role: 'evaluator' as const, text: reassure },
+            { role: 'evaluator' as const, text: `Question ${questionIndex + 1}. ${rq.text}` }],
+          attempts: 0, attempted: false, done: false, score: 0, edsComponents: null,
+        } : q));
+        setDraft('');
+        spokenRef.current = '';   // let the auto-speak narrate the new question
+        scrollBottom();
+        return;
+      }
+
       const attempt = (qData[questionIndex]?.attempts || 0) + 1;
       const maxed = attempt >= MAX_TURNS;
-      const advance = maxed;
+      // Advance on the turn cap OR when the backend decides the student is stuck
+      // repeating the same answer and we should move on.
+      const advance = maxed || !!data.move_on;
 
       // Show the student ONLY the examiner's spoken probe. `feedback` is an internal
       // grader assessment (used for scoring/professor review), never surfaced here.
       let bubble: string;
       if (advance) {
-        bubble = 'Answer recorded.';
+        // On a move-on, speak the examiner's actual move-on line; on the plain
+        // turn cap, the neutral "recorded" acknowledgement.
+        bubble = data.move_on ? (data.probe || 'Let’s move on.') : 'Answer recorded.';
       } else {
         bubble = data.probe || 'Could you say more about your reasoning?';
       }
@@ -929,6 +1038,11 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           setLitEdges((prev) => { const s = new Set(prev); (g.edges_detected || []).forEach((e) => s.add(`${e.src}|${e.dst}`)); return Array.from(s); });
         }
         scrollBottom();
+        // On a stuck move-on, gently advance to the next question after the
+        // examiner's line has been shown (and had a beat to narrate).
+        if (data.move_on && questionIndex < N - 1) {
+          setTimeout(() => goTo(questionIndex + 1), 1400);
+        }
       };
 
       const canTts = ttsOn && ttsAvailable;
@@ -964,6 +1078,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     if (!draft.trim() || answerMutation.isPending || timerExpired) return;
     const studentText = draft.trim();
     stopMic();          // end dictation so it can't spill into the next turn
+    const subTurn = qData[current]?.attempts || 0;
     setDraft('');
 
     // Append student message immediately
@@ -976,8 +1091,22 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
     );
     scrollBottom();
 
-    answerMutation.mutate({ questionIndex: current, text: studentText });
-  }, [draft, current, answerMutation, scrollBottom, timerExpired, stopMic]);
+    // Capture + upload the spoken answer (best-effort, never blocks grading),
+    // then submit with the audio key so the professor can re-listen.
+    void (async () => {
+      let audioKey: string | undefined;
+      try {
+        const blob = await stopRecordingAndGetBlob();
+        if (!isDemo && sessionId && blob && blob.size > 0) {
+          const { upload_url, audio_key } = await getAnswerAudioUrl(sessionId, current, subTurn);
+          void uploadAnswerAudio(upload_url, blob).catch(() => {}); // fire-and-forget
+          audioKey = audio_key;
+        }
+      } catch { /* audio is best-effort; answer must still submit */ }
+      answerMutation.mutate({ questionIndex: current, text: studentText, audioKey });
+    })();
+  }, [draft, current, answerMutation, scrollBottom, timerExpired, stopMic,
+      qData, isDemo, sessionId, stopRecordingAndGetBlob]);
 
   // ── Keyboard shortcut ──────────────────────────────────────────────────────
 
@@ -1029,7 +1158,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           <h2 className="text-lg font-heading text-ink mb-2">Unable to Start {typeLabel}</h2>
           <p className="text-sm text-muted mb-4">{error}</p>
           <button
-            onClick={() => navigate('/student/dashboard')}
+            onClick={leaveExam}
             className="px-4 py-2 bg-navy text-white rounded-lg text-sm font-medium hover:bg-navy-light"
           >
             Return to Dashboard
@@ -1072,6 +1201,14 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           <p className="text-sm text-muted mt-1">
             The timer starts only when you press <span className="font-medium text-ink-light">Start {typeLabel}</span>.
           </p>
+        </div>
+
+        {/* Follow-up explainer (U5) — sets the expectation that each question is a
+            short back-and-forth, not a one-shot answer. Brand-token styled to
+            match the reskinned exam UI. */}
+        <div className="flex items-start gap-2.5 bg-gold/10 border border-gold/30 rounded-xl px-4 py-3 mb-5 text-sm text-ink">
+          <MessageSquare className="w-4 h-4 mt-0.5 flex-shrink-0 text-gold" />
+          <span>Each question is a short conversation — the examiner may ask a few follow-up questions before moving on.</span>
         </div>
 
         {/* At a glance */}
@@ -1124,6 +1261,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Answer by voice (microphone) or by typing — your choice, and you can switch anytime.</li>
             <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Your progress auto-saves; if you refresh, you'll resume where you left off.</li>
             <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> Keep this {typeLower} open in a single browser tab.</li>
+            {!isDemo && (
+              <li className="flex gap-2"><CheckCircle className="w-4 h-4 text-success mt-0.5 flex-shrink-0" /> When you answer by voice, your spoken answers are recorded so your instructor can review them. Recordings are kept for 30 days.</li>
+            )}
           </ul>
         </div>
 
@@ -1186,7 +1326,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
           {starting ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</> : `Start ${typeLabel} →`}
         </button>
         <button
-          onClick={() => navigate('/student/dashboard')}
+          onClick={leaveExam}
           className="w-full mt-2 py-2 text-sm text-muted hover:text-ink-light transition-colors"
         >
           Back to dashboard
@@ -1389,7 +1529,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 </button>
               )}
               <button
-                onClick={() => navigate('/student/dashboard')}
+                onClick={leaveExam}
                 className={`px-5 py-2 rounded-lg text-sm font-medium ${isPractice ? 'border border-border text-ink-light hover:bg-parchment/60' : 'bg-navy text-white hover:bg-navy-light'}`}
               >
                 <ChevronLeft className="w-4 h-4 inline -mt-0.5 mr-1" />
@@ -1448,7 +1588,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             </div>
           )}
           <button
-            onClick={() => navigate('/student/dashboard')}
+            onClick={leaveExam}
             className="px-3 py-1.5 bg-white/10 text-white rounded-lg text-sm hover:bg-white/20"
           >
             <ChevronLeft className="w-4 h-4 inline -mt-0.5" /> <span className="hidden sm:inline">Back</span>
@@ -1478,8 +1618,17 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
 
       {/* Question navigation grid */}
       <div className="bg-white border-x border-border px-3 sm:px-5 py-3">
-        <div className="flex justify-between text-xs text-muted mb-2">
-          <span>Question {current + 1} of {N}</span>
+        {/* U4 — two distinct progress counters, kept visually separate so they
+            aren't confused: the assignment-level question position (left) vs. the
+            follow-up turn within THIS question's conversation (middle). */}
+        <div className="flex items-center justify-between gap-2 text-xs text-muted mb-2">
+          <span className="font-medium text-ink-light">Question {current + 1} of {N}</span>
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gold/10 text-gold font-medium"
+            title="Follow-up turns within this question's conversation"
+          >
+            <MessageSquare className="w-3 h-3" /> Turn {Math.min((cur?.attempts || 0) + 1, MAX_TURNS)} of {MAX_TURNS}
+          </span>
           <span>{attemptedCount} answered &middot; {N - attemptedCount} remaining</span>
         </div>
         <div className="flex gap-1.5 flex-wrap">
@@ -1561,16 +1710,24 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
             </div>
           ) : (
             <div className="mb-3">
-              <textarea
-                ref={textareaRef}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Answer the question above... (Cmd+Enter to submit)"
-                disabled={answerMutation.isPending}
-                rows={3}
-                className="w-full px-4 py-3 border border-border rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-gold focus:border-transparent disabled:opacity-50 disabled:bg-parchment/60"
-              />
+              {/* Demo speaking tests are voice-only — the typed-answer box is
+                  hidden; the mic dictates into the (unseen) draft and submits. */}
+              {!isDemo ? (
+                <textarea
+                  ref={textareaRef}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Answer the question above... (Cmd+Enter to submit)"
+                  disabled={answerMutation.isPending}
+                  rows={3}
+                  className="w-full px-4 py-3 border border-border rounded-xl text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-gold focus:border-transparent disabled:opacity-50 disabled:bg-parchment/60"
+                />
+              ) : (
+                <div className="text-center text-sm text-muted py-2">
+                  {listening ? 'Listening — speak your answer…' : 'Tap the mic and speak your answer.'}
+                </div>
+              )}
               <div className="flex gap-2 mt-2">
                 <button
                   onClick={toggleMic}
@@ -1698,7 +1855,7 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
                 {questions[current]?.topic || `Question ${current + 1}`}
               </p>
               <p className="text-xs text-muted mt-1">
-                {cur?.attempts || 0} / {MAX_TURNS} turns used
+                Turn {Math.min((cur?.attempts || 0) + 1, MAX_TURNS)} of {MAX_TURNS} in this conversation
               </p>
             </div>
           </div>
@@ -1707,8 +1864,9 @@ export default function TakeExam(props: { assignmentId?: string; preview?: boole
               so it can't be used as a scaffold on the real assessment. Once the
               answer flow is feeding the live graph (demo), show the "watch it think"
               panel: concepts ignite and causal links draw as they're demonstrated.
-              Otherwise fall back to the static topic-coverage map. */}
-          {isPractice && (
+              Otherwise fall back to the static topic-coverage map.
+              Hidden entirely on demo speaking tests (voice-only, no scaffold). */}
+          {isPractice && !isDemo && (
             <div className="border border-border rounded-xl mt-3 p-3">
               <p className="text-[10px] font-bold uppercase tracking-wide text-muted mb-2 text-center">
                 {graphNodes.length > 0 ? 'Your understanding, live' : 'Concept Map'}

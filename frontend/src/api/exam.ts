@@ -28,6 +28,13 @@ export interface AnswerResponse {
   eds_delta: number;
   eds_question?: number;
   eds_components?: EDSComponents;
+  // Examiner gave up probing a stuck question (repeated answer) → advance.
+  move_on?: boolean;
+  // Student signalled stress → swap in an easier backup question in place.
+  stressed?: boolean;
+  replacement_question?: { text: string; topic: string; concept_id: string };
+  // Examiner flagged this answer as a likely speech-to-text error (for review).
+  transcription_suspect?: boolean;
 }
 
 export interface SessionStatus {
@@ -79,11 +86,42 @@ export async function submitAnswer(
   sessionId: string,
   questionIndex: number,
   answerText: string,
+  audioKey?: string,
 ): Promise<AnswerResponse> {
   return post<AnswerResponse>(`/api/sessions/${sessionId}/answer`, {
     question_index: questionIndex,
     answer_text: answerText,
+    ...(audioKey ? { audio_key: audioKey } : {}),
   });
+}
+
+// Phase B — answer audio. Mint a presigned PUT, upload the recorded clip, and
+// (professor) fetch a presigned URL to re-listen. Authenticated exams only.
+export async function getAnswerAudioUrl(
+  sessionId: string, questionIndex: number, subTurnIndex: number,
+): Promise<{ upload_url: string; audio_key: string }> {
+  return post(`/api/sessions/${sessionId}/answer-audio-url`, {
+    question_index: questionIndex, sub_turn_index: subTurnIndex,
+  });
+}
+
+export async function uploadAnswerAudio(uploadUrl: string, blob: Blob): Promise<void> {
+  const res = await fetch(uploadUrl, {
+    method: 'PUT', headers: { 'Content-Type': 'audio/webm' }, body: blob,
+  });
+  if (!res.ok) throw new Error(`audio upload failed (${res.status})`);
+}
+
+export async function getTurnAudio(turnId: string): Promise<{ status: string; url: string | null }> {
+  return get(`/api/turns/${turnId}/audio`);
+}
+
+// Report a client-side integrity event (tab switch, paste, …) during an exam.
+// Detection only + non-punitive; fire-and-forget from the caller.
+export type IntegrityEvent =
+  | 'tab_hidden' | 'window_blur' | 'paste' | 'copy' | 'context_menu' | 'fullscreen_exit';
+export async function recordIntegrityEvent(sessionId: string, event: IntegrityEvent): Promise<void> {
+  await post(`/api/sessions/${sessionId}/integrity`, { event });
 }
 
 export async function getSessionStatus(sessionId: string): Promise<SessionStatus> {
@@ -196,6 +234,17 @@ export async function assignExam(
   body: { title: string; questions: ExamVariantQuestion[]; difficulty: string; duration_minutes?: number; assignment_type?: AssignmentType; include_case?: boolean; session_id?: string; scope_concepts?: string[]; draft?: boolean },
 ): Promise<AssignExamResult> {
   return post<AssignExamResult>(`/api/courses/${courseId}/exams/assign`, body);
+}
+
+// Edit an existing assignment in place, preserving its id (continued-draft /
+// edit-assignment flows). Status is unchanged server-side; the caller flips a
+// draft to active with publishAssignment afterward. Returns status 'error' with
+// code 'has_attempts' if a real student has already started it.
+export async function updateAssignment(
+  assignmentId: string,
+  body: { title: string; questions: ExamVariantQuestion[]; difficulty: string; duration_minutes?: number; assignment_type?: AssignmentType; include_case?: boolean; session_id?: string; scope_concepts?: string[] },
+): Promise<AssignExamResult & { code?: string }> {
+  return post<AssignExamResult & { code?: string }>(`/api/assignments/${assignmentId}/update`, body);
 }
 
 export async function publishAssignment(assignmentId: string): Promise<{ status: string; assignment_id: string }> {

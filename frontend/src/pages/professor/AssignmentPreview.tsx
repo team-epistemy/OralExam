@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen, Eye, Loader2, AlertTriangle } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Clock, Mic, Volume2, VolumeX, BookOpen, Eye, Loader2, AlertTriangle, Pencil, Settings, LogOut } from 'lucide-react';
 import { getAssignmentPreview } from '../../api/exam';
 import { API_BASE_URL } from '../../config';
 import DocumentViewerModal from '../../components/DocumentViewerModal';
@@ -29,7 +29,26 @@ function speakable(text: string): string {
 export default function AssignmentPreview() {
   const { assignmentId } = useParams<{ assignmentId: string }>();
   const navigate = useNavigate();
-  const [current, setCurrent] = useState(0);
+  const location = useLocation();
+  // Optional context passed by the launching screen (e.g. the course's
+  // Assignments tab) so "Exit preview" returns there instead of relying on
+  // browser-back, and "Edit assignment" opens the editor with course context.
+  const navState = (location.state || {}) as { backTo?: string; editTo?: string };
+  // Remember the previewed question across an edit round-trip (S3): persist the
+  // index per assignment and restore it on mount so you land where you left off.
+  const posKey = `preview-pos-${assignmentId || ''}`;
+  const [current, setCurrent] = useState(() => {
+    const saved = Number(sessionStorage.getItem(posKey));
+    return Number.isFinite(saved) && saved > 0 ? saved : 0;
+  });
+  useEffect(() => { sessionStorage.setItem(posKey, String(current)); }, [current, posKey]);
+
+  // Where to go when leaving/editing. Falls back sensibly when launched without
+  // navigation state (e.g. a direct link).
+  const exitPreview = () => { navState.backTo ? navigate(navState.backTo) : navigate(-1); };
+  const editAssignment = () => {
+    navigate(navState.editTo || `/professor/assignments/new?draft=${assignmentId}`);
+  };
   const [caseViewIdx, setCaseViewIdx] = useState<number | null>(null);
   const [ttsOn, setTtsOn] = useState(false);
   const [ttsAvailable, setTtsAvailable] = useState(true);
@@ -124,9 +143,22 @@ export default function AssignmentPreview() {
           <span className="font-medium"> “{data.title}”</span>. Answering, the timer, and grading are disabled.
           Audio narration is off by default; turn it on to hear a question.
         </span>
-        <button onClick={() => navigate(-1)} className="px-3 py-1 border border-purple-300 rounded-lg hover:bg-purple-100 text-purple-700 whitespace-nowrap">
-          Close preview
-        </button>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <button
+            onClick={editAssignment}
+            title="Open this assignment in the editor to change its questions or settings"
+            className="inline-flex items-center gap-1.5 px-3 py-1 border border-purple-300 rounded-lg hover:bg-purple-100 text-purple-700 whitespace-nowrap"
+          >
+            <Settings className="w-3.5 h-3.5" /> Edit assignment
+          </button>
+          <button
+            onClick={exitPreview}
+            title="Leave the preview and return to the assignment"
+            className="inline-flex items-center gap-1.5 px-3 py-1 border border-purple-300 rounded-lg hover:bg-purple-100 text-purple-700 whitespace-nowrap"
+          >
+            <LogOut className="w-3.5 h-3.5" /> Exit preview
+          </button>
+        </div>
       </div>
 
       {/* Header bar — mirrors TakeExam taking-phase header */}
@@ -152,10 +184,10 @@ export default function AssignmentPreview() {
             <Clock className="w-4 h-4" /> {durationLabel}
           </div>
           <button
-            onClick={() => navigate(-1)}
+            onClick={exitPreview}
             className="px-3 py-1.5 bg-white/10 text-white rounded-lg text-sm hover:bg-white/20"
           >
-            <ChevronLeft className="w-4 h-4 inline -mt-0.5" /> Back
+            <ChevronLeft className="w-4 h-4 inline -mt-0.5" /> Exit
           </button>
           <button
             disabled
@@ -213,6 +245,15 @@ export default function AssignmentPreview() {
               </div>
             ) : (
               <p className="text-sm text-gray-400">This assignment has no questions.</p>
+            )}
+            {q && (
+              <button
+                onClick={editAssignment}
+                title="Edit this question in the assignment editor"
+                className="inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-700 hover:underline"
+              >
+                <Pencil className="w-3.5 h-3.5" /> Edit this question
+              </button>
             )}
           </div>
 

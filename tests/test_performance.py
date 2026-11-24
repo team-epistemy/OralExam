@@ -45,6 +45,19 @@ def test_topic_coverage_and_labels():
     assert ct["avg_score"] == 0.6
 
 
+def test_topic_named_vs_mastered_split():
+    # NAMED = node_score >= bar; MASTERED = compute_eds(node,edge) >= bar.
+    # littles-law: s1 eds=0.4*0.9+0.6*0.8=0.84 (>=bar), s2 eds=0.4*0.4+0.6*0.1=0.22 (<bar)
+    # cycle-time:  s1 eds=0.4*0.6+0.6*0.2=0.36 (<bar)
+    out = aggregate_performance(ROWS, LABELS, bar=0.5)
+    ll = _topic(out, "Little's Law")
+    assert ll["pct_named"] == 0.5 and ll["pct_mastered"] == 0.5
+    assert ll["avg_named"] == 0.65 and ll["avg_mastered"] == 0.53   # (0.84+0.22)/2
+    ct = _topic(out, "Cycle Time")
+    assert ct["pct_named"] == 0.5 and ct["pct_mastered"] == 0.0     # named yes, not mastered
+    assert ct["avg_mastered"] == 0.36
+
+
 def test_empty_rows_yield_zeroed_stats():
     out = aggregate_performance([], LABELS)
     assert out["practice_takers"] == 0

@@ -190,6 +190,24 @@ def migrate() -> None:
             print(f"applying {migration_026.name} ...")
             cur.execute(migration_026.read_text())
 
+        # Always apply migration_027 (exam_session.question_overrides; idempotent)
+        migration_027 = db_dir / "migration_027_session_overrides.sql"
+        if migration_027.exists():
+            print(f"applying {migration_027.name} ...")
+            cur.execute(migration_027.read_text())
+
+        # Always apply migration_028 (session_turn.audio_key; idempotent)
+        migration_028 = db_dir / "migration_028_turn_audio.sql"
+        if migration_028.exists():
+            print(f"applying {migration_028.name} ...")
+            cur.execute(migration_028.read_text())
+
+        # Always apply migration_029 (exam_session.integrity_flags; idempotent)
+        migration_029 = db_dir / "migration_029_integrity_flags.sql"
+        if migration_029.exists():
+            print(f"applying {migration_029.name} ...")
+            cur.execute(migration_029.read_text())
+
     conn.commit()
     print("all schemas applied")
 
@@ -251,11 +269,30 @@ def smoke() -> None:
     smoke_test.run(load_settings())
 
 
+def seed_cohort() -> None:
+    """Seed N synthetic students against a real assignment (demo/test data).
+
+    Usage: seed-cohort <course_name> <assignment_title> [n=10] [curve=bell] [domain]
+    """
+    from backend.app import seed_cohort as sc
+    args = sys.argv[2:]
+    if len(args) < 2:
+        print("usage: seed-cohort <course_name> <assignment_title> [n] [curve] [domain] [max_followups]")
+        return
+    course, title = args[0], args[1]
+    n = int(args[2]) if len(args) > 2 else 10
+    curve = args[3] if len(args) > 3 else "bell"
+    domain = args[4] if len(args) > 4 else "columbia.demo"
+    max_followups = int(args[5]) if len(args) > 5 else 1
+    sc.run(course, title, n=n, curve=curve, domain=domain, max_followups=max_followups)
+
+
 def main() -> None:
     """Dispatch on the first CLI argument."""
     command = sys.argv[1] if len(sys.argv) > 1 else "serve"
     {"serve": serve, "worker": worker, "migrate": migrate,
-     "clean": clean, "bootstrap": bootstrap, "smoke": smoke}.get(command, serve)()
+     "clean": clean, "bootstrap": bootstrap, "smoke": smoke,
+     "seed-cohort": seed_cohort}.get(command, serve)()
 
 
 if __name__ == "__main__":
