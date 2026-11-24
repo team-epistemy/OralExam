@@ -147,61 +147,15 @@ EXAMINER_EVAL_TEMPLATE = (
 )
 
 
-# When a student keeps giving the same answer, nudge the examiner to reword the
-# question instead of probing deeper (pilot: Matteo repeated "time value of money"
-# ~3x and the examiner kept digging). Threaded into the prompt builders' probe_directive.
-_STUCK_REPHRASE_DIRECTIVE = (
-    "IMPORTANT: the student has repeated essentially the same answer and seems stuck. "
-    "Do NOT probe deeper or ask for more detail. Instead, REPHRASE the original question "
-    "in simpler, different words — a fresh angle to unstick them — as the probe."
+# Follow-up detection helpers live in an import-light module (followup.py) so the
+# unit tests can exercise them without importing fastapi. Re-exported here under
+# the names the rest of this module already uses.
+from backend.app.followup import (  # noqa: E402
+    STUCK_REPHRASE_DIRECTIVE as _STUCK_REPHRASE_DIRECTIVE,
+    MOVE_ON_LINE as _MOVE_ON_LINE,
+    count_trailing_repeats as _count_trailing_repeats,
+    looks_stressed as _looks_stressed,
 )
-
-# Spoken line when the examiner gives up probing a stuck question and advances.
-_MOVE_ON_LINE = "That's alright — let's move on to the next question."
-
-# Phrases that signal distress / inability to continue, as a deterministic fallback
-# so the stress path fires even if the model misses it or on the heuristic eval path.
-_STRESS_PHRASES = (
-    "i'm stressed", "i am stressed", "im stressed", "i'm so stressed",
-    "i don't know this", "i dont know this", "i don't know any of this",
-    "i can't do this", "i cant do this", "i give up", "i can't think",
-    "can we skip", "can i skip", "please skip", "too hard", "this is too hard",
-    "i'm panicking", "i am panicking", "i'm freaking out", "i'm overwhelmed",
-)
-
-
-def _normalize_answer(text):
-    """Lowercase + collapse whitespace for similarity/keyword comparison."""
-    import re as _re
-    return _re.sub(r"\s+", " ", (text or "").strip().lower())
-
-
-def _count_trailing_repeats(prior_answers, answer_text, threshold=0.82):
-    """How many of the immediately-preceding answers are ~the same as this one.
-
-    Walks backward through ``prior_answers`` (oldest→newest list of the student's
-    earlier answers on THIS question) counting consecutive entries whose
-    SequenceMatcher ratio against the current answer is >= threshold. 0 = this
-    answer is novel; 1 = one prior near-duplicate (2nd time saying it); etc.
-    """
-    import difflib as _difflib
-    cur = _normalize_answer(answer_text)
-    if not cur:
-        return 0
-    n = 0
-    for prev in reversed(prior_answers or []):
-        p = _normalize_answer(prev)
-        if p and _difflib.SequenceMatcher(None, cur, p).ratio() >= threshold:
-            n += 1
-        else:
-            break
-    return n
-
-
-def _looks_stressed(text):
-    """True if the answer plainly expresses distress / inability to continue."""
-    t = _normalize_answer(text)
-    return any(phrase in t for phrase in _STRESS_PHRASES)
 
 
 def build_examiner_eval_prompt(repo, org_id, question_text, expected_path,

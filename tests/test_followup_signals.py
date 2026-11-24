@@ -1,8 +1,10 @@
-"""Unit tests for the stuck-answer + stress-fallback detection helpers."""
-import os
-os.environ.setdefault("EPISTEMY_ACCOUNT", "000000000000")
-os.environ.setdefault("AWS_REGION", "us-west-2")
-from backend.app.http_app import _count_trailing_repeats, _looks_stressed  # noqa: E402
+"""Unit tests for the stuck-answer + stress-fallback detection helpers.
+
+Imports from the import-light backend.app.followup module (NOT http_app) so the
+suite collects without fastapi — matching how CI installs only the lean deps.
+"""
+from backend.app.followup import count_trailing_repeats as _count_trailing_repeats
+from backend.app.followup import looks_stressed as _looks_stressed
 
 
 def test_repeats_novel_answer_is_zero():
