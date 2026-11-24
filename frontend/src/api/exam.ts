@@ -16,8 +16,8 @@ export interface StartExamResponse {
 export interface EDSComponents {
   node_score: number;
   edge_score: number;
-  r_gate: number;
   gen_score: number;
+  r_gate?: number;  // legacy authenticity signal; no longer in the rubric or score
 }
 
 export interface AnswerResponse {

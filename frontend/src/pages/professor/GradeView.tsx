@@ -362,7 +362,6 @@ function SessionDetail({
                       )}
                       {ev.components && (
                         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-400">
-                          {ev.components.recitation_gate != null && <span>authenticity R={ev.components.recitation_gate.toFixed(2)}</span>}
                           {ev.components.node_coverage != null && <span>concepts {Math.round(ev.components.node_coverage * 100)}%</span>}
                           {ev.components.edge_coverage != null && <span>causal links {Math.round(ev.components.edge_coverage * 100)}%</span>}
                         </div>

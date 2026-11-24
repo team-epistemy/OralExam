@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, ChevronDown, ChevronRight, BarChart3, BookOpen } from 'lucide-react';
+import { FileText, Network, ClipboardList, Upload, Trash2, AlertTriangle, Eye, Loader2, Users, Copy, Check, Save, KeyRound, ChevronLeft, ChevronDown, ChevronRight, BarChart3, BookOpen, Share2 } from 'lucide-react';
 import { get, post, put, del } from '../../api/client';
 import type { Material } from '../../api/materials';
 import { listMaterials } from '../../api/materials';
@@ -17,6 +17,8 @@ const ConceptGraphCanvas = lazy(() => import('../../components/ConceptGraphCanva
 import type { Assignment } from '../../api/assignments';
 import { listAssignments } from '../../api/assignments';
 import StatusBadge from '../../components/StatusBadge';
+import DemoLinkModal from '../../components/DemoLinkModal';
+import { createAssignmentDemoLink, type DemoLinkCreated } from '../../api/demo';
 
 interface Course {
   id: string;
@@ -669,6 +671,18 @@ function AssignmentsTab({ assignments, courseId, courseName, materials, syllabus
   materials: Material[]; syllabus?: Syllabus | null;
   queryClient: ReturnType<typeof useQueryClient>;
 }) {
+  // Mint a credential-free demo link for a published assignment, then show it in a modal.
+  const [demoLink, setDemoLink] = useState<(DemoLinkCreated & { title?: string }) | null>(null);
+  const mint = useMutation({
+    mutationFn: (a: Assignment) =>
+      createAssignmentDemoLink((a as any).assignment_id || (a as any).id).then((r) => ({ ...r, title: r.title || (a as any).title })),
+    onSuccess: (r) => {
+      if (r.status === 'error') { alert(r.message || 'Could not create a demo link.'); return; }
+      setDemoLink(r);
+    },
+    onError: (e: Error) => alert(e.message || 'Could not create a demo link.'),
+  });
+
   const handleClose = async (assignmentId: string) => {
     if (!confirm('Close this assignment? Students will no longer be able to start new exams.')) return;
     try {
@@ -753,6 +767,19 @@ function AssignmentsTab({ assignments, courseId, courseName, materials, syllabus
               </Link>
               {(a.status === 'active') && (
                 <button
+                  onClick={() => mint.mutate(a)}
+                  disabled={mint.isPending}
+                  title="Create a credential-free demo link"
+                  className="inline-flex items-center gap-1 text-xs px-3 py-1 border border-amber-300 text-amber-600 rounded-lg hover:bg-amber-500 hover:text-white hover:border-amber-500 disabled:opacity-50 transition-colors"
+                >
+                  {mint.isPending && (mint.variables as any)?.assignment_id === (a.assignment_id || a.id)
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <Share2 className="w-3.5 h-3.5" />}
+                  Share as demo
+                </button>
+              )}
+              {(a.status === 'active') && (
+                <button
                   onClick={() => handleClose(a.assignment_id || a.id)}
                   className="text-xs px-3 py-1 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
                 >
@@ -771,6 +798,8 @@ function AssignmentsTab({ assignments, courseId, courseName, materials, syllabus
         </div>
       )}
       </section>
+
+      {demoLink && <DemoLinkModal link={demoLink} onClose={() => setDemoLink(null)} />}
     </div>
   );
 }
@@ -1026,7 +1055,7 @@ function StudentsTab({ courseId }: { courseId: string }) {
 // ── Performance tab: anonymized class practice analytics ─────────────────────
 const _pct = (x: number) => `${Math.round((x || 0) * 100)}%`;
 const ASPECT_COLOR: Record<string, string> = {
-  recall: 'bg-blue-500', application: 'bg-purple-500', depth: 'bg-amber-500', authenticity: 'bg-green-500',
+  recall: 'bg-blue-500', application: 'bg-purple-500', depth: 'bg-amber-500',
 };
 
 function PerformanceTab({ courseId }: { courseId: string }) {
@@ -1105,8 +1134,7 @@ function PerformanceTab({ courseId }: { courseId: string }) {
       <p className="text-xs text-gray-400 leading-relaxed">
         Aspects reflect the reasoning captured per answer: <span className="font-medium">Recall</span> = concepts named,
         <span className="font-medium"> Application</span> = causal links / case scenarios,
-        <span className="font-medium"> In-depth</span> = novel insight,
-        <span className="font-medium"> Authenticity</span> = genuine reasoning. Mastery bar = {_pct(data.bar)}. All figures
+        <span className="font-medium"> In-depth</span> = novel insight. Mastery bar = {_pct(data.bar)}. All figures
         are aggregated across students — no individual results are shown.
       </p>
     </div>

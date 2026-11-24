@@ -128,7 +128,6 @@ function QuestionDetail({ pq }: { pq: SimPerQuestion }) {
             <div>
               node coverage <b className="text-gray-700">{b.node_score}</b> ·
               edge coverage <b className="text-gray-700">{b.edge_score}</b> ·
-              authenticity R <b className="text-gray-700">{b.authenticity_R}</b> ·
               generativity <b className="text-gray-700">{b.generativity}</b>
             </div>
             {(b.edges_demonstrated?.length ?? 0) > 0 && (
